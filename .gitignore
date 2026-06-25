@@ -1,0 +1,24 @@
+# Rust build output
+/target
+
+# rustfmt backups
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# Scratch / local notes (keep the repo clean)
+/scratch
+*.local
+
+# External / non-source artifacts (product docs, exports — not part of the codebase)
+*.docx
+*.doc
+*.pdf
+*.pages
+
+# Local tooling / assistant config (keep out of the shared repo)
+.claude/
+CLAUDE.md
+
+# NOTE: Cargo.lock IS committed — GLIMPS ships as a binary, so we pin exact deps.

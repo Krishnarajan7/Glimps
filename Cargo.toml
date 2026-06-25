@@ -1,0 +1,37 @@
+[package]
+name = "glimps"
+version = "0.0.1"
+edition = "2021"
+description = "Zero-config smart terminal output formatter — auto-detects and reformats JSON, HTML, and logs live in your shell."
+license = "MIT"
+repository = "https://github.com/glimps-sh/glimps"
+readme = "README.md"
+keywords = ["terminal", "pty", "formatter", "json", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "glimps"
+path = "src/main.rs"
+
+[dependencies]
+# PTY supervision — the core of the whole tool. Lets us run the user's shell
+# inside a pseudo-terminal so we can see (and reformat) all output, while
+# interactive programs (vim/ssh/htop) still think they have a real terminal.
+portable-pty = "0.8"
+
+# Raw mode + terminal size on the controlling terminal.
+crossterm = "0.28"
+
+# SIGWINCH handling so the inner PTY resizes when the window does.
+signal-hook = "0.3"
+
+# Ergonomic error handling for the spike.
+anyhow = "1"
+
+[profile.release]
+# Optimize for a small, fast single binary (distribution goal).
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
