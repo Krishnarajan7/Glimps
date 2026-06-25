@@ -74,9 +74,19 @@ pub fn run_shell(shell: &str) -> Result<i32> {
                 Err(_) => break,
             }
         }
+        // The master closed while the formatter may still be holding a buffered
+        // command output that never got an OSC-133 `D` marker (shell crash, SSH
+        // drop, …). Flush it so those bytes are never silently truncated.
+        let tail = formatter.flush();
+        if !tail.is_empty() {
+            let _ = stdout.write_all(&tail);
+            let _ = stdout.flush();
+        }
     });
 
-    // Job #1: stdin -> PTY
+    // Job #1: stdin -> PTY. Detached on purpose: this thread blocks in
+    // `stdin.read()` and is reclaimed by `process::exit` when the shell exits.
+    // (The reader thread, by contrast, is joined below so it can drain.)
     let mut writer = pair.master.take_writer()?;
     thread::spawn(move || {
         let mut stdin = std::io::stdin();

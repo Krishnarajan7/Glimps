@@ -13,12 +13,13 @@ Goal: **you can tell input from output, and long JSON/HTML is readable.** Mac + 
 This is the version that fixes the problem you started with.
 
 - ☑ Phase 0 spike: transparent PTY supervisor (shell runs inside GLIMPS, feels native)
-- ☐ OSC-133 prompt markers + detection → know where command OUTPUT starts/ends
+- ◐ OSC-133 prompt markers + detection → know where command OUTPUT starts/ends
+      (detection: zone scanner done; marker *emission* waits on `glimps init zsh`)
 - ☐ Command/output **separator line + timestamp** (the core fix for input-vs-output)
 - ☐ Content-type **badge** (`[JSON]` / `[HTML]` / `[LOG]`)
-- ☐ JSON detect + pretty-print (colored keys/values)
+- ☑ JSON detect + pretty-print (colored keys/values)
 - ☐ HTML detect + indentation
-- ☐ `GLIMPS=0` off-switch
+- ☑ `GLIMPS=0` off-switch
 - ☐ `glimps init zsh` one-line enable
 
 Exit criteria: you use it daily for a week without turning it off.

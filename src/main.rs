@@ -10,11 +10,8 @@
 //! Run it, use your shell normally (try vim, ssh, ls, curl), and confirm it
 //! feels indistinguishable from a normal terminal. That's the gate.
 
-mod format;
-mod pty;
-mod terminal;
-
 use anyhow::Result;
+use glimps::pty;
 
 fn main() -> Result<()> {
     // Guard against re-exec loops: if we're already inside a GLIMPS PTY,

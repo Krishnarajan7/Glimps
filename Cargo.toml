@@ -28,6 +28,25 @@ signal-hook = "0.3"
 # Ergonomic error handling for the spike.
 anyhow = "1"
 
+# JSON parsing for the first formatter (detect-by-parse + pretty-print), exactly
+# as called for in GLIMPS-PLAN §4. `preserve_order` keeps object keys in their
+# original order so we never silently reorder the user's data — a trust
+# requirement for a tool that reformats output.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+# Property-based testing. The charter mandates a property test proving every
+# transform is panic-free and byte-safe on arbitrary input; proptest is the
+# standard, well-known crate for that. Dev-only — never ships in the binary.
+proptest = "1"
+
+# Latency-budget benchmarks for detectors/formatters (GLIMPS-PLAN §4 / DoD).
+criterion = "0.5"
+
+[[bench]]
+name = "format"
+harness = false
+
 [profile.release]
 # Optimize for a small, fast single binary (distribution goal).
 opt-level = 3

@@ -4,42 +4,482 @@
 //! PTY supervisor (src/pty.rs) feeds it raw byte chunks from the shell, and it
 //! returns the bytes to actually write to the screen.
 //!
-//! Phase 0 (now): transparent pass-through. The session must feel native.
-//! Phase 1+: this grows into:
-//!   - an OSC-133 state machine that knows whether we're in the PROMPT zone
-//!     (never touch) or the command-OUTPUT zone (safe to reformat),
-//!   - safety gates: pass through if output already has ANSI color, is binary,
-//!     or isn't going to a TTY,
-//!   - detectors + formatters: JSON pretty-print, HTML indent, log severity,
-//!     HTTP status — see ROADMAP.md.
+//! ## How a chunk is processed
+//! 1. The OSC-133 scanner partitions the chunk into *output-content* runs (the
+//!    only bytes we may touch) and *everything-else* runs (markers, prompt,
+//!    typed input, other zones) which always pass through verbatim.
+//! 2. Output-content is **accumulated** so a whole-command output can be
+//!    detected and reformatted as a unit. To stay safe and responsive:
+//!      - we only start buffering once the first non-whitespace output byte is
+//!        seen, and we *give up immediately* (stream verbatim) unless it is
+//!        `{` or `[` — so the overwhelming majority of output (ls, git, …) is
+//!        never delayed;
+//!      - any control byte ends the run and flushes the buffer, so output that
+//!        already contains ANSI is never swallowed;
+//!      - a size cap bounds memory and latency for large/streaming output.
+//! 3. When a buffered output run ends (a marker or other non-output byte, i.e.
+//!    the command finished), we attempt to format it; if it isn't exactly one
+//!    JSON value the bytes are emitted unchanged.
 //!
-//! Keeping all of that behind this one type means the spike and the full tool
-//! share the exact same wiring; only this module gets smarter.
+//! Net effect: the stream is byte-identical to the input unless a run is a clean
+//! JSON document, in which case that run — and only that run — is reformatted.
+//! Formatting only ever engages when OSC-133 markers are present (a shell with
+//! `glimps init`); without them the zone stays Unknown and GLIMPS is a pure
+//! pass-through.
 
-/// Stateful, streaming output processor. Holds whatever cross-chunk state the
-/// detectors need (current zone, partial-line buffer, etc.). For the spike it
-/// holds nothing.
+mod json;
+mod osc133;
+mod theme;
+
+use std::borrow::Cow;
+
+use osc133::Osc133Scanner;
+// `Zone` is the seam's vocabulary; only tests consume it directly today.
+#[cfg_attr(not(test), allow(unused_imports))]
+pub use osc133::Zone;
+use theme::Theme;
+
+/// Hard cap on a single buffered output run. Beyond this we stop trying to
+/// format and stream the rest verbatim — bounds both memory and the latency of
+/// holding output back. 1 MiB comfortably covers API responses while never
+/// stalling huge or unbounded output.
+const BUFFER_CAP: usize = 1024 * 1024;
+
+/// Cap on a whitespace-only prefix while we wait to see the first real output
+/// byte. A run that is nothing but this much whitespace is pathological; give up
+/// and stream it.
+const SNIFF_CAP: usize = 64;
+
+/// State of the OUTPUT-zone accumulator.
+enum Collect {
+    /// Not collecting: outside the output zone, or we gave up for this command.
+    Idle,
+    /// Seen only whitespace so far this output run; still deciding.
+    Sniff(Vec<u8>),
+    /// Output looks like JSON (`{`/`[`); accumulating until the run ends.
+    Buffer(Vec<u8>),
+    /// Decided not to format this output run; stream the rest verbatim.
+    Passthrough,
+}
+
+/// Stateful, streaming output processor.
 pub struct Formatter {
-    // Phase 1: zone: Zone, line_buf: Vec<u8>, ...
+    /// Master off-switch (safety invariant #6). Sampled once at construction
+    /// from `GLIMPS` (a process can't have its env changed from outside anyway).
+    /// When disabled, `process` is a pure, zero-copy pass-through that does no
+    /// scanning. A future mid-session toggle (e.g. a hotkey) layers on top.
+    enabled: bool,
+    /// Tracks PROMPT / INPUT / OUTPUT zones from OSC-133 markers in the stream.
+    scanner: Osc133Scanner,
+    /// The OUTPUT-zone accumulator (see [`Collect`]).
+    collect: Collect,
+    /// Colors for formatted output.
+    theme: Theme,
 }
 
 impl Formatter {
     pub fn new() -> Self {
-        Formatter {}
+        Formatter {
+            enabled: glimps_enabled(),
+            scanner: Osc133Scanner::new(),
+            collect: Collect::Idle,
+            theme: Theme::default(),
+        }
     }
 
-    /// Process one chunk of bytes coming from the PTY, returning the bytes to
-    /// write to the real terminal.
+    /// Process one chunk of bytes from the PTY, returning the bytes to write to
+    /// the real terminal.
     ///
-    /// SPIKE: identity. Do not change a single byte — that's how we prove the
-    /// PTY layer itself is transparent before any formatting is added.
-    pub fn process(&mut self, chunk: &[u8]) -> Vec<u8> {
-        chunk.to_vec()
+    /// Returns a `Cow` so the common pass-through case is zero-copy:
+    /// `Borrowed(chunk)` when nothing is buffered and the chunk has no output
+    /// content to consider; `Owned(..)` only when we actually segment, buffer,
+    /// or reformat.
+    pub fn process<'a>(&mut self, chunk: &'a [u8]) -> Cow<'a, [u8]> {
+        if !self.enabled {
+            return Cow::Borrowed(chunk);
+        }
+
+        let segments = self.scanner.feed_segments(chunk);
+
+        // Zero-copy fast paths, where the chunk's bytes are emitted verbatim:
+        //   * Idle with no output content -> nothing to buffer or finalize;
+        //   * Passthrough with only output content -> we already decided not to
+        //     format this run, so every byte streams as-is (the common steady
+        //     state of a large non-JSON command output).
+        // Either way the emitted bytes equal the input, so we can borrow it.
+        let any_output = segments.iter().any(|&(is_output, _, _)| is_output);
+        let all_output = segments.iter().all(|&(is_output, _, _)| is_output);
+        let zero_copy = match self.collect {
+            Collect::Idle => !any_output,
+            Collect::Passthrough => all_output,
+            Collect::Sniff(_) | Collect::Buffer(_) => false,
+        };
+        if zero_copy {
+            return Cow::Borrowed(chunk);
+        }
+
+        let mut out = Vec::with_capacity(chunk.len());
+        for &(is_output, start, end) in &segments {
+            let seg = &chunk[start..end];
+            if is_output {
+                self.push_output(seg, &mut out);
+            } else {
+                // A non-output byte means the command output run has ended (or we
+                // were never in one): finalize anything pending, then pass the
+                // bytes through untouched.
+                self.finalize(&mut out);
+                out.extend_from_slice(seg);
+            }
+        }
+        Cow::Owned(out)
+    }
+
+    /// Feed one run of OUTPUT-zone content into the accumulator.
+    fn push_output(&mut self, seg: &[u8], out: &mut Vec<u8>) {
+        self.collect = match std::mem::replace(&mut self.collect, Collect::Idle) {
+            Collect::Passthrough => {
+                out.extend_from_slice(seg);
+                Collect::Passthrough
+            }
+            Collect::Buffer(mut buf) => {
+                if buf.len().saturating_add(seg.len()) > BUFFER_CAP {
+                    // Too big to hold/format: flush what we have and stream the rest.
+                    out.extend_from_slice(&buf);
+                    out.extend_from_slice(seg);
+                    Collect::Passthrough
+                } else {
+                    buf.extend_from_slice(seg);
+                    Collect::Buffer(buf)
+                }
+            }
+            // Idle (fresh output run) and Sniff both decide via the first
+            // non-whitespace byte.
+            Collect::Idle => sniff(Vec::new(), seg, out),
+            Collect::Sniff(acc) => sniff(acc, seg, out),
+        };
+    }
+
+    /// Emit any output still held in the accumulator. **Must** be called once
+    /// when the stream ends (PTY EOF): if a command's output was being buffered
+    /// but never closed by an OSC-133 `D` marker — the shell exits, crashes, or
+    /// the connection drops mid-output — those bytes would otherwise be silently
+    /// truncated, violating byte-safety (invariant #4). Idempotent: leaves the
+    /// accumulator Idle, so a second call returns empty.
+    pub fn flush(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.finalize(&mut out);
+        out
+    }
+
+    /// End of an output run: emit whatever was being collected. A JSON buffer is
+    /// formatted (or returned unchanged if it doesn't parse); a whitespace-only
+    /// sniff buffer is emitted verbatim.
+    fn finalize(&mut self, out: &mut Vec<u8>) {
+        match std::mem::replace(&mut self.collect, Collect::Idle) {
+            Collect::Buffer(buf) => out.extend_from_slice(&json::format(&buf, &self.theme)),
+            Collect::Sniff(acc) => out.extend_from_slice(&acc),
+            Collect::Passthrough | Collect::Idle => {}
+        }
+    }
+
+    /// The zone the stream is currently in. Exposed for tests.
+    #[cfg(test)]
+    pub fn zone(&self) -> Zone {
+        self.scanner.zone()
+    }
+
+    /// Whether formatting is active (i.e. `GLIMPS` is not set to `0`).
+    #[cfg(test)]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+/// Decide what to do with a fresh/whitespace-only output run, given `acc` (any
+/// whitespace already seen) and the new `seg`. Returns the next [`Collect`]
+/// state and emits to `out` whatever should be streamed immediately.
+fn sniff(mut acc: Vec<u8>, seg: &[u8], out: &mut Vec<u8>) -> Collect {
+    match seg.iter().position(|b| !b.is_ascii_whitespace()) {
+        Some(pos) => {
+            // First real byte decides: container -> buffer, anything else -> stream.
+            acc.extend_from_slice(seg);
+            if matches!(seg[pos], b'{' | b'[') {
+                if acc.len() > BUFFER_CAP {
+                    out.extend_from_slice(&acc);
+                    Collect::Passthrough
+                } else {
+                    Collect::Buffer(acc)
+                }
+            } else {
+                out.extend_from_slice(&acc);
+                Collect::Passthrough
+            }
+        }
+        None => {
+            // Still all whitespace. Keep waiting, but don't hoard unboundedly.
+            acc.extend_from_slice(seg);
+            if acc.len() > SNIFF_CAP {
+                out.extend_from_slice(&acc);
+                Collect::Passthrough
+            } else {
+                Collect::Sniff(acc)
+            }
+        }
     }
 }
 
 impl Default for Formatter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// GLIMPS is on unless the user sets `GLIMPS=0`. Any other value (or unset)
+/// leaves it enabled — the off-switch must be unambiguous and hard to trip by
+/// accident, but trivial to reach on purpose.
+fn glimps_enabled() -> bool {
+    !matches!(std::env::var("GLIMPS").as_deref(), Ok("0"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const C: &[u8] = b"\x1b]133;C\x07"; // command output start
+    const D: &[u8] = b"\x1b]133;D\x07"; // command output end
+
+    /// Drive a sequence of chunks through one Formatter and return all emitted
+    /// bytes concatenated.
+    fn run(chunks: &[&[u8]]) -> Vec<u8> {
+        let mut f = Formatter::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            out.extend_from_slice(&f.process(c));
+        }
+        out
+    }
+
+    /// One chunk built from parts.
+    fn cat(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+
+    #[test]
+    fn empty_chunk_is_safe() {
+        let mut f = Formatter::new();
+        assert!(f.process(b"").is_empty());
+    }
+
+    #[test]
+    fn zone_advances_through_process() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.process(C);
+        assert_eq!(f.zone(), Zone::Output);
+        f.process(b"some command output\n");
+        assert_eq!(f.zone(), Zone::Output);
+        f.process(D);
+        assert_eq!(f.zone(), Zone::Unknown);
+    }
+
+    #[test]
+    fn json_output_is_pretty_printed() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(br#"{"a":1,"b":[2,3]}"#));
+        out.extend_from_slice(&f.process(D)); // command end -> flush + format
+        let expected = cat(&[C, b"{\n  \"a\": 1,\n  \"b\": [\n    2,\n    3\n  ]\n}", D]);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn json_split_across_chunks_is_still_formatted() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        let mut out = Vec::new();
+        for part in [C, br#"{"a":"#, br#"1}"#, D] {
+            out.extend_from_slice(&f.process(part));
+        }
+        let expected = cat(&[C, b"{\n  \"a\": 1\n}", D]);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn non_json_output_passes_through_unchanged() {
+        let stream = cat(&[C, b"total 12\ndrwxr-xr-x  3 user staff\n", D]);
+        assert_eq!(run(&[&stream]), stream);
+    }
+
+    #[test]
+    fn output_that_looks_like_json_but_isnt_passes_through() {
+        let stream = cat(&[C, b"{this is not json}", D]);
+        assert_eq!(run(&[&stream]), stream);
+    }
+
+    #[test]
+    fn output_outside_any_command_is_untouched() {
+        // No C marker -> zone stays Unknown -> pure pass-through even for JSON.
+        let stream = br#"{"a":1}"#;
+        assert_eq!(run(&[stream]), stream);
+    }
+
+    #[test]
+    fn prompt_and_input_are_never_formatted() {
+        // A `{`-leading string in the prompt/input zones must pass through.
+        let a = b"\x1b]133;A\x07";
+        let b = b"\x1b]133;B\x07";
+        let stream = cat(&[a, b"{prompt} $ ", b, br#"echo {"x":1}"#, C, b"plain\n", D]);
+        assert_eq!(run(&[&stream]), stream);
+    }
+
+    /// Drive chunks through one Formatter, then flush (simulating PTY EOF).
+    fn run_flush(chunks: &[&[u8]]) -> Vec<u8> {
+        let mut f = Formatter::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            out.extend_from_slice(&f.process(c));
+        }
+        out.extend_from_slice(&f.flush());
+        out
+    }
+
+    #[test]
+    fn eof_flush_emits_withheld_non_json_unchanged() {
+        // Command output that starts like JSON but never closes (no `D`) and the
+        // stream ends. The withheld bytes must survive, byte-for-byte.
+        let stream = cat(&[C, br#"{"a":1"#]); // incomplete: no closing brace, no D
+        assert_eq!(run_flush(&[&stream]), stream);
+    }
+
+    #[test]
+    fn eof_flush_formats_withheld_complete_json() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(br#"{"a":1}"#)); // buffered, no D yet
+        out.extend_from_slice(&f.flush()); // EOF -> format the complete value
+        assert_eq!(out, cat(&[C, b"{\n  \"a\": 1\n}"]));
+    }
+
+    #[test]
+    fn two_consecutive_json_outputs_each_formatted() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        let mut out = Vec::new();
+        for part in [C, br#"{"a":1}"#, D, C, b"[1,2]", D] {
+            out.extend_from_slice(&f.process(part));
+        }
+        let expected = cat(&[C, b"{\n  \"a\": 1\n}", D, C, b"[\n  1,\n  2\n]", D]);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn buffer_cap_overflow_streams_verbatim() {
+        // A `{`-leading run larger than BUFFER_CAP must give up and stream the
+        // bytes unchanged rather than hold them.
+        let mut body = vec![b'{'];
+        body.extend(std::iter::repeat_n(b'x', BUFFER_CAP + 1));
+        let stream = cat(&[C, &body]); // no D; overflow forces verbatim
+        assert_eq!(run_flush(&[&stream]), stream);
+    }
+
+    #[test]
+    fn ansi_escape_mid_json_keeps_bytes_intact() {
+        // Output containing an ANSI escape can't be one clean JSON value; it must
+        // pass through byte-for-byte (invariant #3: don't double-format ANSI).
+        let stream = cat(&[C, br#"{"a":1"#, b"\x1b[31m", b"}", D]);
+        assert_eq!(run(&[&stream]), stream);
+    }
+
+    proptest::proptest! {
+        /// Byte-safety invariant #4 for the pass-through path: with no escape
+        /// sequences in the stream (so the zone never leaves Unknown), the
+        /// concatenation of outputs equals the concatenation of inputs exactly.
+        #[test]
+        fn prop_passthrough_is_byte_identical(
+            chunks in proptest::collection::vec(proptest::collection::vec(0u8..=255, 0..64), 0..16)
+        ) {
+            let mut f = Formatter::new();
+            let mut out = Vec::new();
+            let mut expected = Vec::new();
+            for chunk in &chunks {
+                // Strip ESC so no escape sequence (and thus no zone change) can form.
+                let clean: Vec<u8> = chunk.iter().copied().filter(|&b| b != 0x1b).collect();
+                expected.extend_from_slice(&clean);
+                out.extend_from_slice(&f.process(&clean));
+            }
+            proptest::prop_assert_eq!(out, expected);
+        }
+
+        /// Non-JSON command output (arbitrary ESC-free bytes wrapped in C/D
+        /// markers) is emitted byte-for-byte. This exercises the buffering path
+        /// and proves it withholds-then-flushes without altering bytes, as long
+        /// as the content isn't a clean JSON document.
+        #[test]
+        fn prop_non_json_output_round_trips(
+            body in proptest::collection::vec(0u8..=255, 0..256)
+        ) {
+            let mut f = Formatter::new();
+            if !f.is_enabled() {
+                return Ok(());
+            }
+            let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b).collect();
+            // Skip inputs that ARE a formattable JSON value — those are meant to change.
+            proptest::prop_assume!(!json::detect(&clean)
+                || serde_json::from_slice::<serde_json::Value>(&clean).is_err());
+
+            let stream = [C, &clean, D].concat();
+            let mut out = Vec::new();
+            out.extend_from_slice(&f.process(&stream));
+            proptest::prop_assert_eq!(out, stream);
+        }
+
+        /// The EOF-flush path is byte-identical for non-JSON output, even when
+        /// the stream is split at arbitrary chunk boundaries and never closed by
+        /// a `D` marker (the shell-crash scenario). Directly guards the
+        /// truncation bug the safety audit caught.
+        #[test]
+        fn prop_eof_flush_round_trips_non_json(
+            body in proptest::collection::vec(0u8..=255, 0..256),
+            splits in proptest::collection::vec(1usize..40, 1..10),
+        ) {
+            let mut f = Formatter::new();
+            if !f.is_enabled() {
+                return Ok(());
+            }
+            let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b).collect();
+            proptest::prop_assume!(!json::detect(&clean)
+                || serde_json::from_slice::<serde_json::Value>(&clean).is_err());
+
+            // C + body, but NO closing D — then flush, simulating PTY EOF.
+            let stream = [C, &clean].concat();
+            let mut out = Vec::new();
+            let (mut i, mut si) = (0usize, 0usize);
+            while i < stream.len() {
+                let step = splits[si % splits.len()].min(stream.len() - i).max(1);
+                out.extend_from_slice(&f.process(&stream[i..i + step]));
+                i += step;
+                si += 1;
+            }
+            out.extend_from_slice(&f.flush());
+            proptest::prop_assert_eq!(out, stream);
+        }
     }
 }
