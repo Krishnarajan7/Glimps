@@ -17,12 +17,13 @@ use std::io::{Read, Write};
 use std::thread;
 use std::time::Duration;
 
-use crate::format::Formatter;
+use crate::format::{Clock, Formatter};
 use crate::terminal::{term_size, RawGuard};
 
 /// Wrap `shell` inside a PTY and run it transparently. Returns the shell's
-/// exit code once it terminates.
-pub fn run_shell(shell: &str) -> Result<i32> {
+/// exit code once it terminates. `clock` sources the separator timestamp
+/// (captured by the caller while still single-threaded).
+pub fn run_shell(shell: &str, clock: Clock) -> Result<i32> {
     let (cols, rows) = term_size();
 
     let pty_system = native_pty_system();
@@ -59,7 +60,7 @@ pub fn run_shell(shell: &str) -> Result<i32> {
     // Job #2: PTY -> Formatter -> stdout
     let mut reader = pair.master.try_clone_reader()?;
     let reader_thread = thread::spawn(move || {
-        let mut formatter = Formatter::new();
+        let mut formatter = Formatter::with_clock(clock);
         let mut stdout = std::io::stdout();
         let mut buf = [0u8; 8192];
         loop {

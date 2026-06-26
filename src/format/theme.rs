@@ -11,10 +11,14 @@
 /// be empty whenever the color fields are, so plain output contains no escapes.
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
+    // JSON
     pub key: &'static str,
     pub string: &'static str,
     pub number: &'static str,
     pub keyword: &'static str,
+    // HTML
+    pub tag: &'static str,
+    pub comment: &'static str,
     pub reset: &'static str,
 }
 
@@ -28,18 +32,23 @@ impl Theme {
             string: "",
             number: "",
             keyword: "",
+            tag: "",
+            comment: "",
             reset: "",
         }
     }
 
     /// The default colored theme. Conservative, readable on both light and dark
-    /// backgrounds: cyan keys, green strings, yellow numbers, magenta keywords.
+    /// backgrounds: cyan keys, green strings, yellow numbers, magenta keywords;
+    /// blue HTML tags, dim comments.
     pub const fn default_colored() -> Self {
         Theme {
             key: "\x1b[36m",     // cyan
             string: "\x1b[32m",  // green
             number: "\x1b[33m",  // yellow
             keyword: "\x1b[35m", // magenta
+            tag: "\x1b[34m",     // blue
+            comment: "\x1b[2m",  // dim
             reset: "\x1b[0m",
         }
     }

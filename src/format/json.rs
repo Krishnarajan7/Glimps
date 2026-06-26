@@ -30,22 +30,32 @@ pub fn detect(bytes: &[u8]) -> bool {
     )
 }
 
-/// Reformat `bytes` as pretty, colored JSON. If `bytes` is not exactly one JSON
-/// value (per [`detect`] plus a full parse), the input is returned unchanged.
-pub fn format(bytes: &[u8], theme: &Theme) -> Vec<u8> {
+/// Reformat `bytes` as pretty, colored JSON, returning `Some` only when it
+/// actually reformatted — i.e. `bytes` is exactly one JSON value (per [`detect`]
+/// plus a full parse). Returns `None` for anything else, so the caller can tell
+/// "I generated these bytes" (newlines need CRLF on a raw terminal) from "pass
+/// the user's bytes through verbatim".
+///
+/// The produced JSON uses `\n` line breaks, matching `serde_json`; turning them
+/// into `\r\n` for the terminal is the caller's job (only GLIMPS-generated
+/// newlines get that treatment, never the user's passed-through bytes).
+pub fn try_format(bytes: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     if !detect(bytes) {
-        return bytes.to_vec();
+        return None;
     }
-    match serde_json::from_slice::<Value>(bytes) {
-        Ok(value) => {
-            let mut out = String::with_capacity(bytes.len() * 2);
-            write_value(&mut out, &value, 0, theme);
-            out.into_bytes()
-        }
-        // Looked like JSON but wasn't (truncated, trailing data, too deep, …).
-        // Default to pass-through.
-        Err(_) => bytes.to_vec(),
-    }
+    // Looked like JSON but didn't fully parse (truncated, trailing data, too
+    // deep, …) -> None -> pass-through.
+    let value = serde_json::from_slice::<Value>(bytes).ok()?;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    write_value(&mut out, &value, 0, theme);
+    Some(out.into_bytes())
+}
+
+/// Convenience: reformat, or return the input unchanged if it isn't JSON. Used
+/// by tests and golden comparisons; the streaming path uses [`try_format`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn format(bytes: &[u8], theme: &Theme) -> Vec<u8> {
+    try_format(bytes, theme).unwrap_or_else(|| bytes.to_vec())
 }
 
 /// Trim leading/trailing ASCII whitespace without allocating.

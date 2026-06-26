@@ -59,6 +59,24 @@ enum ByteClass {
     Control,
 }
 
+/// A segment of a chunk, as reported by [`Osc133Scanner::feed_segments`]. The
+/// byte ranges are half-open indices into the chunk; concatenating the `Pass`
+/// and `Output` ranges in order reconstructs the chunk exactly. `OutputStart`
+/// and `OutputEnd` are zero-width markers for the rising/falling edges of the
+/// OUTPUT zone (a command's output beginning / ending), used to frame output
+/// (e.g. inject a separator) without scanning bytes twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seg {
+    /// Pass-through bytes (markers, prompt, typed input, other zones). Verbatim.
+    Pass(usize, usize),
+    /// Command-output content bytes — the only bytes a formatter may touch.
+    Output(usize, usize),
+    /// The OUTPUT zone just began (a `C` marker completed).
+    OutputStart,
+    /// The OUTPUT zone just ended (a `D` marker, or any zone change out of it).
+    OutputEnd,
+}
+
 /// Bytes of an OSC body we retain to classify the marker. `133;D;<code>` is the
 /// longest one we care about; 16 bytes is comfortably enough, and anything
 /// longer is some other (uninteresting) OSC we only scan for its terminator.
@@ -135,33 +153,56 @@ impl Osc133Scanner {
         }
     }
 
-    /// Like [`feed`], but partitions the chunk into maximal runs and reports each
-    /// run as `(is_output_content, start, end)` half-open index ranges into
-    /// `chunk`. `is_output_content` is true exactly for ground-state bytes while
-    /// in the OUTPUT zone — the only bytes a formatter may touch. Escape-sequence
-    /// bytes (markers included) and any other zone's content are reported as
-    /// `false` (pass-through). Ranges are contiguous and cover the whole chunk in
-    /// order, so the caller can reconstruct the stream exactly.
-    ///
-    /// [`feed`]: Self::feed
-    pub fn feed_segments(&mut self, chunk: &[u8]) -> Vec<(bool, usize, usize)> {
-        let mut segs: Vec<(bool, usize, usize)> = Vec::new();
-        let mut start = 0usize;
-        let mut cur: Option<bool> = None;
+    /// Partition the chunk into [`Seg`]s: maximal `Pass`/`Output` byte runs plus
+    /// zero-width `OutputStart`/`OutputEnd` edge markers at the boundaries of the
+    /// OUTPUT zone. Concatenating the `Pass` and `Output` ranges in order
+    /// reconstructs the chunk exactly; the edge markers carry no bytes. Resumes
+    /// correctly across chunk boundaries (a marker split across reads still flips
+    /// the zone on the byte that completes it).
+    pub fn feed_segments(&mut self, chunk: &[u8]) -> Vec<Seg> {
+        let mut segs: Vec<Seg> = Vec::new();
+        let mut run_start = 0usize;
+        let mut run_output: Option<bool> = None;
+        let mut prev_zone = self.zone();
+
         for (i, &b) in chunk.iter().enumerate() {
             let is_output = matches!(self.feed_byte(b), ByteClass::Content(Zone::Output));
-            match cur {
-                None => cur = Some(is_output),
-                Some(c) if c != is_output => {
-                    segs.push((c, start, i));
-                    start = i;
-                    cur = Some(is_output);
+
+            // Group consecutive bytes of the same kind into a run.
+            match run_output {
+                None => {
+                    run_output = Some(is_output);
+                    run_start = i;
+                }
+                Some(prev) if prev != is_output => {
+                    push_run(&mut segs, prev, run_start, i);
+                    run_start = i;
+                    run_output = Some(is_output);
                 }
                 _ => {}
             }
+
+            // Detect an OUTPUT-zone edge caused by the byte just consumed (the
+            // marker's terminator). The byte belongs to the current run (it is a
+            // control byte), so flush up to and including it, then emit the edge.
+            let zone = self.zone();
+            let entered = zone == Zone::Output && prev_zone != Zone::Output;
+            let left = zone != Zone::Output && prev_zone == Zone::Output;
+            if entered || left {
+                push_run(&mut segs, run_output.unwrap_or(false), run_start, i + 1);
+                run_start = i + 1;
+                run_output = None;
+                segs.push(if entered {
+                    Seg::OutputStart
+                } else {
+                    Seg::OutputEnd
+                });
+            }
+            prev_zone = zone;
         }
-        if let Some(c) = cur {
-            segs.push((c, start, chunk.len()));
+
+        if let Some(prev) = run_output {
+            push_run(&mut segs, prev, run_start, chunk.len());
         }
         segs
     }
@@ -260,6 +301,18 @@ impl Osc133Scanner {
 impl Default for Osc133Scanner {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Push a non-empty byte run as the appropriate [`Seg`]. Empty runs (which occur
+/// right after an edge marker) are skipped so segments never carry zero bytes.
+fn push_run(segs: &mut Vec<Seg>, is_output: bool, start: usize, end: usize) {
+    if end > start {
+        segs.push(if is_output {
+            Seg::Output(start, end)
+        } else {
+            Seg::Pass(start, end)
+        });
     }
 }
 
@@ -445,37 +498,81 @@ mod tests {
         assert_eq!(s.zone(), Zone::Output);
     }
 
+    /// Reconstruct a chunk from the byte-bearing segments to prove nothing is
+    /// dropped or reordered.
+    fn rebuild(chunk: &[u8], segs: &[Seg]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for seg in segs {
+            match *seg {
+                Seg::Pass(a, b) | Seg::Output(a, b) => out.extend_from_slice(&chunk[a..b]),
+                Seg::OutputStart | Seg::OutputEnd => {}
+            }
+        }
+        out
+    }
+
     #[test]
-    fn feed_segments_partitions_output_from_the_rest() {
+    fn feed_segments_partitions_output_and_marks_edges() {
         let mut s = Osc133Scanner::new();
         let mut stream = Vec::new();
-        stream.extend_from_slice(b"prompt$ "); // Unknown-zone content -> false
-        stream.extend_from_slice(&marker_bel('C')); // marker -> false (control)
+        stream.extend_from_slice(b"prompt$ "); // Unknown-zone content -> Pass
+        stream.extend_from_slice(&marker_bel('C')); // -> OutputStart after it
         let out_start = stream.len();
-        stream.extend_from_slice(b"hello output"); // Output content -> true
+        stream.extend_from_slice(b"hello output"); // Output content
         let out_end = stream.len();
-        stream.extend_from_slice(&marker_bel('D')); // marker -> false
+        stream.extend_from_slice(&marker_bel('D')); // -> OutputEnd after it
 
         let segs = s.feed_segments(&stream);
 
-        // Ranges are contiguous, cover the whole chunk, and reconstruct exactly.
-        let mut rebuilt = Vec::new();
-        let mut prev_end = 0;
-        for &(_, a, b) in &segs {
-            assert_eq!(a, prev_end);
-            rebuilt.extend_from_slice(&stream[a..b]);
-            prev_end = b;
-        }
-        assert_eq!(prev_end, stream.len());
-        assert_eq!(rebuilt, stream);
+        // Exact reconstruction (byte-safety of the partition).
+        assert_eq!(rebuild(&stream, &segs), stream);
 
-        // Exactly one run is flagged as output, and it is the JSON-less body.
+        // The output content is reported as exactly one Output run.
         let output_runs: Vec<(usize, usize)> = segs
             .iter()
-            .filter(|&&(is_out, _, _)| is_out)
-            .map(|&(_, a, b)| (a, b))
+            .filter_map(|seg| match *seg {
+                Seg::Output(a, b) => Some((a, b)),
+                _ => None,
+            })
             .collect();
         assert_eq!(output_runs, vec![(out_start, out_end)]);
+
+        // Exactly one rising and one falling edge, in order, surrounding output.
+        let edges: Vec<Seg> = segs
+            .iter()
+            .copied()
+            .filter(|s| matches!(s, Seg::OutputStart | Seg::OutputEnd))
+            .collect();
+        assert_eq!(edges, vec![Seg::OutputStart, Seg::OutputEnd]);
+    }
+
+    #[test]
+    fn feed_segments_edges_survive_chunk_splits() {
+        // The C marker is split across two feeds; the rising edge must still fire
+        // exactly once, on the chunk that completes it.
+        let mut s = Osc133Scanner::new();
+        let m = marker_bel('C');
+        let cut = m.len() - 1;
+        let first = s.feed_segments(&m[..cut]);
+        assert!(!first.iter().any(|x| matches!(x, Seg::OutputStart)));
+        let second = s.feed_segments(&m[cut..]);
+        let starts = second
+            .iter()
+            .filter(|x| matches!(x, Seg::OutputStart))
+            .count();
+        assert_eq!(starts, 1);
+    }
+
+    #[test]
+    fn feed_segments_no_edge_for_ansi_within_output() {
+        // An ANSI escape mid-output must NOT produce a spurious OutputStart/End:
+        // the zone stays Output throughout.
+        let mut s = Osc133Scanner::new();
+        s.feed(&marker_bel('C')); // enter output (separate feed)
+        let segs = s.feed_segments(b"ab\x1b[31mcd");
+        assert!(!segs
+            .iter()
+            .any(|x| matches!(x, Seg::OutputStart | Seg::OutputEnd)));
     }
 
     #[test]

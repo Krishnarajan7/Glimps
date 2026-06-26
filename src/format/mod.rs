@@ -27,17 +27,37 @@
 //! `glimps init`); without them the zone stays Unknown and GLIMPS is a pure
 //! pass-through.
 
+mod html;
 mod json;
 mod osc133;
 mod theme;
 
 use std::borrow::Cow;
 
-use osc133::Osc133Scanner;
+use osc133::{Osc133Scanner, Seg};
 // `Zone` is the seam's vocabulary; only tests consume it directly today.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub use osc133::Zone;
 use theme::Theme;
+
+/// Where the separator's timestamp comes from. Kept injectable so the supervisor
+/// can use real local time while tests stay deterministic.
+#[derive(Debug, Clone, Copy)]
+pub enum Clock {
+    /// No timestamp (just a divider). Default for `Formatter::new`.
+    Off,
+    /// Real local wall-clock at this UTC offset (captured once, at startup).
+    Local(time::UtcOffset),
+    /// A fixed `HH:MM:SS` string — for deterministic tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Fixed(&'static str),
+}
+
+/// Dim styling for the separator rule (independent of the JSON color theme).
+const SEP_DIM: &[u8] = b"\x1b[2m";
+const SEP_RESET: &[u8] = b"\x1b[0m";
+/// The box-drawing rule character, U+2500 (`─`).
+const SEP_DASH: &str = "─";
 
 /// Hard cap on a single buffered output run. Beyond this we stop trying to
 /// format and stream the rest verbatim — bounds both memory and the latency of
@@ -75,15 +95,29 @@ pub struct Formatter {
     collect: Collect,
     /// Colors for formatted output.
     theme: Theme,
+    /// Source of the separator timestamp.
+    clock: Clock,
+    /// A command's output has started but no output byte has been emitted yet, so
+    /// the separator is owed and will be written just before that first byte.
+    /// Lazy on purpose: commands with no output get no separator.
+    pending_separator: bool,
 }
 
 impl Formatter {
     pub fn new() -> Self {
+        Self::with_clock(Clock::Off)
+    }
+
+    /// Construct with an explicit timestamp source (the supervisor passes real
+    /// local time; tests pass a fixed clock).
+    pub fn with_clock(clock: Clock) -> Self {
         Formatter {
             enabled: glimps_enabled(),
             scanner: Osc133Scanner::new(),
             collect: Collect::Idle,
             theme: Theme::default(),
+            clock,
+            pending_separator: false,
         }
     }
 
@@ -102,40 +136,56 @@ impl Formatter {
         let segments = self.scanner.feed_segments(chunk);
 
         // Zero-copy fast paths, where the chunk's bytes are emitted verbatim:
-        //   * Idle with no output content -> nothing to buffer or finalize;
-        //   * Passthrough with only output content -> we already decided not to
+        //   * Idle with only pass-through bytes -> nothing to buffer or frame;
+        //   * Passthrough with only output bytes -> we already decided not to
         //     format this run, so every byte streams as-is (the common steady
         //     state of a large non-JSON command output).
-        // Either way the emitted bytes equal the input, so we can borrow it.
-        let any_output = segments.iter().any(|&(is_output, _, _)| is_output);
-        let all_output = segments.iter().all(|&(is_output, _, _)| is_output);
-        let zero_copy = match self.collect {
-            Collect::Idle => !any_output,
-            Collect::Passthrough => all_output,
-            Collect::Sniff(_) | Collect::Buffer(_) => false,
-        };
+        // Both require no owed separator (which would need to be inserted) and no
+        // edge markers (which change state). Then the emitted bytes equal the
+        // input and we can borrow it.
+        let only_pass = segments.iter().all(|s| matches!(s, Seg::Pass(..)));
+        let only_output = segments.iter().all(|s| matches!(s, Seg::Output(..)));
+        let zero_copy = !self.pending_separator
+            && match self.collect {
+                Collect::Idle => only_pass,
+                Collect::Passthrough => only_output,
+                Collect::Sniff(_) | Collect::Buffer(_) => false,
+            };
         if zero_copy {
             return Cow::Borrowed(chunk);
         }
 
         let mut out = Vec::with_capacity(chunk.len());
-        for &(is_output, start, end) in &segments {
-            let seg = &chunk[start..end];
-            if is_output {
-                self.push_output(seg, &mut out);
-            } else {
-                // A non-output byte means the command output run has ended (or we
-                // were never in one): finalize anything pending, then pass the
-                // bytes through untouched.
-                self.finalize(&mut out);
-                out.extend_from_slice(seg);
+        for seg in &segments {
+            match *seg {
+                Seg::Output(start, end) => self.push_output(&chunk[start..end], &mut out),
+                Seg::Pass(start, end) => {
+                    // Non-output bytes (markers, prompt, input, mid-output ANSI):
+                    // finalize anything pending, then pass through untouched.
+                    self.finalize(&mut out);
+                    out.extend_from_slice(&chunk[start..end]);
+                }
+                // A command's output has begun: owe a separator, emitted lazily
+                // right before the first output byte (so empty output -> none).
+                Seg::OutputStart => self.pending_separator = true,
+                // The output ended: flush, and drop an unfulfilled separator.
+                Seg::OutputEnd => {
+                    self.finalize(&mut out);
+                    self.pending_separator = false;
+                }
             }
         }
         Cow::Owned(out)
     }
 
-    /// Feed one run of OUTPUT-zone content into the accumulator.
+    /// Feed one run of OUTPUT-zone content into the accumulator, first emitting
+    /// the owed separator if this is the command's first output byte.
     fn push_output(&mut self, seg: &[u8], out: &mut Vec<u8>) {
+        if self.pending_separator {
+            self.pending_separator = false;
+            let sep = self.render_separator();
+            out.extend_from_slice(&sep);
+        }
         self.collect = match std::mem::replace(&mut self.collect, Collect::Idle) {
             Collect::Passthrough => {
                 out.extend_from_slice(seg);
@@ -172,13 +222,64 @@ impl Formatter {
     }
 
     /// End of an output run: emit whatever was being collected. A JSON buffer is
-    /// formatted (or returned unchanged if it doesn't parse); a whitespace-only
-    /// sniff buffer is emitted verbatim.
+    /// pretty-printed (with its GLIMPS-generated newlines converted to CRLF for
+    /// the raw terminal); if it doesn't parse it is emitted verbatim. A
+    /// whitespace-only sniff buffer is emitted verbatim.
     fn finalize(&mut self, out: &mut Vec<u8>) {
         match std::mem::replace(&mut self.collect, Collect::Idle) {
-            Collect::Buffer(buf) => out.extend_from_slice(&json::format(&buf, &self.theme)),
+            Collect::Buffer(buf) => match format_recognized(&buf, &self.theme) {
+                // Reformatted: tag it with a content-type badge, then emit the
+                // formatted bytes (ours, so their `\n` become `\r\n`).
+                Some((label, pretty)) => {
+                    out.extend_from_slice(&render_badge(label));
+                    push_crlf(out, &pretty);
+                }
+                // Not a type we format: the user's bytes, emitted exactly as-is.
+                None => out.extend_from_slice(&buf),
+            },
             Collect::Sniff(acc) => out.extend_from_slice(&acc),
             Collect::Passthrough | Collect::Idle => {}
+        }
+    }
+
+    /// Render the command/output separator: a dim rule, optionally centered on a
+    /// timestamp, framed by CRLF so it sits on its own line in the raw terminal.
+    fn render_separator(&self) -> Vec<u8> {
+        let mut sep = Vec::new();
+        sep.extend_from_slice(SEP_DIM);
+        match self.timestamp() {
+            Some(ts) => {
+                sep.extend_from_slice(SEP_DASH.repeat(8).as_bytes());
+                sep.push(b' ');
+                sep.extend_from_slice(ts.as_bytes());
+                sep.push(b' ');
+                sep.extend_from_slice(SEP_DASH.repeat(8).as_bytes());
+            }
+            None => sep.extend_from_slice(SEP_DASH.repeat(18).as_bytes()),
+        }
+        sep.extend_from_slice(SEP_RESET);
+        sep.extend_from_slice(b"\r\n");
+        sep
+    }
+
+    /// The current `HH:MM:SS` for the separator, per the configured [`Clock`].
+    fn timestamp(&self) -> Option<String> {
+        match self.clock {
+            Clock::Off => None,
+            Clock::Fixed(s) => Some(s.to_string()),
+            Clock::Local(offset) => {
+                // `checked_to_offset` instead of `to_offset`: the latter panics
+                // (internally `.expect`) at the ±9999-year boundary. Unreachable
+                // for the real wall clock, but the formatter path must not be able
+                // to panic — fall back to no timestamp instead.
+                let now = time::OffsetDateTime::now_utc().checked_to_offset(offset)?;
+                Some(format!(
+                    "{:02}:{:02}:{:02}",
+                    now.hour(),
+                    now.minute(),
+                    now.second()
+                ))
+            }
         }
     }
 
@@ -195,15 +296,56 @@ impl Formatter {
     }
 }
 
+/// Try each formatter in precedence order (most precise first), returning the
+/// content-type label and reformatted bytes of the first that matches, or `None`
+/// to pass the buffer through verbatim.
+fn format_recognized(bytes: &[u8], theme: &Theme) -> Option<(&'static str, Vec<u8>)> {
+    if let Some(out) = json::try_format(bytes, theme) {
+        return Some(("JSON", out));
+    }
+    if let Some(out) = html::try_format(bytes, theme) {
+        return Some(("HTML", out));
+    }
+    None
+}
+
+/// Render a content-type badge (e.g. ` JSON `) shown just above reformatted
+/// output. Inverse video so it reads as a tag; CRLF-terminated for the raw
+/// terminal.
+fn render_badge(label: &str) -> Vec<u8> {
+    let mut badge = Vec::with_capacity(label.len() + 8);
+    badge.extend_from_slice(b"\x1b[7m ");
+    badge.extend_from_slice(label.as_bytes());
+    badge.extend_from_slice(b" \x1b[0m\r\n");
+    badge
+}
+
+/// Append `bytes` to `out`, converting each `\n` to `\r\n`. Used only for
+/// GLIMPS-generated content (formatted JSON, the separator): the outer terminal
+/// is in raw mode, so a bare `\n` would not return the cursor to column 0. The
+/// user's own pass-through bytes already carry CRLF from the inner PTY and are
+/// never run through this. `bytes` here never contains a `\r` (the JSON printer
+/// only emits `\n`), so no double-CR can result.
+fn push_crlf(out: &mut Vec<u8>, bytes: &[u8]) {
+    for &b in bytes {
+        if b == b'\n' {
+            out.push(b'\r');
+        }
+        out.push(b);
+    }
+}
+
 /// Decide what to do with a fresh/whitespace-only output run, given `acc` (any
 /// whitespace already seen) and the new `seg`. Returns the next [`Collect`]
 /// state and emits to `out` whatever should be streamed immediately.
 fn sniff(mut acc: Vec<u8>, seg: &[u8], out: &mut Vec<u8>) -> Collect {
     match seg.iter().position(|b| !b.is_ascii_whitespace()) {
         Some(pos) => {
-            // First real byte decides: container -> buffer, anything else -> stream.
+            // First real byte decides: a structured-content opener (`{`/`[` for
+            // JSON, `<` for HTML) -> buffer for a formatting attempt; anything
+            // else -> stream verbatim.
             acc.extend_from_slice(seg);
-            if matches!(seg[pos], b'{' | b'[') {
+            if matches!(seg[pos], b'{' | b'[' | b'<') {
                 if acc.len() > BUFFER_CAP {
                     out.extend_from_slice(&acc);
                     Collect::Passthrough
@@ -248,8 +390,32 @@ mod tests {
     const C: &[u8] = b"\x1b]133;C\x07"; // command output start
     const D: &[u8] = b"\x1b]133;D\x07"; // command output end
 
-    /// Drive a sequence of chunks through one Formatter and return all emitted
-    /// bytes concatenated.
+    /// The separator a fresh Formatter injects, for the given clock. GLIMPS frames
+    /// command output with this; tests reconstruct expected output around it.
+    fn sep_with(clock: Clock) -> Vec<u8> {
+        Formatter::with_clock(clock).render_separator()
+    }
+
+    /// The default (timestamp-less) separator.
+    fn sep() -> Vec<u8> {
+        sep_with(Clock::Off)
+    }
+
+    /// Convert GLIMPS-generated `\n` to `\r\n`, mirroring what the Formatter does
+    /// to formatted JSON before it hits the raw terminal.
+    fn crlf(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_crlf(&mut out, bytes);
+        out
+    }
+
+    /// The content-type badge bytes for a label.
+    fn badge(label: &str) -> Vec<u8> {
+        render_badge(label)
+    }
+
+    /// Drive a sequence of chunks through one (timestamp-less) Formatter and
+    /// return all emitted bytes concatenated.
     fn run(chunks: &[&[u8]]) -> Vec<u8> {
         let mut f = Formatter::new();
         let mut out = Vec::new();
@@ -259,7 +425,17 @@ mod tests {
         out
     }
 
-    /// One chunk built from parts.
+    /// Drive chunks through one Formatter, then flush (simulating PTY EOF).
+    fn run_flush(chunks: &[&[u8]]) -> Vec<u8> {
+        let mut f = Formatter::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            out.extend_from_slice(&f.process(c));
+        }
+        out.extend_from_slice(&f.flush());
+        out
+    }
+
     fn cat(parts: &[&[u8]]) -> Vec<u8> {
         parts.concat()
     }
@@ -285,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn json_output_is_pretty_printed() {
+    fn json_output_is_pretty_printed_with_separator_and_crlf() {
         let mut f = Formatter::new();
         if !f.is_enabled() {
             return;
@@ -295,7 +471,8 @@ mod tests {
         out.extend_from_slice(&f.process(C));
         out.extend_from_slice(&f.process(br#"{"a":1,"b":[2,3]}"#));
         out.extend_from_slice(&f.process(D)); // command end -> flush + format
-        let expected = cat(&[C, b"{\n  \"a\": 1,\n  \"b\": [\n    2,\n    3\n  ]\n}", D]);
+        let pretty = crlf(b"{\n  \"a\": 1,\n  \"b\": [\n    2,\n    3\n  ]\n}");
+        let expected = cat(&[C, &sep(), &badge("JSON"), &pretty, D]);
         assert_eq!(out, expected);
     }
 
@@ -310,55 +487,116 @@ mod tests {
         for part in [C, br#"{"a":"#, br#"1}"#, D] {
             out.extend_from_slice(&f.process(part));
         }
-        let expected = cat(&[C, b"{\n  \"a\": 1\n}", D]);
-        assert_eq!(out, expected);
+        let pretty = crlf(b"{\n  \"a\": 1\n}");
+        assert_eq!(out, cat(&[C, &sep(), &badge("JSON"), &pretty, D]));
     }
 
     #[test]
-    fn non_json_output_passes_through_unchanged() {
-        let stream = cat(&[C, b"total 12\ndrwxr-xr-x  3 user staff\n", D]);
-        assert_eq!(run(&[&stream]), stream);
+    fn non_json_output_is_framed_but_unchanged() {
+        let body = b"total 12\ndrwxr-xr-x  3 user staff\n";
+        let input = cat(&[C, body, D]);
+        // The user's bytes are untouched; only a separator is inserted at output start.
+        let expected = cat(&[C, &sep(), body, D]);
+        assert_eq!(run(&[&input]), expected);
     }
 
     #[test]
     fn output_that_looks_like_json_but_isnt_passes_through() {
-        let stream = cat(&[C, b"{this is not json}", D]);
-        assert_eq!(run(&[&stream]), stream);
+        let body = b"{this is not json}";
+        let input = cat(&[C, body, D]);
+        assert_eq!(run(&[&input]), cat(&[C, &sep(), body, D]));
+    }
+
+    #[test]
+    fn angle_bracket_output_that_isnt_html_passes_through() {
+        // A `<`-leading run is buffered (the loose sniff trigger), but if it isn't
+        // HTML it must be emitted verbatim (only framed by the separator).
+        let body = b"<stdin>: not actually html\n";
+        let input = cat(&[C, body, D]);
+        assert_eq!(run(&[&input]), cat(&[C, &sep(), body, D]));
     }
 
     #[test]
     fn output_outside_any_command_is_untouched() {
-        // No C marker -> zone stays Unknown -> pure pass-through even for JSON.
+        // No C marker -> zone stays Unknown -> pure pass-through, no separator.
         let stream = br#"{"a":1}"#;
         assert_eq!(run(&[stream]), stream);
     }
 
     #[test]
     fn prompt_and_input_are_never_formatted() {
-        // A `{`-leading string in the prompt/input zones must pass through.
+        // The prompt/input zones (incl. a `{`-leading typed command) pass through
+        // untouched; only the command's OUTPUT ("plain\n") is framed.
         let a = b"\x1b]133;A\x07";
         let b = b"\x1b]133;B\x07";
-        let stream = cat(&[a, b"{prompt} $ ", b, br#"echo {"x":1}"#, C, b"plain\n", D]);
-        assert_eq!(run(&[&stream]), stream);
+        let input = cat(&[a, b"{prompt} $ ", b, br#"echo {"x":1}"#, C, b"plain\n", D]);
+        let expected = cat(&[
+            a,
+            b"{prompt} $ ",
+            b,
+            br#"echo {"x":1}"#,
+            C,
+            &sep(),
+            b"plain\n",
+            D,
+        ]);
+        assert_eq!(run(&[&input]), expected);
     }
 
-    /// Drive chunks through one Formatter, then flush (simulating PTY EOF).
-    fn run_flush(chunks: &[&[u8]]) -> Vec<u8> {
+    #[test]
+    fn no_separator_for_empty_command_output() {
+        // A command that produces no output gets no separator at all.
+        let input = cat(&[C, D]);
+        assert_eq!(run(&[&input]), input);
+    }
+
+    #[test]
+    fn whitespace_only_output_is_still_framed() {
+        // Whitespace counts as output: a command that prints only a blank line is
+        // framed (its bytes are preserved verbatim behind the separator). Pins the
+        // documented behavior.
+        let body = b"\n";
+        let input = cat(&[C, body, D]);
+        assert_eq!(run(&[&input]), cat(&[C, &sep(), body, D]));
+    }
+
+    #[test]
+    fn separator_owed_across_a_chunk_boundary() {
+        // OutputStart arrives at the end of one chunk (C marker), the first output
+        // byte in the next. The owed separator must still be emitted once, before
+        // that byte — exercising the `pending_separator` Cow-fast-path guard.
         let mut f = Formatter::new();
-        let mut out = Vec::new();
-        for c in chunks {
-            out.extend_from_slice(&f.process(c));
+        if !f.is_enabled() {
+            return;
         }
-        out.extend_from_slice(&f.flush());
-        out
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C)); // OutputStart, separator owed
+        out.extend_from_slice(&f.process(b"hello\n")); // first output byte next chunk
+        out.extend_from_slice(&f.process(D));
+        assert_eq!(out, cat(&[C, &sep(), b"hello\n", D]));
+    }
+
+    #[test]
+    fn separator_carries_timestamp_with_a_clock() {
+        let mut f = Formatter::with_clock(Clock::Fixed("12:34:56"));
+        f.theme = Theme::plain();
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"hi\n"));
+        out.extend_from_slice(&f.process(D));
+        let expected = cat(&[C, &sep_with(Clock::Fixed("12:34:56")), b"hi\n", D]);
+        assert_eq!(out, expected);
+        // The timestamp text is present in the emitted separator.
+        assert!(out.windows(8).any(|w| w == b"12:34:56"));
     }
 
     #[test]
     fn eof_flush_emits_withheld_non_json_unchanged() {
-        // Command output that starts like JSON but never closes (no `D`) and the
-        // stream ends. The withheld bytes must survive, byte-for-byte.
-        let stream = cat(&[C, br#"{"a":1"#]); // incomplete: no closing brace, no D
-        assert_eq!(run_flush(&[&stream]), stream);
+        // Output that starts like JSON but never closes (no `D`), then EOF. The
+        // withheld bytes survive verbatim, behind the separator.
+        let body = br#"{"a":1"#; // incomplete: no closing brace
+        let input = cat(&[C, body]);
+        assert_eq!(run_flush(&[&input]), cat(&[C, &sep(), body]));
     }
 
     #[test]
@@ -372,11 +610,14 @@ mod tests {
         out.extend_from_slice(&f.process(C));
         out.extend_from_slice(&f.process(br#"{"a":1}"#)); // buffered, no D yet
         out.extend_from_slice(&f.flush()); // EOF -> format the complete value
-        assert_eq!(out, cat(&[C, b"{\n  \"a\": 1\n}"]));
+        assert_eq!(
+            out,
+            cat(&[C, &sep(), &badge("JSON"), &crlf(b"{\n  \"a\": 1\n}")])
+        );
     }
 
     #[test]
-    fn two_consecutive_json_outputs_each_formatted() {
+    fn two_consecutive_json_outputs_each_framed_and_formatted() {
         let mut f = Formatter::new();
         if !f.is_enabled() {
             return;
@@ -386,32 +627,76 @@ mod tests {
         for part in [C, br#"{"a":1}"#, D, C, b"[1,2]", D] {
             out.extend_from_slice(&f.process(part));
         }
-        let expected = cat(&[C, b"{\n  \"a\": 1\n}", D, C, b"[\n  1,\n  2\n]", D]);
+        let one = crlf(b"{\n  \"a\": 1\n}");
+        let two = crlf(b"[\n  1,\n  2\n]");
+        let expected = cat(&[
+            C,
+            &sep(),
+            &badge("JSON"),
+            &one,
+            D,
+            C,
+            &sep(),
+            &badge("JSON"),
+            &two,
+            D,
+        ]);
         assert_eq!(out, expected);
     }
 
     #[test]
+    fn html_output_is_indented_with_badge() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"<p>hi</p>"));
+        out.extend_from_slice(&f.process(D));
+        let indented = crlf(b"<p>\n  hi\n</p>");
+        assert_eq!(out, cat(&[C, &sep(), &badge("HTML"), &indented, D]));
+    }
+
+    #[test]
     fn buffer_cap_overflow_streams_verbatim() {
-        // A `{`-leading run larger than BUFFER_CAP must give up and stream the
-        // bytes unchanged rather than hold them.
+        // A `{`-leading run larger than BUFFER_CAP gives up and streams the bytes
+        // unchanged (behind the separator) rather than holding them.
         let mut body = vec![b'{'];
         body.extend(std::iter::repeat_n(b'x', BUFFER_CAP + 1));
-        let stream = cat(&[C, &body]); // no D; overflow forces verbatim
-        assert_eq!(run_flush(&[&stream]), stream);
+        let input = cat(&[C, &body]); // no D; overflow forces verbatim
+        assert_eq!(run_flush(&[&input]), cat(&[C, &sep(), &body]));
     }
 
     #[test]
     fn ansi_escape_mid_json_keeps_bytes_intact() {
-        // Output containing an ANSI escape can't be one clean JSON value; it must
-        // pass through byte-for-byte (invariant #3: don't double-format ANSI).
-        let stream = cat(&[C, br#"{"a":1"#, b"\x1b[31m", b"}", D]);
-        assert_eq!(run(&[&stream]), stream);
+        // Output containing an ANSI escape can't be one clean JSON value; the
+        // user's bytes pass through unchanged (invariant #3) behind the separator.
+        let body = cat(&[br#"{"a":1"#, b"\x1b[31m", b"}"]);
+        let input = cat(&[C, &body, D]);
+        assert_eq!(run(&[&input]), cat(&[C, &sep(), &body, D]));
+    }
+
+    /// Expected framing of a single command's non-JSON output: a separator is
+    /// inserted only if the command actually produced output bytes.
+    fn framed(body: &[u8], trailing_d: bool) -> Vec<u8> {
+        let mut v = C.to_vec();
+        if !body.is_empty() {
+            v.extend_from_slice(&sep());
+            v.extend_from_slice(body);
+        }
+        if trailing_d {
+            v.extend_from_slice(D);
+        }
+        v
     }
 
     proptest::proptest! {
         /// Byte-safety invariant #4 for the pass-through path: with no escape
-        /// sequences in the stream (so the zone never leaves Unknown), the
-        /// concatenation of outputs equals the concatenation of inputs exactly.
+        /// sequences in the stream (so the zone never leaves Unknown, and no
+        /// separator is ever inserted), the concatenation of outputs equals the
+        /// concatenation of inputs exactly.
         #[test]
         fn prop_passthrough_is_byte_identical(
             chunks in proptest::collection::vec(proptest::collection::vec(0u8..=255, 0..64), 0..16)
@@ -429,11 +714,11 @@ mod tests {
         }
 
         /// Non-JSON command output (arbitrary ESC-free bytes wrapped in C/D
-        /// markers) is emitted byte-for-byte. This exercises the buffering path
-        /// and proves it withholds-then-flushes without altering bytes, as long
-        /// as the content isn't a clean JSON document.
+        /// markers) is preserved byte-for-byte, with only the GLIMPS separator
+        /// inserted at output start. Proves the buffering path withholds-then-
+        /// flushes without altering the user's bytes.
         #[test]
-        fn prop_non_json_output_round_trips(
+        fn prop_non_json_output_preserves_user_bytes(
             body in proptest::collection::vec(0u8..=255, 0..256)
         ) {
             let mut f = Formatter::new();
@@ -442,21 +727,21 @@ mod tests {
             }
             let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b).collect();
             // Skip inputs that ARE a formattable JSON value — those are meant to change.
-            proptest::prop_assume!(!json::detect(&clean)
-                || serde_json::from_slice::<serde_json::Value>(&clean).is_err());
+            // Exclude anything a formatter would reformat — those are meant to change.
+            proptest::prop_assume!(format_recognized(&clean, &Theme::plain()).is_none());
 
-            let stream = [C, &clean, D].concat();
+            let input = [C, &clean, D].concat();
             let mut out = Vec::new();
-            out.extend_from_slice(&f.process(&stream));
-            proptest::prop_assert_eq!(out, stream);
+            out.extend_from_slice(&f.process(&input));
+            proptest::prop_assert_eq!(out, framed(&clean, true));
         }
 
-        /// The EOF-flush path is byte-identical for non-JSON output, even when
-        /// the stream is split at arbitrary chunk boundaries and never closed by
-        /// a `D` marker (the shell-crash scenario). Directly guards the
-        /// truncation bug the safety audit caught.
+        /// The EOF-flush path preserves non-JSON user bytes even when the stream
+        /// is split at arbitrary boundaries and never closed by a `D` marker (the
+        /// shell-crash scenario). Directly guards the truncation bug the audit
+        /// caught.
         #[test]
-        fn prop_eof_flush_round_trips_non_json(
+        fn prop_eof_flush_preserves_user_bytes(
             body in proptest::collection::vec(0u8..=255, 0..256),
             splits in proptest::collection::vec(1usize..40, 1..10),
         ) {
@@ -465,21 +750,21 @@ mod tests {
                 return Ok(());
             }
             let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b).collect();
-            proptest::prop_assume!(!json::detect(&clean)
-                || serde_json::from_slice::<serde_json::Value>(&clean).is_err());
+            // Exclude anything a formatter would reformat — those are meant to change.
+            proptest::prop_assume!(format_recognized(&clean, &Theme::plain()).is_none());
 
             // C + body, but NO closing D — then flush, simulating PTY EOF.
-            let stream = [C, &clean].concat();
+            let input = [C, &clean].concat();
             let mut out = Vec::new();
             let (mut i, mut si) = (0usize, 0usize);
-            while i < stream.len() {
-                let step = splits[si % splits.len()].min(stream.len() - i).max(1);
-                out.extend_from_slice(&f.process(&stream[i..i + step]));
+            while i < input.len() {
+                let step = splits[si % splits.len()].min(input.len() - i).max(1);
+                out.extend_from_slice(&f.process(&input[i..i + step]));
                 i += step;
                 si += 1;
             }
             out.extend_from_slice(&f.flush());
-            proptest::prop_assert_eq!(out, stream);
+            proptest::prop_assert_eq!(out, framed(&clean, false));
         }
     }
 }

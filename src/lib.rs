@@ -9,5 +9,6 @@
 //! only formatting entry point is `format::Formatter::process`.
 
 pub mod format;
+pub mod init;
 pub mod pty;
 pub mod terminal;

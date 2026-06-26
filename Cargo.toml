@@ -34,6 +34,12 @@ anyhow = "1"
 # requirement for a tool that reformats output.
 serde_json = { version = "1", features = ["preserve_order"] }
 
+# Local wall-clock for the command/output separator timestamp. `local-offset`
+# lets us read the UTC offset once at startup (single-threaded, sound) and apply
+# it to monotonic-free `now_utc()` — avoiding the unsoundness of `localtime` in a
+# multithreaded process. Only the timestamp path uses it.
+time = { version = "0.3", features = ["local-offset"] }
+
 [dev-dependencies]
 # Property-based testing. The charter mandates a property test proving every
 # transform is panic-free and byte-safe on arbitrary input; proptest is the
