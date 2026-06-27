@@ -33,9 +33,10 @@ Goal: it never gets in the way, on any command.
 - ◐ ANSI-already-present pass-through (a control byte ends/declines a buffered run;
       no explicit whole-run gate yet)
 - ☑ `isatty()` pipe-safety (formatting off when stdout isn't a terminal)
-- ☐ Log severity coloring (ERROR/WARN/INFO/DEBUG), streaming line-by-line
-- ☐ HTTP status code highlighting
-- ☐ Streaming mode for unbounded output (`tail -f`, `docker logs -f`)
+- ☑ Log severity coloring (ERROR/WARN/INFO/DEBUG), streaming line-by-line
+- ☑ HTTP status code highlighting
+- ☑ Streaming mode for unbounded output (`tail -f`, `docker logs -f`)
+      (plain text streams line-by-line; only complete lines colored; long lines capped)
 
 Exit criteria: zero interference on the top 50 common commands.
 

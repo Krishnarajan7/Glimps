@@ -29,6 +29,7 @@
 
 mod html;
 mod json;
+mod linefmt;
 mod osc133;
 mod theme;
 
@@ -71,15 +72,24 @@ const BUFFER_CAP: usize = 1024 * 1024;
 /// and stream it.
 const SNIFF_CAP: usize = 64;
 
+/// Cap on a single un-terminated line held by the streaming colorizer. A "line"
+/// longer than this is almost certainly not a log line; flush it verbatim and
+/// stop coloring the run. Bounds memory on newline-less output.
+const LINE_CAP: usize = 64 * 1024;
+
 /// State of the OUTPUT-zone accumulator.
 enum Collect {
     /// Not collecting: outside the output zone, or we gave up for this command.
     Idle,
     /// Seen only whitespace so far this output run; still deciding.
     Sniff(Vec<u8>),
-    /// Output looks like JSON (`{`/`[`); accumulating until the run ends.
+    /// Output looks like JSON (`{`/`[`) or HTML (`<`); accumulating until the run
+    /// ends, then formatted as a unit.
     Buffer(Vec<u8>),
-    /// Decided not to format this output run; stream the rest verbatim.
+    /// Plain text output: streamed line-by-line with log/HTTP coloring. Holds the
+    /// current partial (un-terminated) line across chunks.
+    Stream(Vec<u8>),
+    /// Decided not to touch this output run; stream the rest verbatim.
     Passthrough,
 }
 
@@ -193,7 +203,8 @@ impl Formatter {
             && match self.collect {
                 Collect::Idle => only_pass,
                 Collect::Passthrough => only_output,
-                Collect::Sniff(_) | Collect::Buffer(_) => false,
+                // Stream may color lines, Sniff/Buffer hold bytes: never borrow.
+                Collect::Sniff(_) | Collect::Buffer(_) | Collect::Stream(_) => false,
             };
         if zero_copy {
             return Cow::Borrowed(chunk);
@@ -243,6 +254,8 @@ impl Formatter {
                     Collect::Buffer(buf)
                 }
             }
+            // Plain-text run: keep streaming lines (separator already emitted).
+            Collect::Stream(line) => self.push_stream(line, seg, out),
             // Idle (fresh run) and Sniff (only whitespace so far) are both still
             // undecided: classify, and emit the separator only on a text commit.
             Collect::Idle => self.decide(Vec::new(), seg, out),
@@ -267,11 +280,17 @@ impl Formatter {
                 acc.extend_from_slice(seg);
                 let is_structured = matches!(seg[pos], b'{' | b'[' | b'<');
                 self.emit_separator(out);
-                if is_structured && acc.len() <= BUFFER_CAP {
-                    Collect::Buffer(acc) // a formatting candidate; hold it
+                if is_structured {
+                    if acc.len() <= BUFFER_CAP {
+                        Collect::Buffer(acc) // a formatting candidate; hold it
+                    } else {
+                        // Too big to format; don't line-color a giant blob either.
+                        out.extend_from_slice(&acc);
+                        Collect::Passthrough
+                    }
                 } else {
-                    out.extend_from_slice(&acc); // stream verbatim
-                    Collect::Passthrough
+                    // Plain text: stream line-by-line with log/HTTP coloring.
+                    self.push_stream(Vec::new(), &acc, out)
                 }
             }
             None => {
@@ -295,6 +314,29 @@ impl Formatter {
             self.pending_separator = false;
             let sep = self.render_separator();
             out.extend_from_slice(&sep);
+        }
+    }
+
+    /// Stream plain-text output line-by-line, coloring each *complete* line (log
+    /// severity / HTTP status) and carrying the trailing partial line across
+    /// chunks. Returns the next state: `Stream` with the carried partial, or
+    /// `Passthrough` if the partial line grew past `LINE_CAP` (not a log line).
+    fn push_stream(&mut self, mut line: Vec<u8>, seg: &[u8], out: &mut Vec<u8>) -> Collect {
+        let mut start = 0;
+        for (i, &b) in seg.iter().enumerate() {
+            if b == b'\n' {
+                line.extend_from_slice(&seg[start..=i]);
+                emit_line(out, &line, &self.theme);
+                line.clear();
+                start = i + 1;
+            }
+        }
+        line.extend_from_slice(&seg[start..]);
+        if line.len() > LINE_CAP {
+            out.extend_from_slice(&line);
+            Collect::Passthrough
+        } else {
+            Collect::Stream(line)
         }
     }
 
@@ -331,6 +373,11 @@ impl Formatter {
                 // output, so emit the owed separator, then the whitespace verbatim.
                 self.emit_separator(out);
                 out.extend_from_slice(&acc);
+            }
+            Collect::Stream(line) => {
+                // The trailing partial line has no newline; emit it verbatim (we
+                // only color complete lines). The separator was emitted at commit.
+                out.extend_from_slice(&line);
             }
             Collect::Passthrough | Collect::Idle => {}
         }
@@ -403,6 +450,16 @@ fn format_recognized(bytes: &[u8], theme: &Theme) -> Option<(&'static str, Vec<u
     None
 }
 
+/// Emit one complete line, colored by log severity / HTTP status if it matches,
+/// else verbatim. The user's bytes (content + line ending) are always preserved;
+/// only color codes are added.
+fn emit_line(out: &mut Vec<u8>, line: &[u8], theme: &Theme) {
+    match linefmt::colorize_line(line, theme) {
+        Some(colored) => out.extend_from_slice(&colored),
+        None => out.extend_from_slice(line),
+    }
+}
+
 /// Render a content-type badge (e.g. ` JSON `) shown just above reformatted
 /// output. Inverse video so it reads as a tag; CRLF-terminated for the raw
 /// terminal.
@@ -473,10 +530,12 @@ mod tests {
         render_badge(label)
     }
 
-    /// Drive a sequence of chunks through one (timestamp-less) Formatter and
-    /// return all emitted bytes concatenated.
+    /// Drive a sequence of chunks through one (timestamp-less, plain-theme)
+    /// Formatter and return all emitted bytes concatenated. Plain theme means
+    /// line coloring adds no bytes, so verbatim assertions stay exact.
     fn run(chunks: &[&[u8]]) -> Vec<u8> {
         let mut f = Formatter::new();
+        f.theme = Theme::plain();
         let mut out = Vec::new();
         for c in chunks {
             out.extend_from_slice(&f.process(c));
@@ -484,9 +543,10 @@ mod tests {
         out
     }
 
-    /// Drive chunks through one Formatter, then flush (simulating PTY EOF).
+    /// Drive chunks through one plain-theme Formatter, then flush (PTY EOF).
     fn run_flush(chunks: &[&[u8]]) -> Vec<u8> {
         let mut f = Formatter::new();
+        f.theme = Theme::plain();
         let mut out = Vec::new();
         for c in chunks {
             out.extend_from_slice(&f.process(c));
@@ -617,6 +677,101 @@ mod tests {
         let body = b"\n";
         let input = cat(&[C, body, D]);
         assert_eq!(run(&[&input]), cat(&[C, &sep(), body, D]));
+    }
+
+    #[test]
+    fn log_and_http_lines_are_colored_streaming() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        // Default (colored) theme; lines arrive in separate chunks (tail -f style).
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"INFO starting up\n"));
+        out.extend_from_slice(&f.process(b"ERROR boom\n"));
+        out.extend_from_slice(&f.process(b"HTTP/1.1 404 Not Found\n"));
+        out.extend_from_slice(&f.process(b"just a plain line\n"));
+        out.extend_from_slice(&f.process(D));
+        let s = String::from_utf8(out).unwrap();
+        // Separator once, then each recognized line wrapped in its color; the
+        // plain line is untouched.
+        assert!(s.contains("\x1b[32mINFO starting up\x1b[0m\n")); // green
+        assert!(s.contains("\x1b[31mERROR boom\x1b[0m\n")); // red
+        assert!(s.contains("\x1b[33mHTTP/1.1 404 Not Found\x1b[0m\n")); // yellow
+        assert!(s.contains("just a plain line\n"));
+        assert!(!s.contains("\x1b[31mjust a plain line")); // plain line not colored
+    }
+
+    #[test]
+    fn log_line_split_across_chunks_is_colored_once_whole() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"ERR")); // partial line, no newline yet
+        out.extend_from_slice(&f.process(b"OR boom\n")); // completes the line
+        out.extend_from_slice(&f.process(D));
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\x1b[31mERROR boom\x1b[0m\n"));
+    }
+
+    #[test]
+    fn http_status_split_across_chunks_is_colored_whole() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"HTTP/1.1 4")); // code split mid-number
+        out.extend_from_slice(&f.process(b"04 Not Found\n"));
+        out.extend_from_slice(&f.process(D));
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\x1b[33mHTTP/1.1 404 Not Found\x1b[0m\n"));
+    }
+
+    #[test]
+    fn crlf_log_line_is_colored_with_ending_preserved() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"ERROR x\r\n")); // CRLF, as from a real PTY
+        out.extend_from_slice(&f.process(D));
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\x1b[31mERROR x\x1b[0m\r\n")); // reset before \r\n
+    }
+
+    #[test]
+    fn unterminated_final_line_flushes_verbatim_uncolored() {
+        // A colorable-looking line with no trailing newline at EOF is flushed
+        // verbatim (we only color complete lines) — and no bytes are lost.
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"ERROR boom")); // no newline
+        out.extend_from_slice(&f.flush()); // EOF
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.ends_with("ERROR boom"));
+        assert!(!s.contains("\x1b[31m")); // not colored (partial line)
+    }
+
+    #[test]
+    fn very_long_line_streams_verbatim_without_coloring() {
+        // A line longer than LINE_CAP with no newline overflows the line buffer:
+        // it must be streamed verbatim (no coloring, no byte loss).
+        let mut body = b"ERROR ".to_vec(); // would match if it were a complete line
+        body.extend(std::iter::repeat_n(b'x', LINE_CAP + 16));
+        let input = cat(&[C, &body]); // no D; overflow forces verbatim, then EOF
+        assert_eq!(run_flush(&[&input]), cat(&[C, &sep(), &body]));
     }
 
     #[test]
@@ -900,6 +1055,7 @@ mod tests {
             if !f.is_enabled() {
                 return Ok(());
             }
+            f.theme = Theme::plain(); // line coloring adds no bytes -> exact assertions
             // Drop ESC (no escape sequences/zone changes) and NUL (binary framing
             // is covered separately); this run exercises text framing.
             let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b && b != 0).collect();
@@ -926,6 +1082,7 @@ mod tests {
             if !f.is_enabled() {
                 return Ok(());
             }
+            f.theme = Theme::plain(); // line coloring adds no bytes -> exact assertions
             // Drop ESC (no escape sequences/zone changes) and NUL (binary framing
             // is covered separately); this run exercises text framing.
             let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b && b != 0).collect();

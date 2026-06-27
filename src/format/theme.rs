@@ -19,6 +19,11 @@ pub struct Theme {
     // HTML
     pub tag: &'static str,
     pub comment: &'static str,
+    // Log severity / HTTP status classes
+    pub error: &'static str,
+    pub warn: &'static str,
+    pub info: &'static str,
+    pub debug: &'static str,
     pub reset: &'static str,
 }
 
@@ -34,6 +39,10 @@ impl Theme {
             keyword: "",
             tag: "",
             comment: "",
+            error: "",
+            warn: "",
+            info: "",
+            debug: "",
             reset: "",
         }
     }
@@ -49,6 +58,10 @@ impl Theme {
             keyword: "\x1b[35m", // magenta
             tag: "\x1b[34m",     // blue
             comment: "\x1b[2m",  // dim
+            error: "\x1b[31m",   // red    (ERROR / 5xx)
+            warn: "\x1b[33m",    // yellow (WARN / 4xx)
+            info: "\x1b[32m",    // green  (INFO / 2xx)
+            debug: "\x1b[2m",    // dim    (DEBUG/TRACE / 3xx)
             reset: "\x1b[0m",
         }
     }
