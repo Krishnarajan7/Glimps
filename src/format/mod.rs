@@ -33,6 +33,7 @@ mod osc133;
 mod theme;
 
 use std::borrow::Cow;
+use std::io::IsTerminal;
 
 use osc133::{Osc133Scanner, Seg};
 // `Zone` is the seam's vocabulary; only tests consume it directly today.
@@ -101,6 +102,9 @@ pub struct Formatter {
     /// the separator is owed and will be written just before that first byte.
     /// Lazy on purpose: commands with no output get no separator.
     pending_separator: bool,
+    /// Whether the previous chunk left a full-screen TUI on the alternate screen.
+    /// Tracked so the chunk that *exits* alt-screen is also passed through.
+    was_alt_screen: bool,
 }
 
 impl Formatter {
@@ -108,16 +112,29 @@ impl Formatter {
         Self::with_clock(Clock::Off)
     }
 
-    /// Construct with an explicit timestamp source (the supervisor passes real
-    /// local time; tests pass a fixed clock).
+    /// Construct with an explicit timestamp source (tests pass a fixed clock).
+    /// Formatting is gated only by the `GLIMPS` env here.
     pub fn with_clock(clock: Clock) -> Self {
+        Self::build(clock, true)
+    }
+
+    /// Construct for the live supervisor. In addition to `GLIMPS=0`, this also
+    /// disables formatting when stdout is **not a terminal** (piped/redirected),
+    /// so anything capturing GLIMPS's output gets raw bytes — never injected
+    /// ANSI/separators (safety invariant #3).
+    pub fn for_supervisor(clock: Clock) -> Self {
+        Self::build(clock, std::io::stdout().is_terminal())
+    }
+
+    fn build(clock: Clock, output_is_tty: bool) -> Self {
         Formatter {
-            enabled: glimps_enabled(),
+            enabled: glimps_enabled() && output_is_tty,
             scanner: Osc133Scanner::new(),
             collect: Collect::Idle,
             theme: Theme::default(),
             clock,
             pending_separator: false,
+            was_alt_screen: false,
         }
     }
 
@@ -134,6 +151,33 @@ impl Formatter {
         }
 
         let segments = self.scanner.feed_segments(chunk);
+
+        // Interactive bypass: while a full-screen program owns the alternate
+        // screen (vim, less, htop, fzf, …) — or on the chunk that exits it — pass
+        // every byte through untouched. Injecting a separator or buffering into a
+        // TUI's redraw stream would corrupt its display (and feel un-native).
+        //
+        // Alt-screen state is sampled at end-of-chunk, so this latches the bypass
+        // across `process` calls (which is how real TUIs arrive: enter, then many
+        // draw reads, then exit). A degenerate chunk that both enters AND exits
+        // alt-screen is intentionally not bypassed; that doesn't happen for real
+        // interactive programs, whose lifetimes span many reads.
+        let alt = self.scanner.in_alt_screen();
+        if alt || self.was_alt_screen {
+            self.was_alt_screen = alt;
+            if matches!(self.collect, Collect::Idle) && !self.pending_separator {
+                return Cow::Borrowed(chunk);
+            }
+            // Flush any withheld bytes (a TUI shouldn't begin mid-buffer, but we
+            // never drop user bytes), then stream the chunk. Dropping an owed
+            // separator here is intentional — including the common case where
+            // output just started with no text yet: a TUI gets no separator.
+            let mut out = Vec::with_capacity(chunk.len());
+            self.finalize(&mut out);
+            self.pending_separator = false;
+            out.extend_from_slice(chunk);
+            return Cow::Owned(out);
+        }
 
         // Zero-copy fast paths, where the chunk's bytes are emitted verbatim:
         //   * Idle with only pass-through bytes -> nothing to buffer or frame;
@@ -178,20 +222,17 @@ impl Formatter {
         Cow::Owned(out)
     }
 
-    /// Feed one run of OUTPUT-zone content into the accumulator, first emitting
-    /// the owed separator if this is the command's first output byte.
+    /// Feed one run of OUTPUT-zone content into the accumulator. The owed
+    /// separator is emitted lazily, only once the run *commits to text* — so
+    /// binary output (detected before commit) is never framed.
     fn push_output(&mut self, seg: &[u8], out: &mut Vec<u8>) {
-        if self.pending_separator {
-            self.pending_separator = false;
-            let sep = self.render_separator();
-            out.extend_from_slice(&sep);
-        }
         self.collect = match std::mem::replace(&mut self.collect, Collect::Idle) {
             Collect::Passthrough => {
                 out.extend_from_slice(seg);
                 Collect::Passthrough
             }
             Collect::Buffer(mut buf) => {
+                // Separator was already emitted when this run committed to text.
                 if buf.len().saturating_add(seg.len()) > BUFFER_CAP {
                     // Too big to hold/format: flush what we have and stream the rest.
                     out.extend_from_slice(&buf);
@@ -202,11 +243,59 @@ impl Formatter {
                     Collect::Buffer(buf)
                 }
             }
-            // Idle (fresh output run) and Sniff both decide via the first
-            // non-whitespace byte.
-            Collect::Idle => sniff(Vec::new(), seg, out),
-            Collect::Sniff(acc) => sniff(acc, seg, out),
+            // Idle (fresh run) and Sniff (only whitespace so far) are both still
+            // undecided: classify, and emit the separator only on a text commit.
+            Collect::Idle => self.decide(Vec::new(), seg, out),
+            Collect::Sniff(acc) => self.decide(acc, seg, out),
         };
+    }
+
+    /// Decide what an undecided run is, given `acc` (whitespace seen so far) and
+    /// the new `seg`. Emits the owed separator only when committing to *text*;
+    /// binary (a NUL before any text commits) is streamed verbatim with no
+    /// separator (invariant #3: never frame or reformat binary).
+    fn decide(&mut self, mut acc: Vec<u8>, seg: &[u8], out: &mut Vec<u8>) -> Collect {
+        if acc.contains(&0) || seg.contains(&0) {
+            self.pending_separator = false; // suppress: this is binary
+            out.extend_from_slice(&acc);
+            out.extend_from_slice(seg);
+            return Collect::Passthrough;
+        }
+        match seg.iter().position(|b| !b.is_ascii_whitespace()) {
+            Some(pos) => {
+                // First real byte: commit to text -> the separator is now due.
+                acc.extend_from_slice(seg);
+                let is_structured = matches!(seg[pos], b'{' | b'[' | b'<');
+                self.emit_separator(out);
+                if is_structured && acc.len() <= BUFFER_CAP {
+                    Collect::Buffer(acc) // a formatting candidate; hold it
+                } else {
+                    out.extend_from_slice(&acc); // stream verbatim
+                    Collect::Passthrough
+                }
+            }
+            None => {
+                // Still only whitespace; keep waiting (no separator yet), but don't
+                // hoard unboundedly.
+                acc.extend_from_slice(seg);
+                if acc.len() > SNIFF_CAP {
+                    self.emit_separator(out);
+                    out.extend_from_slice(&acc);
+                    Collect::Passthrough
+                } else {
+                    Collect::Sniff(acc)
+                }
+            }
+        }
+    }
+
+    /// Emit the owed separator (if any) to `out`, clearing the debt.
+    fn emit_separator(&mut self, out: &mut Vec<u8>) {
+        if self.pending_separator {
+            self.pending_separator = false;
+            let sep = self.render_separator();
+            out.extend_from_slice(&sep);
+        }
     }
 
     /// Emit any output still held in the accumulator. **Must** be called once
@@ -237,7 +326,12 @@ impl Formatter {
                 // Not a type we format: the user's bytes, emitted exactly as-is.
                 None => out.extend_from_slice(&buf),
             },
-            Collect::Sniff(acc) => out.extend_from_slice(&acc),
+            Collect::Sniff(acc) => {
+                // Whitespace-only output that never committed: it still counts as
+                // output, so emit the owed separator, then the whitespace verbatim.
+                self.emit_separator(out);
+                out.extend_from_slice(&acc);
+            }
             Collect::Passthrough | Collect::Idle => {}
         }
     }
@@ -332,41 +426,6 @@ fn push_crlf(out: &mut Vec<u8>, bytes: &[u8]) {
             out.push(b'\r');
         }
         out.push(b);
-    }
-}
-
-/// Decide what to do with a fresh/whitespace-only output run, given `acc` (any
-/// whitespace already seen) and the new `seg`. Returns the next [`Collect`]
-/// state and emits to `out` whatever should be streamed immediately.
-fn sniff(mut acc: Vec<u8>, seg: &[u8], out: &mut Vec<u8>) -> Collect {
-    match seg.iter().position(|b| !b.is_ascii_whitespace()) {
-        Some(pos) => {
-            // First real byte decides: a structured-content opener (`{`/`[` for
-            // JSON, `<` for HTML) -> buffer for a formatting attempt; anything
-            // else -> stream verbatim.
-            acc.extend_from_slice(seg);
-            if matches!(seg[pos], b'{' | b'[' | b'<') {
-                if acc.len() > BUFFER_CAP {
-                    out.extend_from_slice(&acc);
-                    Collect::Passthrough
-                } else {
-                    Collect::Buffer(acc)
-                }
-            } else {
-                out.extend_from_slice(&acc);
-                Collect::Passthrough
-            }
-        }
-        None => {
-            // Still all whitespace. Keep waiting, but don't hoard unboundedly.
-            acc.extend_from_slice(seg);
-            if acc.len() > SNIFF_CAP {
-                out.extend_from_slice(&acc);
-                Collect::Passthrough
-            } else {
-                Collect::Sniff(acc)
-            }
-        }
     }
 }
 
@@ -561,6 +620,122 @@ mod tests {
     }
 
     #[test]
+    fn binary_output_is_passed_through_without_a_separator() {
+        // Output beginning with a NUL byte is binary: no separator, no buffering,
+        // streamed exactly (invariant #3: never reformat binary).
+        let body = b"\x7fELF\x00\x01\x02\x00\x00rest";
+        let input = cat(&[C, body, D]);
+        assert_eq!(run(&[&input]), input);
+    }
+
+    #[test]
+    fn whitespace_then_binary_gets_no_separator() {
+        // Output that begins with whitespace and THEN reveals a NUL is still
+        // binary: because the separator is deferred until a text commit, it is
+        // correctly suppressed (not injected ahead of the binary).
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"  ")); // whitespace (undecided)
+        out.extend_from_slice(&f.process(b"\x00\x01bin")); // NUL -> binary
+        out.extend_from_slice(&f.process(D));
+        assert_eq!(out, cat(&[C, b"  ", b"\x00\x01bin", D]));
+    }
+
+    #[test]
+    fn nul_after_text_committed_still_streams_verbatim() {
+        // Once a run has committed to text (Passthrough), a later NUL just streams
+        // through. The separator was already shown for the text — that's correct.
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"hello ")); // commits to text -> separator
+        out.extend_from_slice(&f.process(b"\x00\x00")); // NUL later -> verbatim
+        out.extend_from_slice(&f.process(D));
+        assert_eq!(out, cat(&[C, &sep(), b"hello ", b"\x00\x00", D]));
+    }
+
+    #[test]
+    fn non_tty_supervisor_output_disables_formatting() {
+        // Under `cargo test`, stdout is not a terminal, so the supervisor
+        // constructor must disable formatting (raw pass-through).
+        if std::io::stdout().is_terminal() {
+            return; // can't assert the gate when run attached to a real tty
+        }
+        let mut f = Formatter::for_supervisor(Clock::Off);
+        assert!(!f.is_enabled());
+        // And it truly passes through, markers/JSON included.
+        let stream = cat(&[C, br#"{"a":1}"#, D]);
+        assert_eq!(&*f.process(&stream), stream.as_slice());
+    }
+
+    #[test]
+    fn alt_screen_app_is_passed_through_untouched() {
+        // A full-screen app (vim): enter alt screen, draw content that even looks
+        // like JSON, exit. No separator, no badge, no formatting — pure verbatim.
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        let alt_on = b"\x1b[?1049h";
+        let alt_off = b"\x1b[?1049l";
+        let parts: [&[u8]; 5] = [C, alt_on, br#"{"a":1}"#, alt_off, D];
+        let mut out = Vec::new();
+        for p in parts {
+            out.extend_from_slice(&f.process(p));
+        }
+        assert_eq!(out, parts.concat());
+    }
+
+    #[test]
+    fn alt_screen_entering_mid_buffer_flushes_without_byte_loss() {
+        // Defensive path: a buffered JSON-candidate run is pending when alt-screen
+        // is entered. The withheld bytes must be flushed verbatim (incomplete
+        // JSON doesn't format), then the alt-screen chunk streamed — nothing lost.
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C)); // OutputStart, separator owed
+        out.extend_from_slice(&f.process(br#"{"a":1"#)); // buffered (incomplete)
+        out.extend_from_slice(&f.process(b"\x1b[?1049h")); // alt-screen enters
+                                                           // Separator was emitted lazily before the buffered bytes; on alt-enter the
+                                                           // buffer is flushed verbatim and the chunk streamed.
+        assert_eq!(out, cat(&[C, &sep(), br#"{"a":1"#, b"\x1b[?1049h"]));
+    }
+
+    #[test]
+    fn formatting_resumes_after_alt_screen_exits() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        // A TUI session, discarded.
+        for p in [C, b"\x1b[?1049h".as_slice(), b"\x1b[?1049l", D] {
+            let _ = f.process(p);
+        }
+        // The next command's JSON output is formatted normally again.
+        let mut out = Vec::new();
+        for p in [C, br#"{"a":1}"#.as_slice(), D] {
+            out.extend_from_slice(&f.process(p));
+        }
+        assert_eq!(
+            out,
+            cat(&[C, &sep(), &badge("JSON"), &crlf(b"{\n  \"a\": 1\n}"), D])
+        );
+    }
+
+    #[test]
     fn separator_owed_across_a_chunk_boundary() {
         // OutputStart arrives at the end of one chunk (C marker), the first output
         // byte in the next. The owed separator must still be emitted once, before
@@ -725,7 +900,9 @@ mod tests {
             if !f.is_enabled() {
                 return Ok(());
             }
-            let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b).collect();
+            // Drop ESC (no escape sequences/zone changes) and NUL (binary framing
+            // is covered separately); this run exercises text framing.
+            let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b && b != 0).collect();
             // Skip inputs that ARE a formattable JSON value — those are meant to change.
             // Exclude anything a formatter would reformat — those are meant to change.
             proptest::prop_assume!(format_recognized(&clean, &Theme::plain()).is_none());
@@ -749,7 +926,9 @@ mod tests {
             if !f.is_enabled() {
                 return Ok(());
             }
-            let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b).collect();
+            // Drop ESC (no escape sequences/zone changes) and NUL (binary framing
+            // is covered separately); this run exercises text framing.
+            let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b && b != 0).collect();
             // Exclude anything a formatter would reformat — those are meant to change.
             proptest::prop_assume!(format_recognized(&clean, &Theme::plain()).is_none());
 

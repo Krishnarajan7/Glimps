@@ -27,10 +27,12 @@ Exit criteria: you use it daily for a week without turning it off.
 ## v0.2 — Safety & breadth (still local / early testers)
 Goal: it never gets in the way, on any command.
 
-- ☐ Interactive bypass list (vim, ssh, htop, less, fzf, …) — pass through untouched
-- ☐ Binary output pass-through (null-byte / non-UTF8 detection)
-- ☐ ANSI-already-present pass-through (don't double-format colored output)
-- ☐ `isatty()` pipe-safety (raw bytes when piped to another command)
+- ◐ Interactive bypass (vim, htop, less, fzf, …) — pass through untouched
+      (done via alternate-screen detection; name-based cases like `ssh` still TODO)
+- ◐ Binary output pass-through (NUL-byte detection done; non-UTF8 scan TODO)
+- ◐ ANSI-already-present pass-through (a control byte ends/declines a buffered run;
+      no explicit whole-run gate yet)
+- ☑ `isatty()` pipe-safety (formatting off when stdout isn't a terminal)
 - ☐ Log severity coloring (ERROR/WARN/INFO/DEBUG), streaming line-by-line
 - ☐ HTTP status code highlighting
 - ☐ Streaming mode for unbounded output (`tail -f`, `docker logs -f`)

@@ -100,6 +100,8 @@ enum ParseState {
     Ground,
     /// Just saw `ESC`; awaiting the sequence introducer.
     Esc,
+    /// Inside a CSI sequence (`ESC [`); collecting params until a final byte.
+    Csi,
     /// Inside a string body; collecting until a terminator.
     StringBody(StringKind),
     /// Inside a string body and just saw `ESC`; `\` completes the ST terminator.
@@ -109,11 +111,18 @@ enum ParseState {
 const ESC: u8 = 0x1B;
 const BEL: u8 = 0x07;
 const OSC_INTRODUCER: u8 = b']'; // 0x5D
+const CSI_INTRODUCER: u8 = b'['; // 0x5B
 const DCS_INTRODUCER: u8 = b'P'; // 0x50
 const SOS_INTRODUCER: u8 = b'X'; // 0x58
 const PM_INTRODUCER: u8 = b'^'; // 0x5E
 const APC_INTRODUCER: u8 = b'_'; // 0x5F
 const ST_FINAL: u8 = b'\\'; // 0x5C, the second byte of `ESC \`
+
+/// Enough to hold a CSI parameter string we care about. `?1049` is tiny, but
+/// some apps coalesce many DECSET modes into one sequence (`?2004;1004;…;1049h`);
+/// 64 comfortably holds realistic batches so an alt-screen mode isn't truncated
+/// past the cap (which would miss the bypass).
+const CSI_PREFIX_CAP: usize = 64;
 
 /// Incremental OSC-133 zone scanner. Cheap to feed; holds only the current zone,
 /// a parse state, and a small bounded buffer.
@@ -122,6 +131,11 @@ pub struct Osc133Scanner {
     state: ParseState,
     /// Captured prefix of the in-progress OSC body (bounded by `OSC_PREFIX_CAP`).
     osc_buf: Vec<u8>,
+    /// Captured prefix of the in-progress CSI params (bounded by `CSI_PREFIX_CAP`).
+    csi_buf: Vec<u8>,
+    /// Whether a full-screen program currently owns the alternate screen buffer
+    /// (vim, less, htop, fzf, …). While true, GLIMPS bypasses all formatting.
+    alt_screen: bool,
 }
 
 impl Osc133Scanner {
@@ -130,7 +144,15 @@ impl Osc133Scanner {
             zone: Zone::Unknown,
             state: ParseState::Ground,
             osc_buf: Vec::with_capacity(OSC_PREFIX_CAP),
+            csi_buf: Vec::with_capacity(CSI_PREFIX_CAP),
+            alt_screen: false,
         }
+    }
+
+    /// Whether a full-screen program is currently on the alternate screen. The
+    /// supervisor uses this to pass interactive TUIs through untouched.
+    pub fn in_alt_screen(&self) -> bool {
+        self.alt_screen
     }
 
     /// The zone the stream is currently in, i.e. the zone the *next* byte fed
@@ -237,16 +259,33 @@ impl Osc133Scanner {
                             self.osc_buf.clear();
                             ParseState::StringBody(StringKind::Osc)
                         }
+                        CSI_INTRODUCER => {
+                            self.csi_buf.clear();
+                            ParseState::Csi
+                        }
                         DCS_INTRODUCER | SOS_INTRODUCER | PM_INTRODUCER | APC_INTRODUCER => {
                             ParseState::StringBody(StringKind::Other)
                         }
                         // ESC ESC: stay primed on the latest ESC.
                         ESC => ParseState::Esc,
-                        // Any other escape (CSI `ESC [`, two-char escapes, …) is
-                        // not a string sequence we track; its introducer byte is
-                        // consumed and we return to ground.
+                        // Any other escape (two-char escapes, …) consumes its
+                        // introducer byte and returns to ground.
                         _ => ParseState::Ground,
                     };
+                    break;
+                }
+                ParseState::Csi => {
+                    if b == ESC {
+                        // Aborted by a new escape sequence.
+                        self.state = ParseState::Esc;
+                    } else if (0x40..=0x7E).contains(&b) {
+                        // Final byte: the sequence is complete.
+                        self.finish_csi(b);
+                        self.state = ParseState::Ground;
+                    } else if self.csi_buf.len() < CSI_PREFIX_CAP {
+                        // Parameter / intermediate byte.
+                        self.csi_buf.push(b);
+                    }
                     break;
                 }
                 ParseState::StringBody(kind) => {
@@ -285,6 +324,18 @@ impl Osc133Scanner {
         class
     }
 
+    /// A CSI sequence terminated with `final_byte`. We only care about the
+    /// alternate-screen private modes (`?1049`, `?1047`, `?47`) set by `h` /
+    /// reset by `l`; everything else is ignored.
+    fn finish_csi(&mut self, final_byte: u8) {
+        let set = final_byte == b'h';
+        let reset = final_byte == b'l';
+        if (set || reset) && csi_sets_alt_screen(&self.csi_buf) {
+            self.alt_screen = set;
+        }
+        self.csi_buf.clear();
+    }
+
     /// A string sequence terminated. If it was an OSC, classify its body and
     /// update the zone; either way reset to Ground.
     fn finish_string(&mut self, kind: StringKind) {
@@ -302,6 +353,18 @@ impl Default for Osc133Scanner {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Whether a CSI private-mode param string toggles the alternate screen. Handles
+/// both the lone form (`?1049`) and coalesced DECSET sequences that batch several
+/// modes (`?1049;2004`, `?2004;1049`) — any alt-screen mode in the list counts.
+fn csi_sets_alt_screen(csi_buf: &[u8]) -> bool {
+    let Some(params) = csi_buf.strip_prefix(b"?") else {
+        return false;
+    };
+    params
+        .split(|&b| b == b';')
+        .any(|p| matches!(p, b"1049" | b"1047" | b"47"))
 }
 
 /// Push a non-empty byte run as the appropriate [`Seg`]. Empty runs (which occur
@@ -576,6 +639,61 @@ mod tests {
     }
 
     #[test]
+    fn alt_screen_enter_and_exit_are_tracked() {
+        let mut s = Osc133Scanner::new();
+        assert!(!s.in_alt_screen());
+        s.feed(b"\x1b[?1049h"); // enter alt screen
+        assert!(s.in_alt_screen());
+        s.feed(b"some full-screen drawing \x1b[31mwith color\x1b[0m");
+        assert!(s.in_alt_screen()); // ordinary CSI doesn't change it
+        s.feed(b"\x1b[?1049l"); // leave alt screen
+        assert!(!s.in_alt_screen());
+    }
+
+    #[test]
+    fn alt_screen_legacy_modes_and_split_across_chunks() {
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b[?47h");
+        assert!(s.in_alt_screen());
+        s.feed(b"\x1b[?47l");
+        assert!(!s.in_alt_screen());
+        // Enter sequence split byte-by-byte still toggles on the final byte.
+        for &b in b"\x1b[?1049h" {
+            s.feed(&[b]);
+        }
+        assert!(s.in_alt_screen());
+    }
+
+    #[test]
+    fn ordinary_csi_does_not_toggle_alt_screen() {
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b[2J\x1b[1;1H\x1b[?25l\x1b[0m"); // clear, move, hide cursor, reset
+        assert!(!s.in_alt_screen());
+    }
+
+    #[test]
+    fn coalesced_private_modes_toggle_alt_screen() {
+        // Some apps batch DECSET modes; any alt-screen mode in the list counts.
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b[?1049;2004h");
+        assert!(s.in_alt_screen());
+        s.feed(b"\x1b[?2004;1049l");
+        assert!(!s.in_alt_screen());
+        // A batch WITHOUT an alt-screen mode must not toggle it.
+        s.feed(b"\x1b[?2004;25h");
+        assert!(!s.in_alt_screen());
+    }
+
+    #[test]
+    fn legacy_1047_mode_toggles_alt_screen() {
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b[?1047h");
+        assert!(s.in_alt_screen());
+        s.feed(b"\x1b[?1047l");
+        assert!(!s.in_alt_screen());
+    }
+
+    #[test]
     fn arbitrary_garbage_never_panics() {
         let mut s = Osc133Scanner::new();
         for b in 0u16..=255 {
@@ -605,6 +723,28 @@ mod tests {
         #[test]
         fn prop_never_panics(stream: Vec<u8>, sizes in proptest::collection::vec(1usize..8, 1..8)) {
             let _ = zone_after_chunks(&stream, &sizes);
+        }
+
+        /// `feed_segments` reconstructs the input exactly for arbitrary bytes
+        /// (now including CSI sequences), split at arbitrary chunk boundaries.
+        /// This is the parser-byte-safety guarantee the formatter relies on.
+        #[test]
+        fn prop_feed_segments_reconstructs(
+            stream: Vec<u8>,
+            sizes in proptest::collection::vec(1usize..8, 1..8),
+        ) {
+            let mut s = Osc133Scanner::new();
+            let mut rebuilt = Vec::new();
+            let (mut i, mut si) = (0usize, 0usize);
+            while i < stream.len() {
+                let step = sizes[si % sizes.len()].min(stream.len() - i).max(1);
+                let chunk = &stream[i..i + step];
+                let segs = s.feed_segments(chunk);
+                rebuilt.extend_from_slice(&rebuild(chunk, &segs));
+                i += step;
+                si += 1;
+            }
+            proptest::prop_assert_eq!(rebuilt, stream);
         }
 
         /// Chunk-boundary invariance on arbitrary bytes: the final zone is

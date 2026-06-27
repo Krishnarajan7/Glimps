@@ -60,7 +60,7 @@ pub fn run_shell(shell: &str, clock: Clock) -> Result<i32> {
     // Job #2: PTY -> Formatter -> stdout
     let mut reader = pair.master.try_clone_reader()?;
     let reader_thread = thread::spawn(move || {
-        let mut formatter = Formatter::with_clock(clock);
+        let mut formatter = Formatter::for_supervisor(clock);
         let mut stdout = std::io::stdout();
         let mut buf = [0u8; 8192];
         loop {
