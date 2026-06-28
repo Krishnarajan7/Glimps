@@ -1,0 +1,3 @@
+● glimps.service - GLIMPS daemon
+   Loaded: loaded (/etc/systemd/system/glimps.service; enabled)
+   Active: [32mactive (running)[0m since Sat 2026-06-28 09:00:00

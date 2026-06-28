@@ -55,13 +55,17 @@ impl Severity {
 }
 
 /// Colorize one line (which may include a trailing `\n` or `\r\n`). Returns the
-/// colored bytes if the line is a recognized log/HTTP line, else `None`.
-pub fn colorize_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+/// colored bytes if the line is a recognized log/HTTP line, else `None`. `http`
+/// and `logs` gate the two categories independently (per `.glimpsrc`).
+pub fn colorize_line(line: &[u8], theme: &Theme, logs: bool, http: bool) -> Option<Vec<u8>> {
     let (content, ending) = split_line(line);
     if content.is_empty() {
         return None;
     }
-    let color = http_status_color(content, theme).or_else(|| severity_color(content, theme))?;
+    let color = http
+        .then(|| http_status_color(content, theme))
+        .flatten()
+        .or_else(|| logs.then(|| severity_color(content, theme)).flatten())?;
 
     let mut out = Vec::with_capacity(line.len() + color.len() + theme.reset.len());
     out.extend_from_slice(color.as_bytes());
@@ -162,7 +166,8 @@ mod tests {
     use super::*;
 
     fn colored(line: &[u8]) -> Option<String> {
-        colorize_line(line, &Theme::default_colored()).map(|v| String::from_utf8(v).unwrap())
+        colorize_line(line, &Theme::default_colored(), true, true)
+            .map(|v| String::from_utf8(v).unwrap())
     }
 
     #[test]
@@ -179,12 +184,12 @@ mod tests {
 
     #[test]
     fn preserves_content_and_line_ending() {
-        let out = colorize_line(b"ERROR: boom\r\n", &Theme::default_colored()).unwrap();
+        let out = colorize_line(b"ERROR: boom\r\n", &Theme::default_colored(), true, true).unwrap();
         assert_eq!(out, b"\x1b[31mERROR: boom\x1b[0m\r\n");
-        let out = colorize_line(b"ERROR: boom\n", &Theme::default_colored()).unwrap();
+        let out = colorize_line(b"ERROR: boom\n", &Theme::default_colored(), true, true).unwrap();
         assert_eq!(out, b"\x1b[31mERROR: boom\x1b[0m\n");
         // No trailing newline is fine too.
-        let out = colorize_line(b"ERROR: boom", &Theme::default_colored()).unwrap();
+        let out = colorize_line(b"ERROR: boom", &Theme::default_colored(), true, true).unwrap();
         assert_eq!(out, b"\x1b[31mERROR: boom\x1b[0m");
     }
 
@@ -231,7 +236,10 @@ mod tests {
         // The whole point that keeps the streaming path byte-safe: with no colors,
         // a "matched" line reproduces the input exactly.
         let line = b"ERROR: boom\r\n";
-        assert_eq!(colorize_line(line, &Theme::plain()).unwrap(), line);
+        assert_eq!(
+            colorize_line(line, &Theme::plain(), true, true).unwrap(),
+            line
+        );
     }
 
     proptest::proptest! {
@@ -239,7 +247,7 @@ mod tests {
         /// the input (so the streaming path can't corrupt user bytes).
         #[test]
         fn prop_plain_is_identity_and_never_panics(line: Vec<u8>) {
-            if let Some(out) = colorize_line(&line, &Theme::plain()) {
+            if let Some(out) = colorize_line(&line, &Theme::plain(), true, true) {
                 proptest::prop_assert_eq!(out, line);
             }
         }

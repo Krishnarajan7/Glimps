@@ -1,0 +1,3 @@
+PING github.com (140.82.112.3): 56 data bytes
+64 bytes from 140.82.112.3: icmp_seq=0 ttl=52 time=21.456 ms
+64 bytes from 140.82.112.3: icmp_seq=1 ttl=52 time=20.987 ms

@@ -1,0 +1,2 @@
+Jun 28 09:00:01 host sshd[4123]: Accepted publickey for krishv
+Jun 28 09:00:02 host sudo[4140]: krishv : TTY=pts/0 ; COMMAND=/usr/bin/id

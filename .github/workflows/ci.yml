@@ -29,6 +29,11 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --all --all-features
+      # The latency budget is enforced by `latency_budget_no_pathological_blowup`
+      # in the test step above. Also make sure the criterion benches still build
+      # so they don't rot (real micro-latency numbers come from `cargo bench`).
+      - name: Benches compile
+        run: cargo bench --no-run
 
   audit:
     name: security audit

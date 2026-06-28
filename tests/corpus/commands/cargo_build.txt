@@ -1,0 +1,3 @@
+   Compiling glimps v0.0.1 (/Users/krishv/Projects/Glimps)
+warning: unused variable: `x`
+    Finished dev [unoptimized] target(s) in 0.82s

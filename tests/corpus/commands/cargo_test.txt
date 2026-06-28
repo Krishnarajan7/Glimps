@@ -1,0 +1,5 @@
+running 3 tests
+test format::tests::a ... ok
+test format::tests::b ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored

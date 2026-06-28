@@ -1,0 +1,36 @@
+# GLIMPS configuration — copy to ~/.glimpsrc and edit.
+#
+# Everything here is OPTIONAL; the values shown are the defaults. A missing file
+# uses these defaults. A file with a typo or syntax error is ignored (GLIMPS
+# warns once on stderr and falls back to defaults) — a broken config never
+# breaks your terminal.
+#
+# You can also point GLIMPS at a different file with the GLIMPSRC env var.
+
+# Master switch. false = GLIMPS becomes a pure pass-through (same as GLIMPS=0).
+enabled = true
+
+# Color output. false = keep structure (indentation, the separator, the badge)
+# but emit no color escapes — a clean no-color / minimal mode.
+color = true
+
+# Show the divider line between a command and its output.
+separator = true
+
+# Include an HH:MM:SS timestamp in the separator.
+timestamp = true
+
+# Per-content-type formatters. Turn any of these off to pass that kind of output
+# through untouched.
+[formatters]
+json = true   # pretty-print + colorize JSON
+html = true   # indent + colorize HTML
+logs = true   # color ERROR/WARN/INFO/DEBUG lines
+http = true   # color HTTP status lines by class (2xx/3xx/4xx/5xx)
+
+# Size limits (bytes). These bound memory and latency; they are clamped to safe
+# ranges on load, so you can't accidentally make buffering unbounded.
+[limits]
+buffer_cap = 1048576   # max output buffered to detect JSON/HTML (1 MiB)
+line_cap   = 65536     # max length of one un-terminated streamed line (64 KiB)
+sniff_cap  = 64        # max leading whitespace held while deciding a run

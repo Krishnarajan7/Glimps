@@ -5,6 +5,7 @@
 //! `~/.zshrc`. All output transformation lives behind `format::Formatter`.
 
 use anyhow::Result;
+use glimps::config::Config;
 use glimps::format::Clock;
 use glimps::{init, pty};
 
@@ -37,18 +38,26 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Load ~/.glimpsrc (or $GLIMPSRC); missing/broken -> defaults.
+    let config = Config::load();
+
     // Capture the local UTC offset for separator timestamps NOW, while we are
     // still single-threaded — reading it after `run_shell` spawns threads would
-    // be unsound (and `time` would refuse). Fall back to no timestamp on error.
-    let clock = match time::UtcOffset::current_local_offset() {
-        Ok(offset) => Clock::Local(offset),
-        Err(_) => Clock::Off,
+    // be unsound (and `time` would refuse). Disabled if the config turns
+    // timestamps off, or on offset-read failure.
+    let clock = if config.timestamp {
+        match time::UtcOffset::current_local_offset() {
+            Ok(offset) => Clock::Local(offset),
+            Err(_) => Clock::Off,
+        }
+    } else {
+        Clock::Off
     };
 
     // The shell to wrap. Defaults to the user's $SHELL, falling back to zsh.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
 
-    let status = pty::run_shell(&shell, clock)?;
+    let status = pty::run_shell(&shell, clock, config)?;
     std::process::exit(status);
 }
 

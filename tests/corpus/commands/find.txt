@@ -1,0 +1,3 @@
+./src/main.rs
+./src/format/mod.rs
+./tests/corpus/commands/ls.txt

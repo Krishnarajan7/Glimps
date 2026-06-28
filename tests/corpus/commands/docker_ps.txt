@@ -1,0 +1,2 @@
+CONTAINER ID   IMAGE     COMMAND       STATUS         PORTS                    NAMES
+9f2a1b3c4d5e   nginx     "nginx -g"    Up 2 hours     0.0.0.0:8080->80/tcp     web

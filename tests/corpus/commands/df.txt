@@ -1,0 +1,3 @@
+Filesystem      Size   Used  Avail Capacity  Mounted on
+/dev/disk3s1   926Gi  410Gi  500Gi    46%    /System/Volumes/Data
+devfs          203Ki  203Ki    0Bi   100%    /dev

@@ -43,21 +43,32 @@ Exit criteria: zero interference on the top 50 common commands.
 ## v0.3 — Robustness & config
 Goal: trustworthy enough to hand to strangers.
 
-- ☐ `.glimpsrc` (TOML): bypass list, thresholds, theme, enable/disable per type
-- ☐ Large-output streaming switch (500KB threshold) + `[streaming]` badge
-- ☐ Golden-file test corpus for top 50 commands
-- ☐ `criterion` benchmarks + enforced latency budget in CI
-- ☐ Color themes (incl. a no-color / minimal mode)
+- ◐ `.glimpsrc` (TOML): thresholds, enable/disable per type, color/separator/
+      timestamp toggles, master switch (done). Name-based bypass list still TODO
+      (needs command-name capture).
+- ☑ Large-output streaming switch (buffer/line caps → verbatim past threshold)
+- ◐ Golden-file test corpus (JSON/HTML goldens + ~14 common-command byte-safety
+      fixtures; extend toward the full top-50)
+- ☑ `criterion` benchmarks + enforced latency budget in CI (latency-budget test
+      runs on Linux+macOS; benches kept compiling via `cargo bench --no-run`)
+- ☑ Color themes — no-color / minimal mode via `color = false`
 
 Exit criteria: CI green on Linux + macOS; latency budget held.
 
 ## v1.0 — Public launch
 Goal: `brew install glimps`, a README that sells it, and a demo GIF that spreads.
 
-- ☐ Homebrew formula + prebuilt binaries via `cargo-dist` + release CI
-- ☐ Polished README with an animated before/after demo GIF
-- ☐ Docs: install, config, safety/privacy statement, uninstall
-- ☐ Hardened: no crashes on the top 50 commands; password prompts never touched
+- ◐ Homebrew formula + prebuilt binaries via `cargo-dist` + release CI
+      (configured: `dist-workspace.toml` + `.github/workflows/release.yml` build
+      macOS+Linux binaries, a shell installer, and a Homebrew formula on version
+      tags. To go live: create the `glimps-sh/homebrew-tap` repo + token secret,
+      bump the version, and push a `vX.Y.Z` tag.)
+- ◐ Polished README (done) with an animated before/after demo GIF (still to record)
+- ☑ Docs: install, config, safety/privacy statement, uninstall (README + `.glimpsrc.example`)
+- ☑ Hardened: 36-fixture command corpus (ANSI/Unicode/overstrike/tables/control-only/
+      empty) all byte-preserved; password-prompt test; fuzz sweep over text+ANSI
+      (10k cases) + arbitrary-bytes/arbitrary-config property tests prove no panic
+      and no byte loss. (Corpus can keep growing toward a literal top-50.)
 - ☐ Launch: Show HN, r/commandline, r/rust, Lobsters
 
 Exit criteria: a stranger installs it in <30s and it "just works."

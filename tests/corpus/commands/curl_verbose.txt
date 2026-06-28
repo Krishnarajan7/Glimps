@@ -1,0 +1,9 @@
+* Trying 93.184.216.34:80...
+* Connected to example.com (93.184.216.34) port 80
+> GET / HTTP/1.1
+> Host: example.com
+>
+< HTTP/1.1 200 OK
+< Content-Type: text/html
+<
+hello

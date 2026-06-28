@@ -5,6 +5,7 @@ edition = "2021"
 description = "Zero-config smart terminal output formatter — auto-detects and reformats JSON, HTML, and logs live in your shell."
 license = "MIT"
 repository = "https://github.com/glimps-sh/glimps"
+homepage = "https://github.com/glimps-sh/glimps"
 readme = "README.md"
 keywords = ["terminal", "pty", "formatter", "json", "cli"]
 categories = ["command-line-utilities"]
@@ -40,6 +41,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # multithreaded process. Only the timestamp path uses it.
 time = { version = "0.3", features = ["local-offset"] }
 
+# `.glimpsrc` config parsing. `serde` derive + `toml` are the standard, audited
+# choice for a small typed config; loaded once at startup, never on the hot path.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
 [dev-dependencies]
 # Property-based testing. The charter mandates a property test proving every
 # transform is panic-free and byte-safe on arbitrary input; proptest is the
@@ -60,3 +66,8 @@ lto = true
 strip = true
 codegen-units = 1
 panic = "abort"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

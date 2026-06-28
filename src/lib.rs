@@ -8,6 +8,7 @@
 //! Formatter internals (detectors/printers) stay private inside `format`; the
 //! only formatting entry point is `format::Formatter::process`.
 
+pub mod config;
 pub mod format;
 pub mod init;
 pub mod pty;

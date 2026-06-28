@@ -1,0 +1,3 @@
+NAME                     READY   STATUS    RESTARTS   AGE
+web-7d9f8c-abcde          1/1     Running   0          2d
+api-5b6c7d-fghij          0/1     Pending   0          5m

@@ -1,0 +1,5 @@
+commit d65c13b2f0a (HEAD -> main)
+Author: Krish V <terabyte.india26@gmail.com>
+Date:   Sat Jun 27 18:02:11 2026 +0530
+
+    feat: (binary + non-TTY safety gates)

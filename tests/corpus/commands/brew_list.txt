@@ -1,0 +1,5 @@
+autoconf 2.72
+cmake 3.29.3
+git 2.45.2
+ripgrep 14.1.0
+zsh 5.9

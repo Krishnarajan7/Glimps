@@ -1,0 +1,3 @@
+USER       PID  %CPU %MEM    VSZ   RSS   TT  STAT STARTED      TIME COMMAND
+krishv   42311   0.4  0.3 412899200  54128 s001  S    9:10AM   0:01.23 zsh
+root         1   0.0  0.0 408712384   9216  ??  Ss   Thu08AM   2:14.00 /sbin/launchd
