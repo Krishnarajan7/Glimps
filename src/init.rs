@@ -38,13 +38,21 @@ if [[ "$GLIMPS" != "0" ]]; then
     # where command output begins (C) and ends (D), and never touches the prompt
     # or what you type.
     __glimps_integration_loaded=1
+    # zsh's partial-line indicator (the inverse "%") is emitted INSIDE the command
+    # output zone, so it would make even no-output commands (cd, export) look like
+    # they produced output and get a separator. GLIMPS owns the command/output
+    # boundary now, so turn that indicator off.
+    unsetopt prompt_sp prompt_cr 2>/dev/null
     autoload -Uz add-zsh-hook
     __glimps_precmd() {
       local __glimps_exit=$?
       print -nr -- $'\e]133;D;'"${__glimps_exit}"$'\a\e]133;A\a'
     }
     __glimps_preexec() {
-      print -nr -- $'\e]133;C\a'
+      # Send GLIMPS the command being run (private OSC 7337) so it can show a
+      # colored command header and bypass interactive programs by name, then mark
+      # the start of command output (OSC 133;C).
+      print -nr -- $'\e]7337;'"$1"$'\a\e]133;C\a'
     }
     add-zsh-hook precmd __glimps_precmd
     add-zsh-hook preexec __glimps_preexec
@@ -77,6 +85,10 @@ mod tests {
         // relies on. Their byte sequences must be present.
         assert!(ZSH_INIT.contains(r"\e]133;C\a"), "missing C (output start)");
         assert!(
+            ZSH_INIT.contains(r"\e]7337;"),
+            "missing command-capture marker"
+        );
+        assert!(
             ZSH_INIT.contains(r"\e]133;D;"),
             "missing D (output end + exit)"
         );
@@ -90,6 +102,14 @@ mod tests {
         assert!(!ZSH_INIT.contains("PROMPT"));
         assert!(!ZSH_INIT.contains("PS1"));
         assert!(!ZSH_INIT.contains(r"\e]133;B\a"));
+    }
+
+    #[test]
+    fn zsh_snippet_disables_partial_line_indicator() {
+        // zsh's prompt_sp "%" lands in the output zone and would make no-output
+        // commands look like they produced output; we disable it (GLIMPS owns the
+        // boundary). Keep this so the no-output-separator fix can't regress.
+        assert!(ZSH_INIT.contains("unsetopt prompt_sp"));
     }
 
     #[test]

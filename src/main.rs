@@ -58,7 +58,14 @@ fn main() -> Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
 
     let status = pty::run_shell(&shell, clock, config)?;
-    std::process::exit(status);
+
+    // Exit via `_exit`, not `std::process::exit`: the latter runs libc atexit /
+    // teardown, which can race the detached stdin/stdout I/O threads as they wind
+    // down and deadlock (the process gets stuck "exiting" — e.g. after `kill`).
+    // The terminal was already restored when `run_shell` returned (RawGuard drop)
+    // and all output is flushed, so an immediate exit is safe.
+    // SAFETY: `_exit` simply terminates the process; it touches no Rust state.
+    unsafe { libc::_exit(status) }
 }
 
 fn print_help() {

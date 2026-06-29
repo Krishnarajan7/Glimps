@@ -27,6 +27,7 @@
 //! `glimps init`); without them the zone stays Unknown and GLIMPS is a pure
 //! pass-through.
 
+mod cmdline;
 mod html;
 mod json;
 mod linefmt;
@@ -99,9 +100,12 @@ pub struct Formatter {
     /// User configuration (`.glimpsrc`): per-type toggles, color, separator, caps.
     config: Config,
     /// A command's output has started but no output byte has been emitted yet, so
-    /// the separator is owed and will be written just before that first byte.
-    /// Lazy on purpose: commands with no output get no separator.
+    /// the header is owed and will be written just before that first byte.
+    /// Lazy on purpose: commands with no output get no header.
     pending_separator: bool,
+    /// The command for the current output zone (captured at output start), shown
+    /// in the header. `None` falls the header back to a plain divider.
+    pending_command: Option<Vec<u8>>,
     /// Whether the previous chunk left a full-screen TUI on the alternate screen.
     /// Tracked so the chunk that *exits* alt-screen is also passed through.
     was_alt_screen: bool,
@@ -139,6 +143,7 @@ impl Formatter {
             clock,
             config,
             pending_separator: false,
+            pending_command: None,
             was_alt_screen: false,
         }
     }
@@ -175,11 +180,13 @@ impl Formatter {
             }
             // Flush any withheld bytes (a TUI shouldn't begin mid-buffer, but we
             // never drop user bytes), then stream the chunk. Dropping an owed
-            // separator here is intentional — including the common case where
-            // output just started with no text yet: a TUI gets no separator.
+            // header here is intentional — including the common case where output
+            // just started with no text yet: a TUI gets no header. Also clear the
+            // captured command so it can't leak into the next command's header.
             let mut out = Vec::with_capacity(chunk.len());
             self.finalize(&mut out);
             self.pending_separator = false;
+            self.pending_command = None;
             out.extend_from_slice(chunk);
             return Cow::Owned(out);
         }
@@ -215,13 +222,27 @@ impl Formatter {
                     self.finalize(&mut out);
                     out.extend_from_slice(&chunk[start..end]);
                 }
-                // A command's output has begun: owe a separator, emitted lazily
-                // right before the first output byte (so empty output -> none).
-                Seg::OutputStart => self.pending_separator = true,
-                // The output ended: flush, and drop an unfulfilled separator.
+                // A command's output has begun: capture the command (for the
+                // header) and owe the header, emitted lazily before the first
+                // output byte (so empty output -> no header). If the command is on
+                // the bypass list, its output streams through untouched.
+                Seg::OutputStart => {
+                    self.pending_separator = true;
+                    self.pending_command = self.scanner.take_command();
+                    let bypass = self
+                        .pending_command
+                        .as_deref()
+                        .and_then(cmdline::first_word)
+                        .is_some_and(|name| self.config.bypass.iter().any(|b| b == &name));
+                    if bypass {
+                        self.collect = Collect::Passthrough;
+                    }
+                }
+                // The output ended: flush, and drop an unfulfilled header/command.
                 Seg::OutputEnd => {
                     self.finalize(&mut out);
                     self.pending_separator = false;
+                    self.pending_command = None;
                 }
             }
         }
@@ -234,6 +255,11 @@ impl Formatter {
     fn push_output(&mut self, seg: &[u8], out: &mut Vec<u8>) {
         self.collect = match std::mem::replace(&mut self.collect, Collect::Idle) {
             Collect::Passthrough => {
+                // Bypassed commands (vim/ssh/…) still get a header, then stream
+                // verbatim. On the binary path the owed header was already cleared
+                // in `decide` (so this is a no-op there); bypass is forced at
+                // OutputStart and skips `decide`, so its header is emitted here.
+                self.emit_header(out);
                 out.extend_from_slice(seg);
                 Collect::Passthrough
             }
@@ -274,7 +300,7 @@ impl Formatter {
                 // First real byte: commit to text -> the separator is now due.
                 acc.extend_from_slice(seg);
                 let is_structured = matches!(seg[pos], b'{' | b'[' | b'<');
-                self.emit_separator(out);
+                self.emit_header(out);
                 let json_or_html = self.config.formatters.json || self.config.formatters.html;
                 let want_lines = self.config.formatters.logs || self.config.formatters.http;
                 if is_structured && json_or_html && acc.len() <= self.config.limits.buffer_cap {
@@ -293,7 +319,7 @@ impl Formatter {
                 // hoard unboundedly.
                 acc.extend_from_slice(seg);
                 if acc.len() > self.config.limits.sniff_cap {
-                    self.emit_separator(out);
+                    self.emit_header(out);
                     out.extend_from_slice(&acc);
                     Collect::Passthrough
                 } else {
@@ -303,14 +329,14 @@ impl Formatter {
         }
     }
 
-    /// Emit the owed separator (if any) to `out`, clearing the debt. When the
-    /// separator is disabled in config, the debt is cleared without emitting.
-    fn emit_separator(&mut self, out: &mut Vec<u8>) {
+    /// Emit the owed command header (if any) to `out`, clearing the debt. When the
+    /// header is disabled in config, the debt is cleared without emitting.
+    fn emit_header(&mut self, out: &mut Vec<u8>) {
         if self.pending_separator {
             self.pending_separator = false;
             if self.config.separator {
-                let sep = self.render_separator();
-                out.extend_from_slice(&sep);
+                let header = self.render_header();
+                out.extend_from_slice(&header);
             }
         }
     }
@@ -371,7 +397,7 @@ impl Formatter {
             Collect::Sniff(acc) => {
                 // Whitespace-only output that never committed: it still counts as
                 // output, so emit the owed separator, then the whitespace verbatim.
-                self.emit_separator(out);
+                self.emit_header(out);
                 out.extend_from_slice(&acc);
             }
             Collect::Stream(line) => {
@@ -383,26 +409,48 @@ impl Formatter {
         }
     }
 
-    /// Render the command/output separator: a dim rule, optionally centered on a
-    /// timestamp, framed by CRLF so it sits on its own line in the raw terminal.
-    fn render_separator(&self) -> Vec<u8> {
+    /// Render the command/output header: the syntax-colored command (captured at
+    /// output start) with a dim bar prefix and timestamp, so you can instantly
+    /// find your input. Falls back to a dim rule when no command was captured
+    /// (e.g. a shell without `glimps init`'s command marker). CRLF-framed.
+    fn render_header(&self) -> Vec<u8> {
         let dim: &[u8] = if self.config.color { SEP_DIM } else { b"" };
         let reset: &[u8] = if self.config.color { SEP_RESET } else { b"" };
-        let mut sep = Vec::new();
-        sep.extend_from_slice(dim);
-        match self.timestamp() {
-            Some(ts) => {
-                sep.extend_from_slice(SEP_DASH.repeat(8).as_bytes());
-                sep.push(b' ');
-                sep.extend_from_slice(ts.as_bytes());
-                sep.push(b' ');
-                sep.extend_from_slice(SEP_DASH.repeat(8).as_bytes());
+        let mut h = Vec::new();
+        match self.pending_command.as_deref() {
+            Some(cmd) if !cmd.is_empty() => {
+                // ▌ <colored command>   <dim timestamp>
+                h.extend_from_slice(dim);
+                h.extend_from_slice("▌ ".as_bytes());
+                h.extend_from_slice(reset);
+                // The command is GLIMPS-rendered display: convert any newline to
+                // CRLF for the raw terminal.
+                push_crlf(&mut h, &cmdline::render(cmd, &self.theme));
+                if let Some(ts) = self.timestamp() {
+                    h.extend_from_slice(dim);
+                    h.extend_from_slice(b"  ");
+                    h.extend_from_slice(ts.as_bytes());
+                    h.extend_from_slice(reset);
+                }
             }
-            None => sep.extend_from_slice(SEP_DASH.repeat(18).as_bytes()),
+            // No command captured: fall back to a plain dim rule (+ timestamp).
+            _ => {
+                h.extend_from_slice(dim);
+                match self.timestamp() {
+                    Some(ts) => {
+                        h.extend_from_slice(SEP_DASH.repeat(8).as_bytes());
+                        h.push(b' ');
+                        h.extend_from_slice(ts.as_bytes());
+                        h.push(b' ');
+                        h.extend_from_slice(SEP_DASH.repeat(8).as_bytes());
+                    }
+                    None => h.extend_from_slice(SEP_DASH.repeat(18).as_bytes()),
+                }
+                h.extend_from_slice(reset);
+            }
         }
-        sep.extend_from_slice(reset);
-        sep.extend_from_slice(b"\r\n");
-        sep
+        h.extend_from_slice(b"\r\n");
+        h
     }
 
     /// The current `HH:MM:SS` for the separator, per the configured [`Clock`].
@@ -522,10 +570,11 @@ mod tests {
     const C: &[u8] = b"\x1b]133;C\x07"; // command output start
     const D: &[u8] = b"\x1b]133;D\x07"; // command output end
 
-    /// The separator a fresh Formatter injects, for the given clock. GLIMPS frames
-    /// command output with this; tests reconstruct expected output around it.
+    /// The header a fresh Formatter injects when NO command was captured (the dim
+    /// rule fallback), for the given clock. Tests without a command marker frame
+    /// output with this.
     fn sep_with(clock: Clock) -> Vec<u8> {
-        Formatter::with_clock(clock).render_separator()
+        Formatter::with_clock(clock).render_header()
     }
 
     /// The default (timestamp-less) separator.
@@ -544,6 +593,128 @@ mod tests {
     /// The content-type badge bytes for a label.
     fn badge(label: &str) -> Vec<u8> {
         render_badge(label, true)
+    }
+
+    /// The command-capture marker GLIMPS's init emits before the C marker.
+    fn cmd_marker(cmd: &[u8]) -> Vec<u8> {
+        let mut v = b"\x1b]7337;".to_vec();
+        v.extend_from_slice(cmd);
+        v.push(0x07);
+        v
+    }
+
+    #[test]
+    fn header_shows_the_colored_command() {
+        let mut f = Formatter::new(); // default colored theme
+        if !f.is_enabled() {
+            return;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(&cmd_marker(b"echo hi")));
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"hi\n"));
+        out.extend_from_slice(&f.process(D));
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains('▌'), "header bar missing");
+        assert!(
+            s.contains("\x1b[36mecho\x1b[0m"),
+            "command name not colored"
+        );
+        assert!(s.contains("hi\n"), "output not preserved");
+    }
+
+    #[test]
+    fn bypassed_command_output_is_not_formatted() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        let mut out = Vec::new();
+        // `vim` is on the default bypass list -> its output streams untouched,
+        // even output that looks like JSON.
+        out.extend_from_slice(&f.process(&cmd_marker(b"vim notes.json")));
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(br#"{"a":1}"#));
+        out.extend_from_slice(&f.process(D));
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains(r#"{"a":1}"#), "bypassed output must be verbatim");
+        assert!(
+            !s.contains("\"a\": 1"),
+            "bypassed output must NOT be pretty-printed"
+        );
+    }
+
+    #[test]
+    fn no_command_marker_means_no_bypass_and_dash_header() {
+        // A shell without `glimps init`'s command marker: even if you run `vim`,
+        // GLIMPS can't know the name, so it must NOT bypass and the header falls
+        // back to the dim rule. (Here output IS formatted, proving no bypass.)
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C)); // no 7337 marker
+        out.extend_from_slice(&f.process(br#"{"a":1}"#));
+        out.extend_from_slice(&f.process(D));
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains("\"a\": 1"),
+            "without a command, output still formats"
+        );
+        assert!(
+            !s.contains('▌'),
+            "no command -> dim-rule header, not a command bar"
+        );
+    }
+
+    #[test]
+    fn alt_screen_does_not_leak_command_into_next_header() {
+        // A bypassed TUI whose exit (`133;D`) lands in the alt-screen chunk must
+        // not leave its command captured for the NEXT command's header.
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        // vim session: command marker, C, enter alt-screen, exit alt-screen + D
+        // arriving while still bypassing.
+        let _ = f.process(&cmd_marker(b"vim notes.json"));
+        let _ = f.process(C);
+        let _ = f.process(b"\x1b[?1049h"); // enter alt screen -> bypass latches
+        let _ = f.process(&cat(&[b"\x1b[?1049l", D])); // exit alt screen + output end
+                                                       // Next command (no marker): its header must be the dim rule, not "vim …".
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"plain output\n"));
+        out.extend_from_slice(&f.process(D));
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            !s.contains("vim notes.json"),
+            "stale command leaked into next header"
+        );
+        assert!(s.contains("plain output\n"));
+    }
+
+    #[test]
+    fn non_bypassed_command_still_formats_json() {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain(); // so the pretty JSON is contiguous (no color codes)
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(&cmd_marker(b"curl x")));
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(br#"{"a":1}"#));
+        out.extend_from_slice(&f.process(D));
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("curl x"), "command header missing");
+        assert!(
+            s.contains("\"a\": 1"),
+            "JSON should still be pretty-printed"
+        );
     }
 
     /// Drive a sequence of chunks through one (timestamp-less, plain-theme)
@@ -1247,6 +1418,7 @@ mod tests {
                 color,
                 separator,
                 timestamp: false,
+                bypass: Vec::new(),
                 formatters: crate::config::Formatters { json, html, logs, http },
                 limits: crate::config::Limits { buffer_cap, line_cap, sniff_cap },
             };

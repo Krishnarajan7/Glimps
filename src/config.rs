@@ -33,19 +33,21 @@ const DEFAULT_BUFFER_CAP: usize = 1024 * 1024;
 const DEFAULT_LINE_CAP: usize = 64 * 1024;
 const DEFAULT_SNIFF_CAP: usize = 64;
 
-/// Top-level configuration. `Copy` so the supervisor can hand it to the reader
-/// thread without ceremony.
-#[derive(Debug, Clone, Copy, Deserialize)]
+/// Top-level configuration. Cloned once into the reader thread at startup.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Master switch. `false` makes GLIMPS a pure pass-through.
     pub enabled: bool,
     /// Emit color escapes. `false` keeps structure (indent/frame) but no color.
     pub color: bool,
-    /// Show the command/output separator line.
+    /// Show the command header / separator line before output.
     pub separator: bool,
-    /// Include a timestamp in the separator.
+    /// Include a timestamp in the command header.
     pub timestamp: bool,
+    /// Command names whose output is passed through untouched (interactive /
+    /// full-screen programs). Matched against the command's basename.
+    pub bypass: Vec<String>,
     pub formatters: Formatters,
     pub limits: Limits,
 }
@@ -76,10 +78,24 @@ impl Default for Config {
             color: true,
             separator: true,
             timestamp: true,
+            bypass: default_bypass(),
             formatters: Formatters::default(),
             limits: Limits::default(),
         }
     }
+}
+
+/// Interactive / full-screen programs whose output we pass through untouched.
+/// Full-screen apps are also caught by alt-screen detection; this additionally
+/// covers ones that don't use it (notably `ssh`).
+fn default_bypass() -> Vec<String> {
+    [
+        "vim", "nvim", "vi", "nano", "emacs", "less", "more", "man", "htop", "top", "btop", "fzf",
+        "tmux", "screen", "ssh", "watch", "ncdu", "lazygit", "tig", "ranger",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 impl Default for Formatters {

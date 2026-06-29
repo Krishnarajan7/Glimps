@@ -82,6 +82,15 @@ pub enum Seg {
 /// longer is some other (uninteresting) OSC we only scan for its terminator.
 const OSC_PREFIX_CAP: usize = 16;
 
+/// GLIMPS's private OSC carrying the command being run (`OSC 7337 ; <command>`),
+/// emitted by `glimps init`'s preexec. We capture its whole body (up to
+/// `COMMAND_CAP`) so we can show a colored command header and bypass by name.
+const COMMAND_OSC: &[u8] = b"7337;";
+
+/// Upper bound on a captured command. Commands are short; this just bounds memory
+/// against a pathological/huge one (we then simply don't show a header for it).
+const COMMAND_CAP: usize = 8 * 1024;
+
 /// The kind of string-type escape sequence we are consuming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StringKind {
@@ -136,6 +145,9 @@ pub struct Osc133Scanner {
     /// Whether a full-screen program currently owns the alternate screen buffer
     /// (vim, less, htop, fzf, …). While true, GLIMPS bypasses all formatting.
     alt_screen: bool,
+    /// The most recent command captured from the `COMMAND_OSC` marker, awaiting
+    /// consumption by the formatter at output start. `None` once taken.
+    command: Option<Vec<u8>>,
 }
 
 impl Osc133Scanner {
@@ -146,6 +158,7 @@ impl Osc133Scanner {
             osc_buf: Vec::with_capacity(OSC_PREFIX_CAP),
             csi_buf: Vec::with_capacity(CSI_PREFIX_CAP),
             alt_screen: false,
+            command: None,
         }
     }
 
@@ -153,6 +166,13 @@ impl Osc133Scanner {
     /// supervisor uses this to pass interactive TUIs through untouched.
     pub fn in_alt_screen(&self) -> bool {
         self.alt_screen
+    }
+
+    /// Take the command captured from the most recent `COMMAND_OSC` marker (the
+    /// command about to run), clearing it. The formatter calls this at output
+    /// start to render the colored command header.
+    pub fn take_command(&mut self) -> Option<Vec<u8>> {
+        self.command.take()
     }
 
     /// The zone the stream is currently in, i.e. the zone the *next* byte fed
@@ -295,8 +315,18 @@ impl Osc133Scanner {
                         BEL if kind == StringKind::Osc => self.finish_string(kind),
                         ESC => self.state = ParseState::StringEsc(kind),
                         _ => {
-                            if kind == StringKind::Osc && self.osc_buf.len() < OSC_PREFIX_CAP {
-                                self.osc_buf.push(b);
+                            if kind == StringKind::Osc {
+                                // Capture the whole body for our command OSC; just
+                                // a short prefix for any other OSC. Either way the
+                                // capture is bounded.
+                                let cap = if self.osc_buf.starts_with(COMMAND_OSC) {
+                                    COMMAND_CAP
+                                } else {
+                                    OSC_PREFIX_CAP
+                                };
+                                if self.osc_buf.len() < cap {
+                                    self.osc_buf.push(b);
+                                }
                             }
                             // Past the cap (or for ignored string types) we keep
                             // scanning for the terminator without storing —
@@ -336,11 +366,14 @@ impl Osc133Scanner {
         self.csi_buf.clear();
     }
 
-    /// A string sequence terminated. If it was an OSC, classify its body and
-    /// update the zone; either way reset to Ground.
+    /// A string sequence terminated. If it was an OSC, either capture the command
+    /// (our private `COMMAND_OSC`) or classify it for a zone change; either way
+    /// reset to Ground.
     fn finish_string(&mut self, kind: StringKind) {
         if kind == StringKind::Osc {
-            if let Some(zone) = classify_osc133(&self.osc_buf) {
+            if let Some(cmd) = self.osc_buf.strip_prefix(COMMAND_OSC) {
+                self.command = Some(cmd.to_vec());
+            } else if let Some(zone) = classify_osc133(&self.osc_buf) {
                 self.zone = zone;
             }
         }
@@ -691,6 +724,47 @@ mod tests {
         assert!(s.in_alt_screen());
         s.feed(b"\x1b[?1047l");
         assert!(!s.in_alt_screen());
+    }
+
+    #[test]
+    fn captures_command_from_marker() {
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b]7337;curl -s https://x.com/a?b=1\x07");
+        assert_eq!(
+            s.take_command().as_deref(),
+            Some(&b"curl -s https://x.com/a?b=1"[..])
+        );
+        // Taken once -> gone.
+        assert!(s.take_command().is_none());
+    }
+
+    #[test]
+    fn command_capture_survives_byte_split_and_long_commands() {
+        // Split across every byte boundary; and a command longer than the OSC
+        // prefix cap must still be captured whole.
+        let long = "git commit -m ".to_string() + &"x".repeat(300);
+        let stream = [b"\x1b]7337;", long.as_bytes(), b"\x07"].concat();
+        let mut s = Osc133Scanner::new();
+        for &b in &stream {
+            s.feed(&[b]);
+        }
+        assert_eq!(s.take_command().as_deref(), Some(long.as_bytes()));
+    }
+
+    #[test]
+    fn empty_command_marker_captures_empty() {
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b]7337;\x07");
+        assert_eq!(s.take_command().as_deref(), Some(&b""[..]));
+    }
+
+    #[test]
+    fn command_marker_does_not_change_zone() {
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b]7337;ls\x07");
+        assert_eq!(s.zone(), Zone::Unknown); // it's a command, not a zone marker
+        s.feed(&marker_bel('C'));
+        assert_eq!(s.zone(), Zone::Output);
     }
 
     #[test]

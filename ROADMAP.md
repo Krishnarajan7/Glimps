@@ -15,7 +15,10 @@ This is the version that fixes the problem you started with.
 - ☑ Phase 0 spike: transparent PTY supervisor (shell runs inside GLIMPS, feels native)
 - ☑ OSC-133 prompt markers + detection → know where command OUTPUT starts/ends
       (zone scanner + `glimps init zsh` precmd/preexec marker emission)
-- ☑ Command/output **separator line + timestamp** (the core fix for input-vs-output)
+- ☑ **Colored command header + timestamp** (THE core fix for input-vs-output): the
+      typed command is captured (preexec OSC marker) and shown syntax-colored
+      before its output — command name / strings / flags. Falls back to a dim rule
+      when no command is captured.
 - ☑ Content-type **badge** (`[JSON]` / `[HTML]` / `[LOG]`)
 - ☑ JSON detect + pretty-print (colored keys/values)
 - ☑ HTML detect + indentation
@@ -27,8 +30,9 @@ Exit criteria: you use it daily for a week without turning it off.
 ## v0.2 — Safety & breadth (still local / early testers)
 Goal: it never gets in the way, on any command.
 
-- ◐ Interactive bypass (vim, htop, less, fzf, …) — pass through untouched
-      (done via alternate-screen detection; name-based cases like `ssh` still TODO)
+- ☑ Interactive bypass (vim, htop, less, fzf, ssh, …) — pass through untouched
+      (alternate-screen detection + name-based bypass via the captured command;
+      bypass list is configurable in `.glimpsrc`)
 - ◐ Binary output pass-through (NUL-byte detection done; non-UTF8 scan TODO)
 - ◐ ANSI-already-present pass-through (a control byte ends/declines a buffered run;
       no explicit whole-run gate yet)

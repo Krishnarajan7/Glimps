@@ -335,6 +335,7 @@ dependencies = [
  "anyhow",
  "criterion",
  "crossterm",
+ "libc",
  "portable-pty",
  "proptest",
  "serde",

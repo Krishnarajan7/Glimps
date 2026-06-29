@@ -23,8 +23,14 @@ portable-pty = "0.8"
 # Raw mode + terminal size on the controlling terminal.
 crossterm = "0.28"
 
-# SIGWINCH handling so the inner PTY resizes when the window does.
+# SIGWINCH + termination-signal handling so `kill` works and the inner PTY
+# resizes when the window does.
 signal-hook = "0.3"
+
+# `_exit(2)` for an immediate, deadlock-free shutdown after the session ends:
+# `std::process::exit` runs libc teardown which can race the detached I/O threads
+# and hang. (libc is already in the tree via portable-pty.)
+libc = "0.2"
 
 # Ergonomic error handling for the spike.
 anyhow = "1"
