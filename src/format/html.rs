@@ -62,6 +62,24 @@ pub fn try_format(bytes: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     Some(out.into_bytes())
 }
 
+/// Registry entry for the HTML formatter. See [`super::BufferedFormatter`].
+pub struct Html;
+
+impl super::BufferedFormatter for Html {
+    fn could_start(&self, head: &[u8]) -> bool {
+        head.first() == Some(&b'<')
+    }
+    fn try_format(&self, bytes: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+        try_format(bytes, theme)
+    }
+    fn label(&self) -> &'static str {
+        "HTML"
+    }
+    fn needs_crlf(&self) -> bool {
+        true // re-indents content with bare `\n`
+    }
+}
+
 // ---- tokenizer ------------------------------------------------------------
 
 #[derive(Debug)]

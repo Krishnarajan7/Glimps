@@ -10,23 +10,27 @@
 # Master switch. false = GLIMPS becomes a pure pass-through (same as GLIMPS=0).
 enabled = true
 
-# Color output. false = keep structure (indentation, the separator, the badge)
-# but emit no color escapes — a clean no-color / minimal mode.
+# Color output. false = keep structure (indentation, the command header, the
+# badge) but emit no color escapes — a clean no-color / minimal mode.
 color = true
 
-# Show the divider line between a command and its output.
+# Show the ▌ command header above each command's output (your command, repeated
+# and syntax-colored, so you can find your input). Falls back to a dim rule when
+# the command name isn't known.
 separator = true
 
-# Include an HH:MM:SS timestamp in the separator.
+# Include an HH:MM:SS timestamp in the command header.
 timestamp = true
 
 # Per-content-type formatters. Turn any of these off to pass that kind of output
 # through untouched.
 [formatters]
-json = true   # pretty-print + colorize JSON
-html = true   # indent + colorize HTML
-logs = true   # color ERROR/WARN/INFO/DEBUG lines
-http = true   # color HTTP status lines by class (2xx/3xx/4xx/5xx)
+json = true        # pretty-print + colorize JSON
+html = true        # indent + colorize HTML
+logs = true        # color ERROR/WARN/INFO/DEBUG lines
+http = true        # color HTTP status lines by class (2xx/3xx/4xx/5xx)
+diff = true        # colorize unified diffs (added/removed/hunk lines)
+stacktrace = true  # highlight stack traces / panics (Rust, Python)
 
 # Size limits (bytes). These bound memory and latency; they are clamped to safe
 # ranges on load, so you can't accidentally make buffering unbounded.

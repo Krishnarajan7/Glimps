@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "app.py", line 10, in <module>
+    main()
+  File "app.py", line 6, in main
+    return data["missing"]
+KeyError: 'missing'

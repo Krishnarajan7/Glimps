@@ -51,9 +51,28 @@ pub fn try_format(bytes: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     Some(out.into_bytes())
 }
 
-/// Convenience: reformat, or return the input unchanged if it isn't JSON. Used
-/// by tests and golden comparisons; the streaming path uses [`try_format`].
-#[cfg_attr(not(test), allow(dead_code))]
+/// Registry entry for the JSON formatter. See [`super::BufferedFormatter`].
+pub struct Json;
+
+impl super::BufferedFormatter for Json {
+    fn could_start(&self, head: &[u8]) -> bool {
+        matches!(head.first(), Some(b'{' | b'['))
+    }
+    fn try_format(&self, bytes: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+        try_format(bytes, theme)
+    }
+    fn label(&self) -> &'static str {
+        "JSON"
+    }
+    fn needs_crlf(&self) -> bool {
+        true // regenerates content with bare `\n`
+    }
+}
+
+/// Convenience: reformat, or return the input unchanged if it isn't JSON. Test
+/// scaffolding for golden comparisons; the live path uses [`try_format`] via the
+/// `BufferedFormatter` registry.
+#[cfg(test)]
 pub fn format(bytes: &[u8], theme: &Theme) -> Vec<u8> {
     try_format(bytes, theme).unwrap_or_else(|| bytes.to_vec())
 }

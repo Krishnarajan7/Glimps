@@ -23,6 +23,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install zsh (for PTY integration tests)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

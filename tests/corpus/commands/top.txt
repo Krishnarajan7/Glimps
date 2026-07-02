@@ -1,0 +1,20 @@
+Processes: 586 total, 3 running, 583 sleeping, 3957 threads 
+2026/06/30 09:52:42
+Load Avg: 1.50, 1.63, 1.57 
+CPU usage: 15.12% user, 11.30% sys, 73.56% idle 
+SharedLibs: 503M resident, 118M data, 87M linkedit.
+MemRegions: 1027742 total, 5022M resident, 117M private, 1630M shared.
+PhysMem: 15G used (2795M wired, 5057M compressor), 277M unused.
+VM: 328T vsize, 6144M framework vsize, 3753156(0) swapins, 7284581(0) swapouts.
+Networks: packets: 134817841/136G in, 53834976/33G out.
+Disks: 96777301/1728G read, 47962010/797G written.
+
+PID    COMMAND          %CPU TIME     #TH    #WQ #PORTS MEM   PURG CMPRS PGRP  PPID  STATE    BOOSTS        %CPU_ME %CPU_OTHRS UID FAULTS    COW     MSGSENT    MSGRECV    SYSBSD     SYSMACH    CSW        PAGEINS IDLEW     POWER INSTRS CYCLES JETPRI USER                  #MREGS RPRVT VPRVT VSIZE KPRVT KSHRD
+99599  Google Chrome He 0.0  22:17.49 20     1   358    249M  0B   205M  95219 95219 sleeping *9[245909]    0.00000 0.00000    501 9194274   11451   8503639    4900243    12416839   17176188   7811681    13002   226795    0.0   0      0      180    krishv                N/A    N/A   N/A   N/A   N/A   N/A  
+99123  appleh16camerad  0.0  00:00.16 5      1   63     2688K 0B   2432K 99123 1     sleeping *0[1]         0.00000 0.00000    262 7417      97      456        427        2451       1325       1588       63      6         0.0   0      0      140    _cmiodalassistants    N/A    N/A   N/A   N/A   N/A   N/A  
+98586  2.1.195          0.0  02:20.44 25     1   90     280M  0B   213M  98586 95512 sleeping *0[6]         0.00000 0.00000    501 771615    137     271805     159621     2210249    319913     1054645    9675    97208     0.0   0      0      180    krishv                N/A    N/A   N/A   N/A   N/A   N/A  
+98025  esbuild          0.0  00:25.68 12     0   22     11M   0B   5840K 97907 98023 sleeping *0[1]         0.00000 0.00000    501 14681     102     34         15         3023537    138        2646976    474     1295068   0.0   0      0      180    krishv                N/A    N/A   N/A   N/A   N/A   N/A  
+98023  node             0.0  00:17.36 13     1   42     112M  0B   90M   97907 97907 sleeping *0[1]         0.00000 0.00000    501 110179    347     207        83         268324     15580      121149     2057    4071      0.0   0      0      180    krishv                N/A    N/A   N/A   N/A   N/A   N/A  
+97907  node             0.0  00:00.13 12     1   50     16M   0B   14M   97907 96687 sleeping *0[1]         0.00000 0.00000    501 4955      199     151        54         4598       361        797        43      9         0.0   0      0      180    krishv                N/A    N/A   N/A   N/A   N/A   N/A  
+97548  Code Helper (Plu 0.0  00:01.96 14     1   69     48M   0B   45M   78224 96090 sleeping *0[1]         0.00000 0.00000    501 25806     99      152        98         58172      635        32650      244     17439     0.0   0      0      180    krishv                N/A    N/A   N/A   N/A   N/A   N/A  
+97547  Code Helper (Plu 0.0  00:02.26 10     1   65     21M   0B   18M   78224 96090 sleeping *0[1]         0.00000 0.00000    501 15732     99      146        95         70306      615        43017      245     25324     0.0   0      0      180    krishv                N/A    N/A   N/A   N/A   N/A   N/A  

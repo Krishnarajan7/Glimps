@@ -9,8 +9,8 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 # The installers to generate for each app
 installers = ["shell", "homebrew"]
-# Homebrew tap to publish the formula to (a github.com/glimps-sh/homebrew-tap repo).
-tap = "glimps-sh/homebrew-tap"
+# Homebrew tap to publish the formula to (a github.com/Krishnarajan7/homebrew-tap repo).
+tap = "Krishnarajan7/homebrew-tap"
 # Actually push the generated formula to the tap on release.
 publish-jobs = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax). Windows is

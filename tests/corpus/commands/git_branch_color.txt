@@ -1,0 +1,3 @@
+* [32mmain               [m 2bfd5e9 [[34morigin/main[m] fix: on shutdown layer
+  [31mremotes/origin/HEAD[m -> origin/main
+  [31mremotes/origin/main[m 2bfd5e9 fix: on shutdown layer

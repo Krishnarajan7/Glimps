@@ -30,6 +30,16 @@ fn passthrough_stream() -> Vec<u8> {
     b"the quick brown fox jumps over the lazy dog\n".repeat(8)
 }
 
+fn diff_stream() -> Vec<u8> {
+    let body = b"diff --git a/src/x.rs b/src/x.rs\nindex e69de29..4b825dc 100644\n--- a/src/x.rs\n+++ b/src/x.rs\n@@ -1,4 +1,5 @@\n fn main() {\n-    let x = 1;\n+    let x = 2;\n+    println!(\"{x}\");\n }\n";
+    [C, body.as_slice(), D].concat()
+}
+
+fn stacktrace_stream() -> Vec<u8> {
+    let body = b"thread 'main' panicked at src/main.rs:42:14:\ncalled `Option::unwrap()` on a `None` value\nnote: run with `RUST_BACKTRACE=1` to display a backtrace\n";
+    [C, body.as_slice(), D].concat()
+}
+
 fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("process");
 
@@ -37,6 +47,8 @@ fn bench(c: &mut Criterion) {
         ("passthrough", passthrough_stream()),
         ("plain_output", plain_stream()),
         ("json_output", json_stream()),
+        ("diff_output", diff_stream()),
+        ("stacktrace_output", stacktrace_stream()),
     ] {
         group.throughput(Throughput::Bytes(data.len() as u64));
         group.bench_function(name, |b| {

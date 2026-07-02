@@ -1,26 +1,32 @@
 # GLIMPS
 
 **Zero-config smart terminal output formatter.** GLIMPS runs your shell inside a
-PTY it owns, watches the output stream, and reformats recognized content — JSON,
-HTML, logs, HTTP status — with structure, color, and a clear command/output
-separator. Automatically. No manual piping, no flags, no remembering what's
-coming.
+PTY it owns and does two things automatically: it shows **where your input is** —
+repeating your command, syntax-colored, right above its output — and it
+**reformats recognized content** (JSON, HTML, logs, HTTP status) with structure
+and color. No manual piping, no flags, no remembering what's coming.
 
-> Status: **beta** — functional and heavily tested, not yet packaged for
-> distribution. macOS + zsh today; Linux is a supported build target (CI covers
-> Linux + macOS). Broader shell support is on the roadmap.
+> Status: **beta** — functional and heavily tested. macOS + zsh today; Linux is a
+> supported build target (CI covers Linux + macOS). Builds and runs **identically
+> on Apple Silicon and Intel Macs** — same install, no architecture-specific
+> steps. Homebrew packaging and broader shell support are on the roadmap.
 
-<!-- DEMO: replace with an animated before/after GIF (record with `vhs` or
-     `asciinema` + `agg`). The static example below is the same idea. -->
+<!-- DEMO: render demo/glimps.tape with VHS (see demo/README.md) to produce
+     demo/glimps.gif, then replace this comment with:
+     ![GLIMPS in action](demo/glimps.gif)
+     The static example below is the same idea. -->
 
 ## What it looks like
 
-You type a command. GLIMPS notices the output is JSON and pretty-prints it, with
-a divider so you can tell where your command ends and the output begins:
+The problem GLIMPS was built to solve first: in a long scrollback you can't find
+your own command. So before a command's output, GLIMPS prints a **header bar** —
+your command, repeated and syntax-colored — so your input is never lost in the
+wall of output. When it also recognizes the output (here, JSON), it pretty-prints
+it with a content badge:
 
 ```
 $ curl -s api.example.com/user
-──────── 14:23:01 ────────
+▌ curl -s api.example.com/user                       14:23:01
  JSON
 {
   "login": "octocat",
@@ -30,28 +36,38 @@ $ curl -s api.example.com/user
 }
 ```
 
-Logs get severity coloring as they stream (great for `tail -f`); HTTP status
-lines are colored by class; long HTML becomes an indented tree. Anything GLIMPS
-doesn't recognize — `ls`, `git`, `vim`, a binary file — passes through **exactly**
-as it would without GLIMPS.
+The `▌` line is GLIMPS marking where output begins (command name, strings, and
+flags each colored); the timestamp is optional. Logs get severity coloring as
+they stream (great for `tail -f`); HTTP status lines are colored by class; long
+HTML becomes an indented tree; unified diffs get added/removed/hunk coloring; and
+stack traces / panics are highlighted so the failure jumps out. Anything GLIMPS
+doesn't recognize — `ls`, `git`, `vim`, **a binary file** — passes through
+**exactly** as it would without GLIMPS (binary and already-colored output are
+detected and never touched).
 
 ## Why
 
-Terminal output is a flat monochrome wall. You can't tell where your command ends
-and the output begins, and long JSON/HTML is unreadable. Tools like `jq`, `bat`,
-and `glow` each fix one format but make you know what's coming and pipe it
-yourself. GLIMPS does it automatically, for everything, transparently — because
-it sits on the output stream itself, not behind a manual pipe.
+Terminal output is a flat monochrome wall. Scroll up after a few commands and you
+can't tell where your command ended and its output began — let alone read a 200-line
+JSON blob. Tools like `jq`, `bat`, and `glow` each fix one format but make you know
+what's coming and pipe it yourself. GLIMPS does it automatically, for everything,
+transparently: it marks your input with a colored command header and reformats the
+output it recognizes — because it sits on the output stream itself, not behind a
+manual pipe.
 
 ## Install
 
 **From source** (works today; requires [Rust](https://rustup.rs)):
 
 ```bash
-git clone https://github.com/glimps-sh/glimps
-cd glimps
+git clone https://github.com/Krishnarajan7/Glimps
+cd Glimps
 cargo install --path .
 ```
+
+This is the same on **Apple Silicon and Intel Macs** (and on Linux) — `cargo`
+builds a native binary for whatever machine you run it on; there are no
+architecture-specific steps or separate downloads.
 
 **Homebrew** (planned for the 1.0 release):
 
@@ -83,14 +99,16 @@ GLIMPS works with no config. To customize, copy
 
 ```toml
 color = true        # false = structure but no color
-separator = true    # the command/output divider
-timestamp = true    # HH:MM:SS in the separator
+separator = true    # the ▌ command header above each command's output
+timestamp = true    # HH:MM:SS shown in the header
 
 [formatters]
 json = true
 html = true
 logs = true         # ERROR/WARN/INFO/DEBUG coloring
 http = true         # HTTP status coloring
+diff = true         # unified-diff coloring (added/removed/hunk lines)
+stacktrace = true   # stack-trace / panic highlighting (Rust, Python)
 
 [limits]
 buffer_cap = 1048576   # bytes buffered to detect JSON/HTML

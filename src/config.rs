@@ -17,6 +17,8 @@
 //! html = true
 //! logs = true        # ERROR/WARN/INFO/DEBUG line coloring
 //! http = true        # HTTP status line coloring
+//! diff = true        # unified-diff coloring
+//! stacktrace = true  # stack-trace / panic highlighting
 //!
 //! [limits]
 //! buffer_cap = 1048576   # max bytes buffered to detect JSON/HTML (1 MiB)
@@ -60,6 +62,10 @@ pub struct Formatters {
     pub html: bool,
     pub logs: bool,
     pub http: bool,
+    /// Color unified diffs (added/removed/hunk/file-header lines).
+    pub diff: bool,
+    /// Highlight stack traces / panics (Rust panics, Python tracebacks).
+    pub stacktrace: bool,
 }
 
 /// Buffering / streaming size limits.
@@ -105,6 +111,8 @@ impl Default for Formatters {
             html: true,
             logs: true,
             http: true,
+            diff: true,
+            stacktrace: true,
         }
     }
 }
@@ -176,6 +184,7 @@ mod tests {
         let c = Config::default();
         assert!(c.enabled && c.color && c.separator && c.timestamp);
         assert!(c.formatters.json && c.formatters.html && c.formatters.logs && c.formatters.http);
+        assert!(c.formatters.diff && c.formatters.stacktrace);
         assert_eq!(c.limits.buffer_cap, DEFAULT_BUFFER_CAP);
     }
 

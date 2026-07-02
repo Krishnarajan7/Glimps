@@ -8,26 +8,30 @@
 //! 1. The OSC-133 scanner partitions the chunk into *output-content* runs (the
 //!    only bytes we may touch) and *everything-else* runs (markers, prompt,
 //!    typed input, other zones) which always pass through verbatim.
-//! 2. Output-content is **accumulated** so a whole-command output can be
-//!    detected and reformatted as a unit. To stay safe and responsive:
-//!      - we only start buffering once the first non-whitespace output byte is
-//!        seen, and we *give up immediately* (stream verbatim) unless it is
-//!        `{` or `[` — so the overwhelming majority of output (ls, git, …) is
-//!        never delayed;
-//!      - any control byte ends the run and flushes the buffer, so output that
-//!        already contains ANSI is never swallowed;
-//!      - a size cap bounds memory and latency for large/streaming output.
-//! 3. When a buffered output run ends (a marker or other non-output byte, i.e.
-//!    the command finished), we attempt to format it; if it isn't exactly one
-//!    JSON value the bytes are emitted unchanged.
+//! 2. The first non-whitespace byte of an output run *decides* how to handle it
+//!    (see [`Formatter::decide`]), staying safe and responsive:
+//!      - **binary** (a NUL/other control byte, or invalid UTF-8) streams
+//!        verbatim with no header — never framed or reformatted;
+//!      - a run a **buffered formatter** claims by its leading bytes (JSON `{`/`[`,
+//!        HTML `<`, a unified diff) is accumulated until the command ends, then
+//!        reformatted as a unit — bounded by a size cap, and emitted verbatim if it
+//!        doesn't actually parse;
+//!      - everything else is **streamed** line-by-line, coloring only the lines a
+//!        streaming formatter recognizes (log severity / HTTP status / stack trace).
+//! 3. Which formatters run is a small **registry** ([`enabled_buffered`] /
+//!    [`enabled_streaming`]) built from config; the core dispatches through the
+//!    [`BufferedFormatter`] / [`StreamingFormatter`] traits and hard-codes no
+//!    content-type knowledge of its own.
 //!
-//! Net effect: the stream is byte-identical to the input unless a run is a clean
-//! JSON document, in which case that run — and only that run — is reformatted.
-//! Formatting only ever engages when OSC-133 markers are present (a shell with
-//! `glimps init`); without them the zone stays Unknown and GLIMPS is a pure
-//! pass-through.
+//! Net effect: the stream is byte-identical to the input except where a run is a
+//! recognized document (reformatted with a badge) or a recognized line (wrapped in
+//! color) — and with the plain theme even those are byte-identical, which is how
+//! every formatter's byte-safety is tested. Formatting only ever engages when
+//! OSC-133 markers are present (a shell with `glimps init`); without them the zone
+//! stays Unknown and GLIMPS is a pure pass-through.
 
 mod cmdline;
+mod diff;
 mod html;
 mod json;
 mod linefmt;
@@ -82,6 +86,72 @@ enum Collect {
     Passthrough,
 }
 
+/// A **buffered** formatter: recognizes a fully-collected output run by its leading
+/// bytes, then reformats the whole run as a unit. Implemented by JSON / HTML / diff
+/// (each in its own module). The core state machine drives all of them uniformly
+/// through this trait, so adding one is a new `impl` plus a single line in
+/// [`enabled_buffered`] — `decide`/`finalize` never change.
+trait BufferedFormatter {
+    /// Cheap check on the run's leading bytes (from its first non-whitespace byte):
+    /// could this run be ours, i.e. should the core *buffer* it as a candidate?
+    /// Being over-eager is safe — an unconfirmed candidate is emitted verbatim.
+    ///
+    /// `head` is only the bytes of the *first chunk that commits to text*, not the
+    /// whole run; a multi-line signature split exactly across a PTY read may be
+    /// missed (the run then streams / passes through — never corrupted). Keep the
+    /// check satisfiable from the first line or two.
+    fn could_start(&self, head: &[u8]) -> bool;
+    /// Confirm and reformat the whole buffered run, or decline with `None` (then
+    /// the run is emitted verbatim).
+    fn try_format(&self, bytes: &[u8], theme: &Theme) -> Option<Vec<u8>>;
+    /// The content-type badge shown above the reformatted output (e.g. `JSON`).
+    fn label(&self) -> &'static str;
+    /// Whether the formatted bytes use bare `\n` and so must be CRLF-normalized for
+    /// the raw terminal. Formatters that *regenerate* content (JSON/HTML) return
+    /// `true`; ones that *preserve* the user's own line endings (diff) return
+    /// `false` — running those through `push_crlf` would double their CRs.
+    fn needs_crlf(&self) -> bool;
+}
+
+/// A **streaming** formatter: colors a single complete output line as it streams
+/// (suits unbounded output like `tail -f`). Implemented by the log-severity /
+/// HTTP-status / stack-trace colorizers. Returns the SGR color to wrap the line's
+/// content in, or `None` to leave the line untouched.
+trait StreamingFormatter {
+    fn line_color(&self, content: &[u8], theme: &Theme) -> Option<&'static str>;
+}
+
+/// The buffered formatters enabled by `fmts`, in priority order (more specific
+/// before looser). This single list is the whole buffered-dispatch registry.
+fn enabled_buffered(fmts: &crate::config::Formatters) -> Vec<&'static dyn BufferedFormatter> {
+    let mut v: Vec<&'static dyn BufferedFormatter> = Vec::new();
+    if fmts.json {
+        v.push(&json::Json);
+    }
+    if fmts.html {
+        v.push(&html::Html);
+    }
+    if fmts.diff {
+        v.push(&diff::Diff);
+    }
+    v
+}
+
+/// The streaming formatters enabled by `fmts`, in priority order.
+fn enabled_streaming(fmts: &crate::config::Formatters) -> Vec<&'static dyn StreamingFormatter> {
+    let mut v: Vec<&'static dyn StreamingFormatter> = Vec::new();
+    if fmts.http {
+        v.push(&linefmt::Http);
+    }
+    if fmts.logs {
+        v.push(&linefmt::Logs);
+    }
+    if fmts.stacktrace {
+        v.push(&linefmt::StackTrace);
+    }
+    v
+}
+
 /// Stateful, streaming output processor.
 pub struct Formatter {
     /// Master off-switch (safety invariant #6). Sampled once at construction
@@ -109,6 +179,10 @@ pub struct Formatter {
     /// Whether the previous chunk left a full-screen TUI on the alternate screen.
     /// Tracked so the chunk that *exits* alt-screen is also passed through.
     was_alt_screen: bool,
+    /// Buffered formatters (JSON/HTML/diff) enabled by config, in priority order.
+    buffered: Vec<&'static dyn BufferedFormatter>,
+    /// Streaming line colorizers (HTTP/logs/stack-trace) enabled by config.
+    streaming: Vec<&'static dyn StreamingFormatter>,
 }
 
 impl Formatter {
@@ -131,6 +205,8 @@ impl Formatter {
     }
 
     fn build(clock: Clock, output_is_tty: bool, config: Config) -> Self {
+        let buffered = enabled_buffered(&config.formatters);
+        let streaming = enabled_streaming(&config.formatters);
         Formatter {
             enabled: config.enabled && glimps_enabled() && output_is_tty,
             scanner: Osc133Scanner::new(),
@@ -145,6 +221,8 @@ impl Formatter {
             pending_separator: false,
             pending_command: None,
             was_alt_screen: false,
+            buffered,
+            streaming,
         }
     }
 
@@ -286,11 +364,16 @@ impl Formatter {
 
     /// Decide what an undecided run is, given `acc` (whitespace seen so far) and
     /// the new `seg`. Emits the owed separator only when committing to *text*;
-    /// binary (a NUL before any text commits) is streamed verbatim with no
+    /// binary content ([`looks_binary`]: a NUL or other non-text control byte, or
+    /// invalid UTF-8) detected before any text commits is streamed verbatim with no
     /// separator (invariant #3: never frame or reformat binary).
     fn decide(&mut self, mut acc: Vec<u8>, seg: &[u8], out: &mut Vec<u8>) -> Collect {
-        if acc.contains(&0) || seg.contains(&0) {
-            self.pending_separator = false; // suppress: this is binary
+        // `acc` only ever holds ASCII whitespace (see the `Sniff` arm below), so
+        // scanning it is belt-and-suspenders — but it also means a multibyte char
+        // can never straddle the acc/seg seam, so checking the two separately is
+        // sound (no split character is misread as invalid UTF-8).
+        if looks_binary(&acc) || looks_binary(seg) {
+            self.pending_separator = false; // suppress: this is binary, never frame it
             out.extend_from_slice(&acc);
             out.extend_from_slice(seg);
             return Collect::Passthrough;
@@ -298,18 +381,19 @@ impl Formatter {
         match seg.iter().position(|b| !b.is_ascii_whitespace()) {
             Some(pos) => {
                 // First real byte: commit to text -> the separator is now due.
+                // Does any enabled buffered formatter want to claim this run by its
+                // leading bytes? Confirmation happens later in `recognize`; an
+                // unconfirmed candidate is emitted verbatim, so eagerness is safe.
+                let buffer_candidate = self.buffered.iter().any(|f| f.could_start(&seg[pos..]));
                 acc.extend_from_slice(seg);
-                let is_structured = matches!(seg[pos], b'{' | b'[' | b'<');
                 self.emit_header(out);
-                let json_or_html = self.config.formatters.json || self.config.formatters.html;
-                let want_lines = self.config.formatters.logs || self.config.formatters.http;
-                if is_structured && json_or_html && acc.len() <= self.config.limits.buffer_cap {
+                if buffer_candidate && acc.len() <= self.config.limits.buffer_cap {
                     Collect::Buffer(acc) // a formatting candidate; hold it
-                } else if !is_structured && want_lines {
-                    // Plain text: stream line-by-line with log/HTTP coloring.
+                } else if !buffer_candidate && !self.streaming.is_empty() {
+                    // Plain text: stream line-by-line through the streaming colorizers.
                     self.push_stream(Vec::new(), &acc, out)
                 } else {
-                    // Formatting for this kind is off (or blob too big): verbatim.
+                    // No formatter wants it (or the blob is too big): verbatim.
                     out.extend_from_slice(&acc);
                     Collect::Passthrough
                 }
@@ -350,7 +434,7 @@ impl Formatter {
         for (i, &b) in seg.iter().enumerate() {
             if b == b'\n' {
                 line.extend_from_slice(&seg[start..=i]);
-                emit_line(out, &line, &self.theme, &self.config.formatters);
+                emit_line(out, &line, &self.theme, &self.streaming);
                 line.clear();
                 start = i + 1;
             }
@@ -383,12 +467,17 @@ impl Formatter {
     fn finalize(&mut self, out: &mut Vec<u8>) {
         match std::mem::replace(&mut self.collect, Collect::Idle) {
             Collect::Buffer(buf) => {
-                match format_recognized(&buf, &self.theme, &self.config.formatters) {
+                match recognize(&self.buffered, &buf, &self.theme) {
                     // Reformatted: tag it with a content-type badge, then emit the
-                    // formatted bytes (ours, so their `\n` become `\r\n`).
-                    Some((label, pretty)) => {
+                    // formatted bytes — CRLF-normalized only for formatters that say
+                    // so (JSON/HTML regenerate `\n`; diff preserves the user's own).
+                    Some((label, formatted, needs_crlf)) => {
                         out.extend_from_slice(&render_badge(label, self.config.color));
-                        push_crlf(out, &pretty);
+                        if needs_crlf {
+                            push_crlf(out, &formatted);
+                        } else {
+                            out.extend_from_slice(&formatted);
+                        }
                     }
                     // Not a type we format: the user's bytes, emitted exactly as-is.
                     None => out.extend_from_slice(&buf),
@@ -487,35 +576,75 @@ impl Formatter {
     }
 }
 
-/// Try each enabled formatter in precedence order (most precise first), returning
-/// the content-type label and reformatted bytes of the first that matches, or
-/// `None` to pass the buffer through verbatim.
+/// Try each formatter in the registry in order, returning the content-type label,
+/// reformatted bytes, and CRLF policy of the first that matches — or `None` to pass
+/// the buffer through verbatim. The whole buffered dispatch is this one `find_map`.
+fn recognize(
+    buffered: &[&dyn BufferedFormatter],
+    bytes: &[u8],
+    theme: &Theme,
+) -> Option<(&'static str, Vec<u8>, bool)> {
+    buffered.iter().find_map(|f| {
+        f.try_format(bytes, theme)
+            .map(|out| (f.label(), out, f.needs_crlf()))
+    })
+}
+
+/// Test-facing convenience: build the registry for `fmts` and run [`recognize`].
+#[cfg(test)]
 fn format_recognized(
     bytes: &[u8],
     theme: &Theme,
     fmts: &crate::config::Formatters,
-) -> Option<(&'static str, Vec<u8>)> {
-    if fmts.json {
-        if let Some(out) = json::try_format(bytes, theme) {
-            return Some(("JSON", out));
-        }
+) -> Option<(&'static str, Vec<u8>, bool)> {
+    recognize(&enabled_buffered(fmts), bytes, theme)
+}
+
+/// Whether a run of OUTPUT bytes looks like **binary** — content GLIMPS must never
+/// frame, color, or reformat (invariant #3). Deliberately conservative: a false
+/// positive only means we pass real text through untouched (safe), whereas a false
+/// negative means we mangle binary — the failure this prevents (invariant #2).
+///
+/// Two signals, both vanishingly rare in terminal *text*:
+///   * a [binary control byte](is_binary_byte) (NUL and the other non-printing C0
+///     controls a binary file is full of, or DEL); or
+///   * an invalid UTF-8 sequence — but NOT a multibyte character merely *split* at
+///     the end of the chunk, which is a buffering boundary, not corruption
+///     (invariant #4). `Utf8Error::error_len() == None` marks that incomplete-tail
+///     case and is treated as "not (yet) binary".
+fn looks_binary(bytes: &[u8]) -> bool {
+    if bytes.iter().copied().any(is_binary_byte) {
+        return true;
     }
-    if fmts.html {
-        if let Some(out) = html::try_format(bytes, theme) {
-            return Some(("HTML", out));
-        }
+    match std::str::from_utf8(bytes) {
+        Ok(_) => false,
+        Err(e) => e.error_len().is_some(),
     }
-    None
+}
+
+/// A byte that essentially never occurs in plain terminal text: a C0 control other
+/// than the ordinary whitespace/formatting ones (TAB, LF, VT, FF, CR, BEL, BS) or
+/// `ESC` (which introduces ANSI), or `DEL`.
+fn is_binary_byte(b: u8) -> bool {
+    matches!(b, 0x00..=0x06 | 0x0e..=0x1a | 0x1c..=0x1f | 0x7f)
 }
 
 /// Emit one complete line, colored by log severity / HTTP status (per the enabled
 /// categories) if it matches, else verbatim. The user's bytes (content + line
 /// ending) are always preserved; only color codes are added.
-fn emit_line(out: &mut Vec<u8>, line: &[u8], theme: &Theme, fmts: &crate::config::Formatters) {
-    match linefmt::colorize_line(line, theme, fmts.logs, fmts.http) {
-        Some(colored) => out.extend_from_slice(&colored),
-        None => out.extend_from_slice(line),
+fn emit_line(out: &mut Vec<u8>, line: &[u8], theme: &Theme, streaming: &[&dyn StreamingFormatter]) {
+    if let Some(colored) = linefmt::colorize_line(line, theme, streaming) {
+        // Only inject color into genuine text. A line that slipped binary control
+        // bytes into a text stream (binary appearing mid-run, after a text commit)
+        // is emitted verbatim — never wrap binary in SGR (invariant #3). The scan
+        // runs only on a *matched* line, so it's off the common hot path. (ESC
+        // can't appear here: the scanner routes every escape byte to `Pass`.)
+        if !line.iter().copied().any(is_binary_byte) {
+            out.extend_from_slice(&colored);
+            return;
+        }
     }
+    out.extend_from_slice(line);
 }
 
 /// Render a content-type badge shown just above reformatted output: inverse-video
@@ -563,997 +692,4 @@ fn glimps_enabled() -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use proptest::prelude::*;
-
-    const C: &[u8] = b"\x1b]133;C\x07"; // command output start
-    const D: &[u8] = b"\x1b]133;D\x07"; // command output end
-
-    /// The header a fresh Formatter injects when NO command was captured (the dim
-    /// rule fallback), for the given clock. Tests without a command marker frame
-    /// output with this.
-    fn sep_with(clock: Clock) -> Vec<u8> {
-        Formatter::with_clock(clock).render_header()
-    }
-
-    /// The default (timestamp-less) separator.
-    fn sep() -> Vec<u8> {
-        sep_with(Clock::Off)
-    }
-
-    /// Convert GLIMPS-generated `\n` to `\r\n`, mirroring what the Formatter does
-    /// to formatted JSON before it hits the raw terminal.
-    fn crlf(bytes: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        push_crlf(&mut out, bytes);
-        out
-    }
-
-    /// The content-type badge bytes for a label.
-    fn badge(label: &str) -> Vec<u8> {
-        render_badge(label, true)
-    }
-
-    /// The command-capture marker GLIMPS's init emits before the C marker.
-    fn cmd_marker(cmd: &[u8]) -> Vec<u8> {
-        let mut v = b"\x1b]7337;".to_vec();
-        v.extend_from_slice(cmd);
-        v.push(0x07);
-        v
-    }
-
-    #[test]
-    fn header_shows_the_colored_command() {
-        let mut f = Formatter::new(); // default colored theme
-        if !f.is_enabled() {
-            return;
-        }
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(&cmd_marker(b"echo hi")));
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"hi\n"));
-        out.extend_from_slice(&f.process(D));
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains('▌'), "header bar missing");
-        assert!(
-            s.contains("\x1b[36mecho\x1b[0m"),
-            "command name not colored"
-        );
-        assert!(s.contains("hi\n"), "output not preserved");
-    }
-
-    #[test]
-    fn bypassed_command_output_is_not_formatted() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        let mut out = Vec::new();
-        // `vim` is on the default bypass list -> its output streams untouched,
-        // even output that looks like JSON.
-        out.extend_from_slice(&f.process(&cmd_marker(b"vim notes.json")));
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(br#"{"a":1}"#));
-        out.extend_from_slice(&f.process(D));
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains(r#"{"a":1}"#), "bypassed output must be verbatim");
-        assert!(
-            !s.contains("\"a\": 1"),
-            "bypassed output must NOT be pretty-printed"
-        );
-    }
-
-    #[test]
-    fn no_command_marker_means_no_bypass_and_dash_header() {
-        // A shell without `glimps init`'s command marker: even if you run `vim`,
-        // GLIMPS can't know the name, so it must NOT bypass and the header falls
-        // back to the dim rule. (Here output IS formatted, proving no bypass.)
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain();
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C)); // no 7337 marker
-        out.extend_from_slice(&f.process(br#"{"a":1}"#));
-        out.extend_from_slice(&f.process(D));
-        let s = String::from_utf8(out).unwrap();
-        assert!(
-            s.contains("\"a\": 1"),
-            "without a command, output still formats"
-        );
-        assert!(
-            !s.contains('▌'),
-            "no command -> dim-rule header, not a command bar"
-        );
-    }
-
-    #[test]
-    fn alt_screen_does_not_leak_command_into_next_header() {
-        // A bypassed TUI whose exit (`133;D`) lands in the alt-screen chunk must
-        // not leave its command captured for the NEXT command's header.
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain();
-        // vim session: command marker, C, enter alt-screen, exit alt-screen + D
-        // arriving while still bypassing.
-        let _ = f.process(&cmd_marker(b"vim notes.json"));
-        let _ = f.process(C);
-        let _ = f.process(b"\x1b[?1049h"); // enter alt screen -> bypass latches
-        let _ = f.process(&cat(&[b"\x1b[?1049l", D])); // exit alt screen + output end
-                                                       // Next command (no marker): its header must be the dim rule, not "vim …".
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"plain output\n"));
-        out.extend_from_slice(&f.process(D));
-        let s = String::from_utf8(out).unwrap();
-        assert!(
-            !s.contains("vim notes.json"),
-            "stale command leaked into next header"
-        );
-        assert!(s.contains("plain output\n"));
-    }
-
-    #[test]
-    fn non_bypassed_command_still_formats_json() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain(); // so the pretty JSON is contiguous (no color codes)
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(&cmd_marker(b"curl x")));
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(br#"{"a":1}"#));
-        out.extend_from_slice(&f.process(D));
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("curl x"), "command header missing");
-        assert!(
-            s.contains("\"a\": 1"),
-            "JSON should still be pretty-printed"
-        );
-    }
-
-    /// Drive a sequence of chunks through one (timestamp-less, plain-theme)
-    /// Formatter and return all emitted bytes concatenated. Plain theme means
-    /// line coloring adds no bytes, so verbatim assertions stay exact.
-    fn run(chunks: &[&[u8]]) -> Vec<u8> {
-        let mut f = Formatter::new();
-        f.theme = Theme::plain();
-        let mut out = Vec::new();
-        for c in chunks {
-            out.extend_from_slice(&f.process(c));
-        }
-        out
-    }
-
-    /// Drive chunks through one plain-theme Formatter, then flush (PTY EOF).
-    fn run_flush(chunks: &[&[u8]]) -> Vec<u8> {
-        let mut f = Formatter::new();
-        f.theme = Theme::plain();
-        let mut out = Vec::new();
-        for c in chunks {
-            out.extend_from_slice(&f.process(c));
-        }
-        out.extend_from_slice(&f.flush());
-        out
-    }
-
-    fn cat(parts: &[&[u8]]) -> Vec<u8> {
-        parts.concat()
-    }
-
-    #[test]
-    fn empty_chunk_is_safe() {
-        let mut f = Formatter::new();
-        assert!(f.process(b"").is_empty());
-    }
-
-    #[test]
-    fn zone_advances_through_process() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.process(C);
-        assert_eq!(f.zone(), Zone::Output);
-        f.process(b"some command output\n");
-        assert_eq!(f.zone(), Zone::Output);
-        f.process(D);
-        assert_eq!(f.zone(), Zone::Unknown);
-    }
-
-    #[test]
-    fn json_output_is_pretty_printed_with_separator_and_crlf() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain();
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(br#"{"a":1,"b":[2,3]}"#));
-        out.extend_from_slice(&f.process(D)); // command end -> flush + format
-        let pretty = crlf(b"{\n  \"a\": 1,\n  \"b\": [\n    2,\n    3\n  ]\n}");
-        let expected = cat(&[C, &sep(), &badge("JSON"), &pretty, D]);
-        assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn json_split_across_chunks_is_still_formatted() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain();
-        let mut out = Vec::new();
-        for part in [C, br#"{"a":"#, br#"1}"#, D] {
-            out.extend_from_slice(&f.process(part));
-        }
-        let pretty = crlf(b"{\n  \"a\": 1\n}");
-        assert_eq!(out, cat(&[C, &sep(), &badge("JSON"), &pretty, D]));
-    }
-
-    #[test]
-    fn non_json_output_is_framed_but_unchanged() {
-        let body = b"total 12\ndrwxr-xr-x  3 user staff\n";
-        let input = cat(&[C, body, D]);
-        // The user's bytes are untouched; only a separator is inserted at output start.
-        let expected = cat(&[C, &sep(), body, D]);
-        assert_eq!(run(&[&input]), expected);
-    }
-
-    #[test]
-    fn output_that_looks_like_json_but_isnt_passes_through() {
-        let body = b"{this is not json}";
-        let input = cat(&[C, body, D]);
-        assert_eq!(run(&[&input]), cat(&[C, &sep(), body, D]));
-    }
-
-    #[test]
-    fn angle_bracket_output_that_isnt_html_passes_through() {
-        // A `<`-leading run is buffered (the loose sniff trigger), but if it isn't
-        // HTML it must be emitted verbatim (only framed by the separator).
-        let body = b"<stdin>: not actually html\n";
-        let input = cat(&[C, body, D]);
-        assert_eq!(run(&[&input]), cat(&[C, &sep(), body, D]));
-    }
-
-    #[test]
-    fn output_outside_any_command_is_untouched() {
-        // No C marker -> zone stays Unknown -> pure pass-through, no separator.
-        let stream = br#"{"a":1}"#;
-        assert_eq!(run(&[stream]), stream);
-    }
-
-    #[test]
-    fn prompt_and_input_are_never_formatted() {
-        // The prompt/input zones (incl. a `{`-leading typed command) pass through
-        // untouched; only the command's OUTPUT ("plain\n") is framed.
-        let a = b"\x1b]133;A\x07";
-        let b = b"\x1b]133;B\x07";
-        let input = cat(&[a, b"{prompt} $ ", b, br#"echo {"x":1}"#, C, b"plain\n", D]);
-        let expected = cat(&[
-            a,
-            b"{prompt} $ ",
-            b,
-            br#"echo {"x":1}"#,
-            C,
-            &sep(),
-            b"plain\n",
-            D,
-        ]);
-        assert_eq!(run(&[&input]), expected);
-    }
-
-    #[test]
-    fn no_separator_for_empty_command_output() {
-        // A command that produces no output gets no separator at all.
-        let input = cat(&[C, D]);
-        assert_eq!(run(&[&input]), input);
-    }
-
-    #[test]
-    fn whitespace_only_output_is_still_framed() {
-        // Whitespace counts as output: a command that prints only a blank line is
-        // framed (its bytes are preserved verbatim behind the separator). Pins the
-        // documented behavior.
-        let body = b"\n";
-        let input = cat(&[C, body, D]);
-        assert_eq!(run(&[&input]), cat(&[C, &sep(), body, D]));
-    }
-
-    #[test]
-    fn log_and_http_lines_are_colored_streaming() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        // Default (colored) theme; lines arrive in separate chunks (tail -f style).
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"INFO starting up\n"));
-        out.extend_from_slice(&f.process(b"ERROR boom\n"));
-        out.extend_from_slice(&f.process(b"HTTP/1.1 404 Not Found\n"));
-        out.extend_from_slice(&f.process(b"just a plain line\n"));
-        out.extend_from_slice(&f.process(D));
-        let s = String::from_utf8(out).unwrap();
-        // Separator once, then each recognized line wrapped in its color; the
-        // plain line is untouched.
-        assert!(s.contains("\x1b[32mINFO starting up\x1b[0m\n")); // green
-        assert!(s.contains("\x1b[31mERROR boom\x1b[0m\n")); // red
-        assert!(s.contains("\x1b[33mHTTP/1.1 404 Not Found\x1b[0m\n")); // yellow
-        assert!(s.contains("just a plain line\n"));
-        assert!(!s.contains("\x1b[31mjust a plain line")); // plain line not colored
-    }
-
-    #[test]
-    fn log_line_split_across_chunks_is_colored_once_whole() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"ERR")); // partial line, no newline yet
-        out.extend_from_slice(&f.process(b"OR boom\n")); // completes the line
-        out.extend_from_slice(&f.process(D));
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("\x1b[31mERROR boom\x1b[0m\n"));
-    }
-
-    #[test]
-    fn http_status_split_across_chunks_is_colored_whole() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"HTTP/1.1 4")); // code split mid-number
-        out.extend_from_slice(&f.process(b"04 Not Found\n"));
-        out.extend_from_slice(&f.process(D));
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("\x1b[33mHTTP/1.1 404 Not Found\x1b[0m\n"));
-    }
-
-    #[test]
-    fn crlf_log_line_is_colored_with_ending_preserved() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"ERROR x\r\n")); // CRLF, as from a real PTY
-        out.extend_from_slice(&f.process(D));
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("\x1b[31mERROR x\x1b[0m\r\n")); // reset before \r\n
-    }
-
-    #[test]
-    fn unterminated_final_line_flushes_verbatim_uncolored() {
-        // A colorable-looking line with no trailing newline at EOF is flushed
-        // verbatim (we only color complete lines) — and no bytes are lost.
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"ERROR boom")); // no newline
-        out.extend_from_slice(&f.flush()); // EOF
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.ends_with("ERROR boom"));
-        assert!(!s.contains("\x1b[31m")); // not colored (partial line)
-    }
-
-    #[test]
-    fn very_long_line_streams_verbatim_without_coloring() {
-        // A line longer than LINE_CAP with no newline overflows the line buffer:
-        // it must be streamed verbatim (no coloring, no byte loss).
-        let mut body = b"ERROR ".to_vec(); // would match if it were a complete line
-        body.extend(std::iter::repeat_n(
-            b'x',
-            Config::default().limits.line_cap + 16,
-        ));
-        let input = cat(&[C, &body]); // no D; overflow forces verbatim, then EOF
-        assert_eq!(run_flush(&[&input]), cat(&[C, &sep(), &body]));
-    }
-
-    #[test]
-    fn binary_output_is_passed_through_without_a_separator() {
-        // Output beginning with a NUL byte is binary: no separator, no buffering,
-        // streamed exactly (invariant #3: never reformat binary).
-        let body = b"\x7fELF\x00\x01\x02\x00\x00rest";
-        let input = cat(&[C, body, D]);
-        assert_eq!(run(&[&input]), input);
-    }
-
-    #[test]
-    fn whitespace_then_binary_gets_no_separator() {
-        // Output that begins with whitespace and THEN reveals a NUL is still
-        // binary: because the separator is deferred until a text commit, it is
-        // correctly suppressed (not injected ahead of the binary).
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"  ")); // whitespace (undecided)
-        out.extend_from_slice(&f.process(b"\x00\x01bin")); // NUL -> binary
-        out.extend_from_slice(&f.process(D));
-        assert_eq!(out, cat(&[C, b"  ", b"\x00\x01bin", D]));
-    }
-
-    #[test]
-    fn nul_after_text_committed_still_streams_verbatim() {
-        // Once a run has committed to text (Passthrough), a later NUL just streams
-        // through. The separator was already shown for the text — that's correct.
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"hello ")); // commits to text -> separator
-        out.extend_from_slice(&f.process(b"\x00\x00")); // NUL later -> verbatim
-        out.extend_from_slice(&f.process(D));
-        assert_eq!(out, cat(&[C, &sep(), b"hello ", b"\x00\x00", D]));
-    }
-
-    /// Build a Formatter with a specific config (plain timestamp, treated as a TTY).
-    fn fmt_with(config: Config) -> Formatter {
-        Formatter::build(Clock::Off, true, config)
-    }
-
-    #[test]
-    fn config_master_disable_is_pure_passthrough() {
-        let cfg = Config {
-            enabled: false,
-            ..Config::default()
-        };
-        let mut f = fmt_with(cfg);
-        let stream = cat(&[C, br#"{"a":1}"#, D]);
-        assert_eq!(&*f.process(&stream), stream.as_slice());
-    }
-
-    #[test]
-    fn config_json_off_passes_json_through_verbatim() {
-        let cfg = Config {
-            formatters: crate::config::Formatters {
-                json: false,
-                ..crate::config::Formatters::default()
-            },
-            ..Config::default()
-        };
-        let mut f = fmt_with(cfg);
-        let body = br#"{"a":1}"#;
-        let stream = cat(&[C, body, D]);
-        // JSON disabled -> not reformatted; still framed by the separator.
-        assert_eq!(f.process(&stream).into_owned(), cat(&[C, &sep(), body, D]));
-    }
-
-    #[test]
-    fn config_logs_off_does_not_color_log_lines() {
-        let cfg = Config {
-            formatters: crate::config::Formatters {
-                logs: false,
-                ..crate::config::Formatters::default()
-            },
-            ..Config::default()
-        };
-        let mut f = fmt_with(cfg);
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"ERROR boom\n"));
-        out.extend_from_slice(&f.process(D));
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("ERROR boom\n"));
-        assert!(!s.contains("\x1b[31m")); // not colored red
-    }
-
-    #[test]
-    fn config_color_off_emits_no_ansi_but_still_structures() {
-        let cfg = Config {
-            color: false,
-            ..Config::default()
-        };
-        let mut f = fmt_with(cfg);
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(br#"{"a":1}"#));
-        out.extend_from_slice(&f.process(D));
-        let s = String::from_utf8(out).unwrap();
-        // No SGR color codes (`\x1b[`). The OSC-133 markers use `\x1b]` and are
-        // passed through, so we don't assert against bare ESC.
-        assert!(!s.contains("\x1b[")); // no color codes (separator/badge/json)
-        assert!(s.contains("[JSON]")); // plain badge instead of inverse
-        assert!(s.contains("{\r\n  \"a\": 1\r\n}")); // still indented (CRLF)
-    }
-
-    #[test]
-    fn config_separator_off_hides_the_divider() {
-        let cfg = Config {
-            separator: false,
-            ..Config::default()
-        };
-        let mut f = fmt_with(cfg);
-        let body = b"plain output\n";
-        let stream = cat(&[C, body, D]);
-        // No separator, and (plain log line) no coloring change -> verbatim.
-        assert_eq!(f.process(&stream).into_owned(), stream);
-    }
-
-    #[test]
-    fn non_tty_supervisor_output_disables_formatting() {
-        // Under `cargo test`, stdout is not a terminal, so the supervisor
-        // constructor must disable formatting (raw pass-through).
-        if std::io::stdout().is_terminal() {
-            return; // can't assert the gate when run attached to a real tty
-        }
-        let mut f = Formatter::for_supervisor(Clock::Off, Config::default());
-        assert!(!f.is_enabled());
-        // And it truly passes through, markers/JSON included.
-        let stream = cat(&[C, br#"{"a":1}"#, D]);
-        assert_eq!(&*f.process(&stream), stream.as_slice());
-    }
-
-    #[test]
-    fn alt_screen_app_is_passed_through_untouched() {
-        // A full-screen app (vim): enter alt screen, draw content that even looks
-        // like JSON, exit. No separator, no badge, no formatting — pure verbatim.
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain();
-        let alt_on = b"\x1b[?1049h";
-        let alt_off = b"\x1b[?1049l";
-        let parts: [&[u8]; 5] = [C, alt_on, br#"{"a":1}"#, alt_off, D];
-        let mut out = Vec::new();
-        for p in parts {
-            out.extend_from_slice(&f.process(p));
-        }
-        assert_eq!(out, parts.concat());
-    }
-
-    #[test]
-    fn alt_screen_entering_mid_buffer_flushes_without_byte_loss() {
-        // Defensive path: a buffered JSON-candidate run is pending when alt-screen
-        // is entered. The withheld bytes must be flushed verbatim (incomplete
-        // JSON doesn't format), then the alt-screen chunk streamed — nothing lost.
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain();
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C)); // OutputStart, separator owed
-        out.extend_from_slice(&f.process(br#"{"a":1"#)); // buffered (incomplete)
-        out.extend_from_slice(&f.process(b"\x1b[?1049h")); // alt-screen enters
-                                                           // Separator was emitted lazily before the buffered bytes; on alt-enter the
-                                                           // buffer is flushed verbatim and the chunk streamed.
-        assert_eq!(out, cat(&[C, &sep(), br#"{"a":1"#, b"\x1b[?1049h"]));
-    }
-
-    #[test]
-    fn formatting_resumes_after_alt_screen_exits() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain();
-        // A TUI session, discarded.
-        for p in [C, b"\x1b[?1049h".as_slice(), b"\x1b[?1049l", D] {
-            let _ = f.process(p);
-        }
-        // The next command's JSON output is formatted normally again.
-        let mut out = Vec::new();
-        for p in [C, br#"{"a":1}"#.as_slice(), D] {
-            out.extend_from_slice(&f.process(p));
-        }
-        assert_eq!(
-            out,
-            cat(&[C, &sep(), &badge("JSON"), &crlf(b"{\n  \"a\": 1\n}"), D])
-        );
-    }
-
-    #[test]
-    fn separator_owed_across_a_chunk_boundary() {
-        // OutputStart arrives at the end of one chunk (C marker), the first output
-        // byte in the next. The owed separator must still be emitted once, before
-        // that byte — exercising the `pending_separator` Cow-fast-path guard.
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C)); // OutputStart, separator owed
-        out.extend_from_slice(&f.process(b"hello\n")); // first output byte next chunk
-        out.extend_from_slice(&f.process(D));
-        assert_eq!(out, cat(&[C, &sep(), b"hello\n", D]));
-    }
-
-    #[test]
-    fn separator_carries_timestamp_with_a_clock() {
-        let mut f = Formatter::with_clock(Clock::Fixed("12:34:56"));
-        f.theme = Theme::plain();
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"hi\n"));
-        out.extend_from_slice(&f.process(D));
-        let expected = cat(&[C, &sep_with(Clock::Fixed("12:34:56")), b"hi\n", D]);
-        assert_eq!(out, expected);
-        // The timestamp text is present in the emitted separator.
-        assert!(out.windows(8).any(|w| w == b"12:34:56"));
-    }
-
-    #[test]
-    fn eof_flush_emits_withheld_non_json_unchanged() {
-        // Output that starts like JSON but never closes (no `D`), then EOF. The
-        // withheld bytes survive verbatim, behind the separator.
-        let body = br#"{"a":1"#; // incomplete: no closing brace
-        let input = cat(&[C, body]);
-        assert_eq!(run_flush(&[&input]), cat(&[C, &sep(), body]));
-    }
-
-    #[test]
-    fn eof_flush_formats_withheld_complete_json() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain();
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(br#"{"a":1}"#)); // buffered, no D yet
-        out.extend_from_slice(&f.flush()); // EOF -> format the complete value
-        assert_eq!(
-            out,
-            cat(&[C, &sep(), &badge("JSON"), &crlf(b"{\n  \"a\": 1\n}")])
-        );
-    }
-
-    #[test]
-    fn two_consecutive_json_outputs_each_framed_and_formatted() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain();
-        let mut out = Vec::new();
-        for part in [C, br#"{"a":1}"#, D, C, b"[1,2]", D] {
-            out.extend_from_slice(&f.process(part));
-        }
-        let one = crlf(b"{\n  \"a\": 1\n}");
-        let two = crlf(b"[\n  1,\n  2\n]");
-        let expected = cat(&[
-            C,
-            &sep(),
-            &badge("JSON"),
-            &one,
-            D,
-            C,
-            &sep(),
-            &badge("JSON"),
-            &two,
-            D,
-        ]);
-        assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn html_output_is_indented_with_badge() {
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain();
-        let mut out = Vec::new();
-        out.extend_from_slice(&f.process(C));
-        out.extend_from_slice(&f.process(b"<p>hi</p>"));
-        out.extend_from_slice(&f.process(D));
-        let indented = crlf(b"<p>\n  hi\n</p>");
-        assert_eq!(out, cat(&[C, &sep(), &badge("HTML"), &indented, D]));
-    }
-
-    #[test]
-    fn buffer_cap_overflow_streams_verbatim() {
-        // A `{`-leading run larger than BUFFER_CAP gives up and streams the bytes
-        // unchanged (behind the separator) rather than holding them.
-        let mut body = vec![b'{'];
-        body.extend(std::iter::repeat_n(
-            b'x',
-            Config::default().limits.buffer_cap + 1,
-        ));
-        let input = cat(&[C, &body]); // no D; overflow forces verbatim
-        assert_eq!(run_flush(&[&input]), cat(&[C, &sep(), &body]));
-    }
-
-    #[test]
-    fn ansi_escape_mid_json_keeps_bytes_intact() {
-        // Output containing an ANSI escape can't be one clean JSON value; the
-        // user's bytes pass through unchanged (invariant #3) behind the separator.
-        let body = cat(&[br#"{"a":1"#, b"\x1b[31m", b"}"]);
-        let input = cat(&[C, &body, D]);
-        assert_eq!(run(&[&input]), cat(&[C, &sep(), &body, D]));
-    }
-
-    /// Expected framing of a single command's non-JSON output: a separator is
-    /// inserted only if the command actually produced output bytes.
-    fn framed(body: &[u8], trailing_d: bool) -> Vec<u8> {
-        let mut v = C.to_vec();
-        if !body.is_empty() {
-            v.extend_from_slice(&sep());
-            v.extend_from_slice(body);
-        }
-        if trailing_d {
-            v.extend_from_slice(D);
-        }
-        v
-    }
-
-    /// A token used to build fuzz bodies that interleave plain text, ANSI SGR
-    /// sequences, and newlines — mimicking real colored command output.
-    #[derive(Debug, Clone)]
-    enum Tok {
-        Text(Vec<u8>),
-        Sgr(u8),
-        Newline,
-    }
-
-    /// Remove the first occurrence of `needle` from `haystack`.
-    fn strip_first(haystack: &[u8], needle: &[u8]) -> Vec<u8> {
-        match haystack.windows(needle.len()).position(|w| w == needle) {
-            Some(pos) => {
-                let mut v = haystack[..pos].to_vec();
-                v.extend_from_slice(&haystack[pos + needle.len()..]);
-                v
-            }
-            None => haystack.to_vec(),
-        }
-    }
-
-    #[test]
-    fn corpus_common_commands_preserve_every_byte() {
-        // Zero interference across a corpus of real-world command output —
-        // including ANSI-colored, Unicode, man-overstrike, control-only, tables,
-        // and empty/whitespace cases. GLIMPS may only INSERT one separator; every
-        // user byte must survive. Plain theme so line coloring adds nothing; we
-        // then strip the single injected separator and require the original back.
-        // (Stripping handles ANSI-leading output, where the separator lands after
-        // the leading escape rather than right after the C marker.)
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus/commands");
-        let sep = sep();
-        let mut count = 0;
-        for entry in std::fs::read_dir(dir).expect("corpus dir") {
-            let path = entry.expect("dir entry").path();
-            if path.extension().and_then(|e| e.to_str()) != Some("txt") {
-                continue;
-            }
-            let sample = std::fs::read(&path).expect("read fixture");
-            let input = cat(&[C, &sample, D]);
-            let out = run(&[&input]);
-            let recovered = strip_first(&out, &sep);
-            assert_eq!(
-                recovered,
-                cat(&[C, &sample, D]),
-                "interference on corpus fixture {:?}",
-                path.file_name()
-            );
-            count += 1;
-        }
-        assert!(count >= 30, "expected a sizable corpus, found only {count}");
-    }
-
-    #[test]
-    fn password_prompt_output_is_never_touched() {
-        // A no-echo password prompt is just command output (the program prints
-        // "Password:"); GLIMPS must pass it through unchanged. The typed password
-        // is no-echo, so it never appears in the stream at all — GLIMPS can't see
-        // it. This pins the "password prompts never touched" promise.
-        let prompt = b"Password:";
-        let stream = cat(&[C, prompt, D]);
-        // No trailing newline, prompt waits inline -> Stream holds it, flushed on D.
-        assert_eq!(run(&[&stream]), cat(&[C, &sep(), prompt, D]));
-    }
-
-    #[test]
-    fn latency_budget_no_pathological_blowup() {
-        use std::time::Instant;
-        // ~4 MiB of line-oriented output fed in PTY-sized chunks through the
-        // streaming (per-line) path — the realistic hot path. A generous wall
-        // budget catches O(n^2)/pathological regressions (criterion measures the
-        // real micro-latency separately). Debug builds are slow, hence 10s.
-        let mut f = Formatter::new();
-        if !f.is_enabled() {
-            return;
-        }
-        f.theme = Theme::plain();
-        let line = b"the quick brown fox jumps over the lazy dog 0123456789\n";
-        let mut body = Vec::with_capacity(4 * 1024 * 1024);
-        while body.len() < 4 * 1024 * 1024 {
-            body.extend_from_slice(line);
-        }
-        let start = Instant::now();
-        let _ = f.process(C);
-        for chunk in body.chunks(8192) {
-            let _ = f.process(chunk);
-        }
-        let _ = f.process(D);
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed.as_secs() < 10,
-            "processed {} bytes in {elapsed:?} (budget 10s — suspect a complexity regression)",
-            body.len()
-        );
-    }
-
-    proptest::proptest! {
-        /// Arbitrary config (random toggles + small/zero caps) over arbitrary
-        /// command output never panics, and when the master switch is off the
-        /// output is byte-identical to the input (pure pass-through).
-        #[test]
-        #[allow(clippy::too_many_arguments)]
-        fn prop_arbitrary_config_is_safe(
-            enabled: bool,
-            color: bool,
-            separator: bool,
-            json: bool,
-            html: bool,
-            logs: bool,
-            http: bool,
-            buffer_cap in 0usize..2048,
-            line_cap in 0usize..2048,
-            sniff_cap in 0usize..128,
-            body in proptest::collection::vec(0u8..=255, 0..256),
-        ) {
-            let cfg = Config {
-                enabled,
-                color,
-                separator,
-                timestamp: false,
-                bypass: Vec::new(),
-                formatters: crate::config::Formatters { json, html, logs, http },
-                limits: crate::config::Limits { buffer_cap, line_cap, sniff_cap },
-            };
-            let mut f = Formatter::build(Clock::Off, true, cfg);
-            let stream = [C, &body, D].concat();
-            let mut out = f.process(&stream).into_owned();
-            out.extend_from_slice(&f.flush()); // also exercises EOF flush; must not panic
-            if !enabled {
-                proptest::prop_assert_eq!(out, stream); // off => verbatim
-            }
-        }
-
-        /// Fuzz: realistic colored output — arbitrary interleavings of plain
-        /// text, ANSI SGR sequences, and newlines — is preserved byte-for-byte
-        /// (plain theme; the one injected separator stripped back out), and never
-        /// panics. Exercises the ESC-splitting + line-streaming paths on
-        /// adversarial-but-realistic input.
-        #[test]
-        fn prop_text_and_ansi_preserve_every_byte(
-            ops in proptest::collection::vec(
-                proptest::prop_oneof![
-                    proptest::collection::vec(
-                        proptest::prop_oneof![Just(b' '), 0x61u8..0x7b, 0x30u8..0x3a],
-                        1..12,
-                    ).prop_map(Tok::Text),
-                    (0u8..8).prop_map(Tok::Sgr),
-                    Just(Tok::Newline),
-                ],
-                0..40,
-            )
-        ) {
-            // Lead with a plain byte so the run is classified as text (not
-            // JSON/HTML/binary); tokens contain no NUL, no `ESC ]`, no `─`/`\r`,
-            // so the body can neither form a marker nor collide with a separator.
-            let mut body = vec![b'x'];
-            for op in &ops {
-                match op {
-                    Tok::Text(bytes) => body.extend_from_slice(bytes),
-                    Tok::Sgr(n) => {
-                        body.extend_from_slice(b"\x1b[");
-                        body.extend_from_slice(n.to_string().as_bytes());
-                        body.push(b'm');
-                    }
-                    Tok::Newline => body.push(b'\n'),
-                }
-            }
-            let mut f = Formatter::new();
-            if !f.is_enabled() {
-                return Ok(());
-            }
-            f.theme = Theme::plain();
-            let stream = [C, &body, D].concat();
-            let out = f.process(&stream).into_owned();
-            let recovered = strip_first(&out, &sep());
-            proptest::prop_assert_eq!(recovered, stream);
-        }
-
-        /// Byte-safety invariant #4 for the pass-through path: with no escape
-        /// sequences in the stream (so the zone never leaves Unknown, and no
-        /// separator is ever inserted), the concatenation of outputs equals the
-        /// concatenation of inputs exactly.
-        #[test]
-        fn prop_passthrough_is_byte_identical(
-            chunks in proptest::collection::vec(proptest::collection::vec(0u8..=255, 0..64), 0..16)
-        ) {
-            let mut f = Formatter::new();
-            let mut out = Vec::new();
-            let mut expected = Vec::new();
-            for chunk in &chunks {
-                // Strip ESC so no escape sequence (and thus no zone change) can form.
-                let clean: Vec<u8> = chunk.iter().copied().filter(|&b| b != 0x1b).collect();
-                expected.extend_from_slice(&clean);
-                out.extend_from_slice(&f.process(&clean));
-            }
-            proptest::prop_assert_eq!(out, expected);
-        }
-
-        /// Non-JSON command output (arbitrary ESC-free bytes wrapped in C/D
-        /// markers) is preserved byte-for-byte, with only the GLIMPS separator
-        /// inserted at output start. Proves the buffering path withholds-then-
-        /// flushes without altering the user's bytes.
-        #[test]
-        fn prop_non_json_output_preserves_user_bytes(
-            body in proptest::collection::vec(0u8..=255, 0..256)
-        ) {
-            let mut f = Formatter::new();
-            if !f.is_enabled() {
-                return Ok(());
-            }
-            f.theme = Theme::plain(); // line coloring adds no bytes -> exact assertions
-            // Drop ESC (no escape sequences/zone changes) and NUL (binary framing
-            // is covered separately); this run exercises text framing.
-            let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b && b != 0).collect();
-            // Skip inputs that ARE a formattable JSON value — those are meant to change.
-            // Exclude anything a formatter would reformat — those are meant to change.
-            proptest::prop_assume!(format_recognized(&clean, &Theme::plain(), &crate::config::Formatters::default()).is_none());
-
-            let input = [C, &clean, D].concat();
-            let mut out = Vec::new();
-            out.extend_from_slice(&f.process(&input));
-            proptest::prop_assert_eq!(out, framed(&clean, true));
-        }
-
-        /// The EOF-flush path preserves non-JSON user bytes even when the stream
-        /// is split at arbitrary boundaries and never closed by a `D` marker (the
-        /// shell-crash scenario). Directly guards the truncation bug the audit
-        /// caught.
-        #[test]
-        fn prop_eof_flush_preserves_user_bytes(
-            body in proptest::collection::vec(0u8..=255, 0..256),
-            splits in proptest::collection::vec(1usize..40, 1..10),
-        ) {
-            let mut f = Formatter::new();
-            if !f.is_enabled() {
-                return Ok(());
-            }
-            f.theme = Theme::plain(); // line coloring adds no bytes -> exact assertions
-            // Drop ESC (no escape sequences/zone changes) and NUL (binary framing
-            // is covered separately); this run exercises text framing.
-            let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b && b != 0).collect();
-            // Exclude anything a formatter would reformat — those are meant to change.
-            proptest::prop_assume!(format_recognized(&clean, &Theme::plain(), &crate::config::Formatters::default()).is_none());
-
-            // C + body, but NO closing D — then flush, simulating PTY EOF.
-            let input = [C, &clean].concat();
-            let mut out = Vec::new();
-            let (mut i, mut si) = (0usize, 0usize);
-            while i < input.len() {
-                let step = splits[si % splits.len()].min(input.len() - i).max(1);
-                out.extend_from_slice(&f.process(&input[i..i + step]));
-                i += step;
-                si += 1;
-            }
-            out.extend_from_slice(&f.flush());
-            proptest::prop_assert_eq!(out, framed(&clean, false));
-        }
-    }
-}
+mod tests;

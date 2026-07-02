@@ -1,0 +1,5 @@
+2026-06-30T09:15:01Z INFO  server starting on :8080
+2026-06-30T09:15:02Z DEBUG loaded 14 routes
+2026-06-30T09:15:09Z WARN  slow query (320ms): SELECT * FROM users
+2026-06-30T09:15:10Z ERROR connection reset by peer
+2026-06-30T09:15:10Z FATAL shutting down

@@ -33,9 +33,13 @@ Goal: it never gets in the way, on any command.
 - ☑ Interactive bypass (vim, htop, less, fzf, ssh, …) — pass through untouched
       (alternate-screen detection + name-based bypass via the captured command;
       bypass list is configurable in `.glimpsrc`)
-- ◐ Binary output pass-through (NUL-byte detection done; non-UTF8 scan TODO)
-- ◐ ANSI-already-present pass-through (a control byte ends/declines a buffered run;
-      no explicit whole-run gate yet)
+- ☑ Binary output pass-through (NUL, other non-text C0/DEL control bytes, AND
+      invalid-UTF8 detection — a multibyte char split across chunks is NOT
+      misclassified; binary streams verbatim with no header/badge/color)
+- ☑ ANSI-already-present pass-through (the scanner routes every escape byte to
+      `Pass`, finalizing the run, so Output never contains ESC; JSON-with-ESC falls
+      back to verbatim, and the streaming colorizer never re-colors a line that
+      already carries ANSI or binary)
 - ☑ `isatty()` pipe-safety (formatting off when stdout isn't a terminal)
 - ☑ Log severity coloring (ERROR/WARN/INFO/DEBUG), streaming line-by-line
 - ☑ HTTP status code highlighting
@@ -51,8 +55,9 @@ Goal: trustworthy enough to hand to strangers.
       timestamp toggles, master switch (done). Name-based bypass list still TODO
       (needs command-name capture).
 - ☑ Large-output streaming switch (buffer/line caps → verbatim past threshold)
-- ◐ Golden-file test corpus (JSON/HTML goldens + ~14 common-command byte-safety
-      fixtures; extend toward the full top-50)
+- ☑ Golden-file test corpus (JSON/HTML goldens + **50** common-command byte-safety
+      fixtures — incl. already-ANSI git color/graph, jq -C colored JSON, 256-color,
+      CR progress bars, top/lsof/netstat tables, emoji/CJK, binary; all byte-preserved)
 - ☑ `criterion` benchmarks + enforced latency budget in CI (latency-budget test
       runs on Linux+macOS; benches kept compiling via `cargo bench --no-run`)
 - ☑ Color themes — no-color / minimal mode via `color = false`
@@ -65,14 +70,18 @@ Goal: `brew install glimps`, a README that sells it, and a demo GIF that spreads
 - ◐ Homebrew formula + prebuilt binaries via `cargo-dist` + release CI
       (configured: `dist-workspace.toml` + `.github/workflows/release.yml` build
       macOS+Linux binaries, a shell installer, and a Homebrew formula on version
-      tags. To go live: create the `glimps-sh/homebrew-tap` repo + token secret,
+      tags. To go live: create the `Krishnarajan7/homebrew-tap` repo + token secret,
       bump the version, and push a `vX.Y.Z` tag.)
-- ◐ Polished README (done) with an animated before/after demo GIF (still to record)
+- ◐ Polished README (done) with an animated before/after demo GIF — tooling done
+      (`demo/glimps.tape` + `demo/README.md`, self-contained VHS script); the GIF
+      itself just needs `vhs demo/glimps.tape` run on a machine with VHS installed
 - ☑ Docs: install, config, safety/privacy statement, uninstall (README + `.glimpsrc.example`)
-- ☑ Hardened: 36-fixture command corpus (ANSI/Unicode/overstrike/tables/control-only/
-      empty) all byte-preserved; password-prompt test; fuzz sweep over text+ANSI
-      (10k cases) + arbitrary-bytes/arbitrary-config property tests prove no panic
-      and no byte loss. (Corpus can keep growing toward a literal top-50.)
+- ☑ Hardened: 52-fixture command corpus (ANSI/Unicode/overstrike/tables/control-only/
+      empty/binary/already-ANSI) all byte-preserved; password-prompt test; fuzz sweep
+      over text+ANSI (10k cases) + arbitrary-bytes/arbitrary-config property tests
+      prove no panic and no byte loss; **end-to-end PTY integration tests**
+      (`tests/pty_integration.rs`) drive the real binary through a pseudo-terminal to
+      pin exit/Ctrl-D/SIGTERM termination and live JSON-format / binary-passthrough.
 - ☐ Launch: Show HN, r/commandline, r/rust, Lobsters
 
 Exit criteria: a stranger installs it in <30s and it "just works."
@@ -83,7 +92,9 @@ Exit criteria: a stranger installs it in <30s and it "just works."
 - ☐ Error-line pinning / summary panel for long output
 - ☐ bash + fish support
 - ☐ Windows support (PTY + ANSI differences)
-- ☐ More formatters via the `add-formatter` skill: YAML, CSV, SQL, stack traces, diffs
+- ◐ More formatters via the `add-formatter` skill: **diffs ☑** (unified-diff
+      coloring, hunk-anchored detection) and **stack traces ☑** (Rust panics +
+      Python tracebacks, streaming); YAML, CSV, SQL still ☐
 
 ## v2.0 — Ambition (only if v1 has real traction)
 - ☐ Optional, **local/offline**, opt-in AI output summarization (privacy-preserving)

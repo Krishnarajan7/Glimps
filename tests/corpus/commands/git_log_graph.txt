@@ -1,0 +1,8 @@
+* [33m2bfd5e9[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m fix: on shutdown layer
+* [33m228d204[m feat: funtional beta version
+* [33me853f36[m feat: (streaming log/HTTP line coloring).
+* [33md65c13b[m feat: (binary + non-TTY safety gates)
+* [33mb859703[m feat: osc133 scanner, json formatter, panic-restore, separator, init, html, badge…
+* [33mdf64346[m feat: solid chunck of V-0.1
+* [33mf73af0f[m chore: initial project setup
+* [33m2ed4c29[m Initial commit

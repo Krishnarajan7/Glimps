@@ -1,0 +1,30 @@
+Active Internet connections (including servers)
+Proto Recv-Q Send-Q  Local Address                                 Foreign Address                               (state)    
+tcp6       0      0  ::1.8080               ::1.52525              ESTABLISHED
+tcp6       0      0  ::1.52525              ::1.8080               ESTABLISHED
+tcp6       0      0  ::1.8080               ::1.52524              ESTABLISHED
+tcp6       0      0  ::1.52524              ::1.8080               ESTABLISHED
+tcp6       0      0  ::1.8080               ::1.52523              ESTABLISHED
+tcp6       0      0  ::1.52523              ::1.8080               ESTABLISHED
+tcp6       0      0  ::1.8080               ::1.52522              ESTABLISHED
+tcp6       0      0  ::1.52522              ::1.8080               ESTABLISHED
+tcp6       0      0  ::1.8080               ::1.52521              ESTABLISHED
+tcp6       0      0  ::1.52521              ::1.8080               ESTABLISHED
+tcp6       0      0  ::1.5432               ::1.52520              ESTABLISHED
+tcp6       0      0  ::1.52520              ::1.5432               ESTABLISHED
+tcp6       0      0  ::1.5432               ::1.52516              ESTABLISHED
+tcp6       0      0  ::1.52516              ::1.5432               ESTABLISHED
+tcp6       0      0  ::1.5432               ::1.52513              ESTABLISHED
+tcp6       0      0  ::1.52513              ::1.5432               ESTABLISHED
+tcp6       0      0  ::1.5432               ::1.52512              ESTABLISHED
+tcp6       0      0  ::1.52512              ::1.5432               ESTABLISHED
+tcp6       0      0  2409:40f4:311a:5.52414 2620:1ec:46::48.443    ESTABLISHED
+tcp6       0      0  2409:40f4:311a:5.52412 64:ff9b::34b6:8d.443   ESTABLISHED
+tcp6       0      0  2409:40f4:311a:5.52391 64:ff9b::34b6:8d.443   ESTABLISHED
+tcp6       0      0  2409:40f4:311a:5.52388 64:ff9b::14cd:45.443   ESTABLISHED
+tcp6       0      0  2409:40f4:311a:5.52383 2620:1ec:46::68.443    ESTABLISHED
+tcp6       0      0  2409:40f4:311a:5.52382 2607:6bc0::10.443      ESTABLISHED
+tcp6       0      0  2409:40f4:311a:5.52377 64:ff9b::23be:2e.443   ESTABLISHED
+tcp6       0      0  2409:40f4:311a:5.52364 2606:4700:9c62:7.443   ESTABLISHED
+tcp6       0      0  ::1.5432               ::1.52349              ESTABLISHED
+tcp6       0      0  ::1.52349              ::1.5432               ESTABLISHED
