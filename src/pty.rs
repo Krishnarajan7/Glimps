@@ -6,8 +6,9 @@
 //!   2. PTY master -> Formatter -> stdout   (the shell's output, reformatted)
 //!   3. SIGWINCH -> resize the PTY   (keep the inner shell's size in sync)
 //!
-//! In this Phase 0 spike, job #2's Formatter is a transparent pass-through,
-//! so the session should feel identical to a normal terminal.
+//! Job #2 still defaults to pass-through unless the formatter confidently claims
+//! an output run, so the session should feel identical to a normal terminal for
+//! commands GLIMPS does not understand.
 
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};

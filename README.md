@@ -135,13 +135,27 @@ earn it. These are hard rules enforced in the code:
   prompts, full-screen apps (vim/less/htop/fzf), or output that isn't going to a
   terminal (piped/redirected).
 - **The terminal is always restored** on exit — including on crash.
-- **Instant off switch.** Set `GLIMPS=0` in your environment to skip wrapping and
-  formatting, or `enabled = false` in `~/.glimpsrc` to turn it off persistently.
+- **Simple off switch.** Start a shell with `GLIMPS=0` to skip wrapping, or set
+  `enabled = false` in `~/.glimpsrc` to turn it off persistently for new
+  sessions.
 
 ```bash
-GLIMPS=0 zsh     # a raw, unwrapped shell
-export GLIMPS=0  # disable GLIMPS for this and future shells
+GLIMPS=0 zsh     # start a raw, unwrapped shell
+export GLIMPS=0  # keep future shells raw from this environment
 ```
+
+If you're already inside a GLIMPS-wrapped shell, run `exit` first, then start a
+new raw shell with `GLIMPS=0 zsh`.
+
+## Known beta limits
+
+- zsh is the only shell integration today. Bash and fish are planned, but not
+  public-beta blockers.
+- Homebrew packaging is configured, but not live until the tap/release flow is
+  verified from a real version tag.
+- The current formatter handles whole JSON/HTML/diff documents and streaming
+  log/HTTP/stack-trace lines. Mixed-content output, such as JSON embedded inside
+  log lines, is planned later.
 
 ## Uninstall
 
@@ -167,7 +181,9 @@ ends, and reformats only that — never your prompt or input. Full rationale in
 |---|---|
 | [`GLIMPS-PLAN.md`](./GLIMPS-PLAN.md) | R&D findings, feasibility, tech-stack rationale |
 | [`ROADMAP.md`](./ROADMAP.md) | Versioned plan (v0.1 → v2.0) |
-| [`CLAUDE.md`](./CLAUDE.md) | Engineering charter & safety invariants |
+| [`docs/LAUNCH_HARDENING_CHECKLIST.md`](./docs/LAUNCH_HARDENING_CHECKLIST.md) | Public-beta hardening checklist |
+| [`docs/FRESH_MAC_DOGFOOD.md`](./docs/FRESH_MAC_DOGFOOD.md) | Fresh-machine dogfood procedure |
+| [`docs/SAFETY_INVARIANTS.md`](./docs/SAFETY_INVARIANTS.md) | Public safety invariants |
 | `src/pty.rs` | The PTY supervisor |
 | `src/format/` | All output transforms (the one formatting seam) |
 

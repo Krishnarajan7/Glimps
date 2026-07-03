@@ -105,6 +105,7 @@ Exit criteria: a stranger installs it in <30s and it "just works."
 
 ## Notes
 - Anything that can't be turned off, or that risks corrupting output, does not ship — see
-  the invariants in `CLAUDE.md`.
+  the invariants in `docs/SAFETY_INVARIANTS.md`.
+- Public-beta hardening work is tracked in `docs/LAUNCH_HARDENING_CHECKLIST.md`.
 - Cut without guilt if v1 slips: mixed-content segmentation and URL hyperlinking are the
   first things to defer. JSON + logs + HTTP + the separator is the 80% that matters.

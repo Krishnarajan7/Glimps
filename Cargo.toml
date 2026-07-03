@@ -18,7 +18,8 @@ path = "src/main.rs"
 # PTY supervision — the core of the whole tool. Lets us run the user's shell
 # inside a pseudo-terminal so we can see (and reformat) all output, while
 # interactive programs (vim/ssh/htop) still think they have a real terminal.
-portable-pty = "0.8"
+# 0.9+ removes the unmaintained `serial` transitive dependency flagged by RustSec.
+portable-pty = "0.9"
 
 # Raw mode + terminal size on the controlling terminal.
 crossterm = "0.28"
@@ -32,8 +33,9 @@ signal-hook = "0.3"
 # and hang. (libc is already in the tree via portable-pty.)
 libc = "0.2"
 
-# Ergonomic error handling for the spike.
-anyhow = "1"
+# Ergonomic error handling at the app edge. Keep the lower bound at the
+# RustSec-patched release for RUSTSEC-2026-0190.
+anyhow = "1.0.103"
 
 # JSON parsing for the first formatter (detect-by-parse + pretty-print), exactly
 # as called for in GLIMPS-PLAN §4. `preserve_order` keeps object keys in their
