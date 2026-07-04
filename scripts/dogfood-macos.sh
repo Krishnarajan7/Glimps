@@ -79,6 +79,36 @@ Try these commands:
   echo '{"alpha":1,"items":[2,3]}'
   printf 'INFO boot\nWARN disk\nERROR boom\n'
   printf 'HTTP/1.1 404 Not Found\n'
+  printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: sid=1\r\n\r\n{"ok":true}\n'
+  printf 'Traceback (most recent call last):\n  File "app.py", line 7, in <module>\nValueError: broken config\n'
+  printf 'name,age,active\nAda,37,true\n"Lovelace, Ada",12,false\n' > /tmp/glimps-users.csv
+  cat /tmp/glimps-users.csv
+  printf 'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\nSELECT * FROM users WHERE id = 42;\n' > /tmp/glimps-schema.sql
+  cat /tmp/glimps-schema.sql
+  sqlite3 -header -column :memory: 'CREATE TABLE users(id INTEGER, name TEXT, active TEXT); INSERT INTO users VALUES (1,"Ada","true"); SELECT * FROM users;'
+  printf '{"level":"info","count":2}\n{"level":"error","ok":false}\n' > /tmp/glimps-events.jsonl
+  cat /tmp/glimps-events.jsonl
+  printf '// GLIMPS source sample\npub fn main() {\n    let answer = 42;\n    println!("ok");\n}\n' > /tmp/glimps-main.rs
+  cat /tmp/glimps-main.rs
+  printf '# deploy helper\ndef greet(name):\n    return f"hi {name}"\n' > /tmp/glimps-app.py
+  head -20 /tmp/glimps-app.py
+  cat README.md
+  cat Cargo.toml
+  cd docs
+  cd ..
+  ls -la
+  du -sh src tests .
+  df -h
+  ps aux | head -5
+  dig 360astra.io
+  false
+  find src -maxdepth 2 -type f
+  git status --short
+  git --no-pager log --oneline --decorate -5
+  git branch -a
+  git --no-pager diff --stat
+  git --no-pager diff --numstat
+  git --no-pager diff --name-status
   git --no-pager diff -- README.md
   man printf
   vim README.md

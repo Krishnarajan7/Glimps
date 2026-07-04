@@ -8,6 +8,7 @@ use anyhow::Result;
 use glimps::config::Config;
 use glimps::format::Clock;
 use glimps::{init, pty};
+use std::io::{IsTerminal, Write};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -58,6 +59,7 @@ fn main() -> Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
 
     let status = pty::run_shell(&shell, clock, config)?;
+    print_farewell(status);
 
     // Exit via `_exit`, not `std::process::exit`: the latter runs libc atexit /
     // teardown, which can race the detached stdin/stdout I/O threads as they wind
@@ -66,6 +68,18 @@ fn main() -> Result<()> {
     // and all output is flushed, so an immediate exit is safe.
     // SAFETY: `_exit` simply terminates the process; it touches no Rust state.
     unsafe { libc::_exit(status) }
+}
+
+fn print_farewell(status: i32) {
+    if status != 0 || !std::io::stderr().is_terminal() {
+        return;
+    }
+    let mut stderr = std::io::stderr();
+    let _ = writeln!(
+        stderr,
+        "glimps: okay, leaving. Try not to miss the readable stuff."
+    );
+    let _ = stderr.flush();
 }
 
 fn print_help() {
@@ -81,7 +95,7 @@ fn print_help() {
          ENVIRONMENT:\n\
          \x20   GLIMPS=0            Disable all formatting (pure pass-through).\n\
          \n\
-         Enable in zsh:  echo 'eval \"$(glimps init zsh)\"' >> ~/.zshrc",
+         Enable in zsh:  echo 'command -v glimps >/dev/null 2>&1 && eval \"$(glimps init zsh)\"' >> ~/.zshrc",
         env!("CARGO_PKG_VERSION")
     );
 }

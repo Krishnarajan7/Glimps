@@ -1,0 +1,43 @@
+name: Good first formatter task
+description: Track a small, scoped formatter improvement for new contributors.
+title: "good first issue: "
+labels: ["good first issue", "formatter"]
+body:
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Keep this to one command, one file type, or one narrow behavior.
+      placeholder: "Add color for `kubectl get pods` READY/STATUS columns."
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Likely files
+      description: Point contributors at the smallest part of the codebase.
+      placeholder: |
+        - `src/format/linefmt.rs`
+        - `src/format/mod.rs`
+        - `src/format/tests.rs`
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - Recognized sample is colored.
+        - Similar prose/plain output is untouched.
+        - Plain theme remains byte-identical where expected.
+        - `cargo test --lib <filter>` passes.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety notes
+      description: Name the invariant this task must preserve.
+      placeholder: "Default to pass-through when uncertain."
+    validations:
+      required: true

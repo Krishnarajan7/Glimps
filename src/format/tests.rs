@@ -8,6 +8,8 @@ use proptest::prelude::*;
 
 const C: &[u8] = b"\x1b]133;C\x07"; // command output start
 const D: &[u8] = b"\x1b]133;D\x07"; // command output end
+const D0: &[u8] = b"\x1b]133;D;0\x07"; // command output end, success
+const D1: &[u8] = b"\x1b]133;D;1\x07"; // command output end, failure
 
 /// The header a fresh Formatter injects when NO command was captured (the dim
 /// rule fallback), for the given clock. Tests without a command marker frame
@@ -38,6 +40,14 @@ fn badge(label: &str) -> Vec<u8> {
 fn cmd_marker(cmd: &[u8]) -> Vec<u8> {
     let mut v = b"\x1b]7337;".to_vec();
     v.extend_from_slice(cmd);
+    v.push(0x07);
+    v
+}
+
+/// The post-command cwd marker GLIMPS's init emits from precmd.
+fn cwd_marker(cwd: &[u8]) -> Vec<u8> {
+    let mut v = b"\x1b]7338;".to_vec();
+    v.extend_from_slice(cwd);
     v.push(0x07);
     v
 }
@@ -134,6 +144,31 @@ fn alt_screen_does_not_leak_command_into_next_header() {
         "stale command leaked into next header"
     );
     assert!(s.contains("plain output\n"));
+}
+
+#[test]
+fn alt_screen_entry_gets_a_tui_boundary_without_touching_redraw_bytes() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"vim README.md")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"\x1b[?1049hredraw bytes"));
+
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        s.contains("vim README.md"),
+        "TUI command boundary should be visible in scrollback"
+    );
+    assert!(s.contains("TUI"), "TUI output should be badged");
+    assert!(
+        out.ends_with(b"\x1b[?1049hredraw bytes"),
+        "alt-screen bytes must pass through untouched"
+    );
 }
 
 #[test]
@@ -430,6 +465,585 @@ fn whitespace_then_binary_gets_no_separator() {
 }
 
 #[test]
+fn http_response_is_structured_with_body_formatting() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let body = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: sid=1\r\n\r\n{\"ok\":true}";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D));
+    assert_eq!(
+        out,
+        cat(&[
+            C,
+            &sep(),
+            &badge("HTTP"),
+            &crlf(
+                b"HTTP/1.1 200 OK\nContent-Type: application/json\nSet-Cookie: sid=1\n\nJSON body\n{\n  \"ok\": true\n}"
+            ),
+            D,
+        ])
+    );
+}
+
+#[test]
+fn successful_silent_cd_gets_a_moved_breadcrumb() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cd docs")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(&cwd_marker(b"/Users/apple/Projects/Glimps/docs")));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("cd docs"));
+    assert!(s.contains("CD"));
+    assert!(s.contains("moved to /Users/apple/Projects/Glimps/docs"));
+}
+
+#[test]
+fn find_output_gets_path_coloring_without_text_changes() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"find src -name '*.rs'")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"src/format/html.rs\nsrc/main.rs\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("src/format"));
+    assert!(s.contains("src"));
+    assert!(s.contains("\x1b[36mhtml.rs\x1b[0m"));
+    assert!(s.contains("\x1b[36mmain.rs\x1b[0m"));
+}
+
+#[test]
+fn command_status_footer_shows_exit_and_duration_after_output() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"echo hi")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"hi\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("echo hi"));
+    assert!(s.contains("hi\n"));
+    assert!(s.contains("done exit 0 in "));
+}
+
+#[test]
+fn silent_nonzero_command_gets_failure_summary() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"false")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("false"));
+    assert!(s.contains("failed exit 1 in "));
+    assert!(s.contains("command failed: false"));
+}
+
+#[test]
+fn cat_markdown_gets_project_doc_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat README.md")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"# GLIMPS\n- install\nUse `cargo test`.\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36m# GLIMPS\x1b[0m"));
+    assert!(s.contains("\x1b[33m- \x1b[0minstall"));
+    assert!(s.contains("Use \x1b[35m`cargo test`\x1b[0m."));
+}
+
+#[test]
+fn cat_config_gets_key_value_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat Cargo.toml")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"[package]\nname = \"glimps\"\nversion = 1\n# comment\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[35m[package]\x1b[0m"));
+    assert!(s.contains("\x1b[36mname\x1b[0m \x1b[2m=\x1b[0m\x1b[32m \"glimps\"\x1b[0m"));
+    assert!(s.contains("\x1b[36mversion\x1b[0m \x1b[2m=\x1b[0m\x1b[33m 1\x1b[0m"));
+    assert!(s.contains("\x1b[2m# comment\x1b[0m"));
+}
+
+#[test]
+fn cat_csv_gets_header_and_cell_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat users.csv")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b"name,age,active\nAda,37,true\n\"Lovelace, Ada\",12,false\n"),
+    );
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36mname\x1b[0m\x1b[2m,\x1b[0m\x1b[36mage\x1b[0m"));
+    assert!(s.contains("\x1b[32mAda\x1b[0m\x1b[2m,\x1b[0m\x1b[33m37\x1b[0m"));
+    assert!(s.contains("\x1b[35mtrue\x1b[0m"));
+    assert!(s.contains("\x1b[32m\"Lovelace, Ada\"\x1b[0m"));
+}
+
+#[test]
+fn cat_tsv_gets_tabular_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat report.tsv")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"service\tlatency_ms\tok\napi\t42\ttrue\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36mservice\x1b[0m\x1b[2m\t\x1b[0m\x1b[36mlatency_ms\x1b[0m"));
+    assert!(s.contains("\x1b[32mapi\x1b[0m\x1b[2m\t\x1b[0m\x1b[33m42\x1b[0m"));
+}
+
+#[test]
+fn cat_sql_gets_query_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat schema.sql")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"-- users table\nCREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\nselect * from users where id = 42 and name = 'Ada''s';\n",
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[2m-- users table\x1b[0m"));
+    assert!(s.contains("\x1b[35mCREATE\x1b[0m \x1b[35mTABLE\x1b[0m users"));
+    assert!(s.contains("\x1b[35mselect\x1b[0m \x1b[2m*\x1b[0m \x1b[35mfrom\x1b[0m users"));
+    assert!(s.contains("\x1b[33m42\x1b[0m"));
+    assert!(s.contains("\x1b[32m'Ada''s'\x1b[0m"));
+}
+
+#[test]
+fn psql_result_table_gets_value_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"psql -c 'select * from users'")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b" id | name | active\n----+------+--------\n  1 | Ada  | t\n(1 row)\n"),
+    );
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36m id \x1b[0m\x1b[2m|\x1b[0m\x1b[36m name \x1b[0m"));
+    assert!(s.contains("\x1b[2m----+------+--------\x1b[0m"));
+    assert!(s.contains("\x1b[33m  1 \x1b[0m\x1b[2m|\x1b[0m\x1b[32m Ada  \x1b[0m"));
+    assert!(s.contains("\x1b[2m(1 row)\x1b[0m"));
+}
+
+#[test]
+fn mysql_boxed_result_table_gets_value_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"mysql -e 'select id,name from users'")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"+----+--------+\n| id | name   |\n+----+--------+\n|  2 | Grace  |\n+----+--------+\n",
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[2m+----+--------+\x1b[0m"));
+    assert!(s.contains("\x1b[2m|\x1b[0m\x1b[36m id \x1b[0m"));
+    assert!(s.contains("\x1b[33m  2 \x1b[0m\x1b[2m|\x1b[0m\x1b[32m Grace  \x1b[0m"));
+}
+
+#[test]
+fn sqlite_pipe_result_table_gets_value_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(
+        b"sqlite3 app.db 'select id,name,ok from users'",
+    )));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"id|name|ok\n1|Ada|true\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36mid\x1b[0m\x1b[2m|\x1b[0m\x1b[36mname\x1b[0m"));
+    assert!(s.contains("\x1b[33m1\x1b[0m\x1b[2m|\x1b[0m\x1b[32mAda\x1b[0m"));
+    assert!(s.contains("\x1b[35mtrue\x1b[0m"));
+}
+
+#[test]
+fn git_short_status_gets_status_and_path_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"git status --short")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"## main...origin/main [ahead 1]\n M README.md\nA  src/new.rs\n?? scratch.txt\nD  old.rs\nR  old.rs -> new.rs\n",
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[2m## \x1b[0m\x1b[36mmain\x1b[0m"));
+    assert!(s.contains("\x1b[33m M\x1b[0m\x1b[2m \x1b[0m\x1b[36mREADME.md\x1b[0m"));
+    assert!(s.contains("\x1b[32mA \x1b[0m\x1b[2m \x1b[0m\x1b[36msrc/new.rs\x1b[0m"));
+    assert!(s.contains("\x1b[32m??\x1b[0m\x1b[2m \x1b[0m\x1b[36mscratch.txt\x1b[0m"));
+    assert!(s.contains("\x1b[31mD \x1b[0m\x1b[2m \x1b[0m\x1b[36mold.rs\x1b[0m"));
+    assert!(s.contains("\x1b[35mR \x1b[0m\x1b[2m \x1b[0m\x1b[36mold.rs\x1b[0m\x1b[2m -> \x1b[0m\x1b[36mnew.rs\x1b[0m"));
+}
+
+#[test]
+fn git_status_long_gets_branch_headings_and_paths() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"git status")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"On branch main\nChanges not staged for commit:\n  (use \"git add <file>...\" to update what will be committed)\n\tmodified:   README.md\nUntracked files:\n\tnew.txt\nnothing to commit, working tree clean\n",
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[2mOn branch \x1b[0m\x1b[36mmain\x1b[0m"));
+    assert!(s.contains("\x1b[35mChanges not staged for commit:\x1b[0m"));
+    assert!(
+        s.contains("\x1b[2m  (use \"git add <file>...\" to update what will be committed)\x1b[0m")
+    );
+    assert!(s.contains("\x1b[33mmodified:\x1b[0m\x1b[2m   \x1b[0m\x1b[36mREADME.md\x1b[0m"));
+    assert!(s.contains("\x1b[35mUntracked files:\x1b[0m"));
+    assert!(s.contains("\x1b[32mnothing to commit, working tree clean\x1b[0m"));
+}
+
+#[test]
+fn git_log_oneline_gets_hash_and_ref_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"git --no-pager log --oneline --decorate -2")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b"1a2b3c4 (HEAD -> main, origin/main) Add git polish\n5d6e7f8 Previous work\n"),
+    );
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains(
+        "\x1b[33m1a2b3c4\x1b[0m \x1b[36m(HEAD -> main, origin/main)\x1b[0m Add git polish"
+    ));
+    assert!(s.contains("\x1b[33m5d6e7f8\x1b[0m Previous work"));
+}
+
+#[test]
+fn git_branch_gets_current_branch_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"git branch -a")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"* main\n  feature/git-polish\n  remotes/origin/main\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[32m*\x1b[0m \x1b[36mmain\x1b[0m"));
+    assert!(s.contains("\x1b[36mfeature/git-polish\x1b[0m"));
+    assert!(s.contains("\x1b[2mremotes/\x1b[0m\x1b[36morigin/main\x1b[0m"));
+}
+
+#[test]
+fn git_diff_stat_gets_file_count_and_change_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"git diff --stat")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b" README.md       | 10 +++++-----\n src/main.rs    |  2 ++\n 2 files changed, 7 insertions(+), 5 deletions(-)\n",
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36m README.md       \x1b[0m\x1b[2m|\x1b[0m"));
+    assert!(s.contains("\x1b[33m10\x1b[0m"));
+    assert!(s.contains("\x1b[32m+++++\x1b[0m\x1b[31m-----\x1b[0m"));
+    assert!(s.contains("\x1b[33m2\x1b[0m files changed"));
+    assert!(s.contains("\x1b[32minsertions(+)\x1b[0m"));
+    assert!(s.contains("\x1b[31mdeletions(-)\x1b[0m"));
+}
+
+#[test]
+fn git_numstat_and_name_status_get_value_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"git diff --numstat")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"7\t5\tREADME.md\n-\t-\tassets/logo.png\n"));
+    out.extend_from_slice(&f.process(D0));
+    out.extend_from_slice(&f.process(&cmd_marker(b"git diff --name-status")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"M\tREADME.md\nR100\told.rs\tnew.rs\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[32m7\x1b[0m\x1b[2m\t\x1b[0m\x1b[31m5\x1b[0m"));
+    assert!(s.contains("\x1b[36mREADME.md\x1b[0m"));
+    assert!(s.contains("\x1b[33mM\x1b[0m\x1b[2m\t\x1b[0m\x1b[36mREADME.md\x1b[0m"));
+    assert!(s.contains("\x1b[35mR100\x1b[0m\x1b[2m\t\x1b[0m\x1b[36mold.rs\tnew.rs\x1b[0m"));
+}
+
+#[test]
+fn git_show_stat_keeps_commit_header_and_colors_stats() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"git show --stat --oneline")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"commit 1a2b3c4d5e6f7890\n README.md | 3 ++-\n 1 file changed, 2 insertions(+), 1 deletion(-)\n",
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[35mcommit\x1b[0m \x1b[33m1a2b3c4d5e6f7890\x1b[0m"));
+    assert!(s.contains("\x1b[36m README.md \x1b[0m\x1b[2m|\x1b[0m"));
+    assert!(s.contains("\x1b[33m1\x1b[0m file changed"));
+    assert!(s.contains("\x1b[31mdeletion(-)\x1b[0m"));
+}
+
+#[test]
+fn cat_jsonl_gets_streaming_json_line_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat events.jsonl")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        br#"{"level":"info","count":2}
+{"level":"error","ok":false}
+"#,
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        !s.contains("JSON\r\n"),
+        "JSONL should not get a buffered JSON badge"
+    );
+    assert!(s.contains("\x1b[36m\"level\"\x1b[0m"));
+    assert!(s.contains("\x1b[32m\"info\"\x1b[0m"));
+    assert!(s.contains("\x1b[33m2\x1b[0m"));
+    assert!(s.contains("\x1b[35mfalse\x1b[0m"));
+}
+
+#[test]
+fn cat_rust_source_gets_syntax_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat src/main.rs")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"// boot path\npub fn main() {\n    let answer = 42;\n    println!(\"ok\");\n}\n",
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[2m// boot path\x1b[0m"));
+    assert!(s.contains("\x1b[35mpub\x1b[0m \x1b[35mfn\x1b[0m \x1b[36mmain\x1b[0m"));
+    assert!(s.contains("\x1b[35mlet\x1b[0m answer \x1b[2m=\x1b[0m \x1b[33m42\x1b[0m"));
+    assert!(s.contains("\x1b[32m\"ok\"\x1b[0m"));
+}
+
+#[test]
+fn head_python_source_gets_syntax_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"head -20 app.py")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b"# deploy helper\ndef greet(name):\n    return f\"hi {name}\"\n"),
+    );
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[2m# deploy helper\x1b[0m"));
+    assert!(s.contains("\x1b[35mdef\x1b[0m \x1b[36mgreet\x1b[0m"));
+    assert!(s.contains("\x1b[35mreturn\x1b[0m f\x1b[32m\"hi {name}\"\x1b[0m"));
+}
+
+#[test]
+fn generic_json_lines_stream_instead_of_buffering_whole_output() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"printf json lines")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        br#"{"a":1}
+{"b":2}
+"#,
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        !s.contains("JSON\r\n"),
+        "JSON-lines must not be buffered as one document"
+    );
+    assert!(s.contains("\x1b[36m\"a\"\x1b[0m"));
+    assert!(s.contains("\x1b[33m1\x1b[0m"));
+    assert!(s.contains("\x1b[36m\"b\"\x1b[0m"));
+}
+
+#[test]
+fn ls_output_gets_command_aware_columns() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"ls -la")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"drwxr-xr-x   8 krishv  staff   256 Jun 28 09:10 src\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[2mdrwxr-xr-x\x1b[0m"));
+    assert!(s.contains("\x1b[33m256\x1b[0m"));
+    assert!(s.contains("\x1b[36msrc\x1b[0m"));
+}
+
+#[test]
+fn du_and_df_outputs_highlight_sizes_and_capacity() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"du -sh src")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b" 12K\t./src\n"));
+    out.extend_from_slice(&f.process(D));
+    out.extend_from_slice(&f.process(&cmd_marker(b"df -h")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"devfs 203Ki 203Ki 0Bi 100% /dev\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[33m12K\x1b[0m"));
+    assert!(s.contains("\x1b[36m./src\x1b[0m"));
+    assert!(s.contains("\x1b[33m203Ki\x1b[0m"));
+    assert!(s.contains("\x1b[33m100%\x1b[0m"));
+}
+
+#[test]
+fn ps_output_highlights_process_columns() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"ps aux")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b"krishv   42311   0.4  0.3 412899200  54128 s001  S    9:10AM   0:01.23 zsh\n"),
+    );
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36mkrishv\x1b[0m"));
+    assert!(s.contains("\x1b[33m42311\x1b[0m"));
+    assert!(s.contains("\x1b[33m0.4\x1b[0m"));
+    assert!(s.contains("\x1b[32mzsh\x1b[0m"));
+}
+
+#[test]
+fn dig_output_highlights_dns_sections_and_records() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"dig 360astra.io")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b";; ANSWER SECTION:\n360astra.io. 1767 IN A 82.180.142.20\n"),
+    );
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[35m;; ANSWER SECTION:\x1b[0m"));
+    assert!(s.contains("\x1b[36m360astra.io.\x1b[0m"));
+    assert!(s.contains("\x1b[35mA\x1b[0m"));
+    assert!(s.contains("\x1b[32m82.180.142.20\x1b[0m"));
+}
+
+#[test]
+fn man_overstrike_output_is_cleaned_and_highlighted() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"man glimps")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"N\x08NA\x08AM\x08ME\x08E\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36mNAME\x1b[0m\n"));
+    assert!(!s.contains('\u{8}'));
+}
+
+#[test]
 fn binary_control_bytes_without_nul_pass_through_unframed() {
     // Binary that contains NO NUL but other C0 control bytes (an image/gzip
     // dump, a compiled binary) is still binary: no separator, no formatting,
@@ -591,7 +1205,8 @@ fn non_tty_supervisor_output_disables_formatting() {
 #[test]
 fn alt_screen_app_is_passed_through_untouched() {
     // A full-screen app (vim): enter alt screen, draw content that even looks
-    // like JSON, exit. No separator, no badge, no formatting — pure verbatim.
+    // like JSON, exit. GLIMPS may leave a boundary breadcrumb before the
+    // alt-screen switch, but the app's redraw stream itself is pure verbatim.
     let mut f = Formatter::new();
     if !f.is_enabled() {
         return;
@@ -604,7 +1219,10 @@ fn alt_screen_app_is_passed_through_untouched() {
     for p in parts {
         out.extend_from_slice(&f.process(p));
     }
-    assert_eq!(out, parts.concat());
+    assert_eq!(
+        out,
+        cat(&[C, &sep(), &badge("TUI"), alt_on, br#"{"a":1}"#, alt_off, D])
+    );
 }
 
 #[test]

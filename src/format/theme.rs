@@ -17,7 +17,11 @@ pub struct Theme {
     pub number: &'static str,
     pub keyword: &'static str,
     // HTML
-    pub tag: &'static str,
+    pub html_delim: &'static str,
+    pub html_name: &'static str,
+    pub html_attr: &'static str,
+    pub html_value: &'static str,
+    pub html_raw: &'static str,
     pub comment: &'static str,
     // Log severity / HTTP status classes
     pub error: &'static str,
@@ -37,7 +41,11 @@ impl Theme {
             string: "",
             number: "",
             keyword: "",
-            tag: "",
+            html_delim: "",
+            html_name: "",
+            html_attr: "",
+            html_value: "",
+            html_raw: "",
             comment: "",
             error: "",
             warn: "",
@@ -49,19 +57,24 @@ impl Theme {
 
     /// The default colored theme. Conservative, readable on both light and dark
     /// backgrounds: cyan keys, green strings, yellow numbers, magenta keywords;
-    /// blue HTML tags, dim comments.
+    /// HTML gets a richer semantic palette (dim brackets, cyan element names,
+    /// yellow attributes, green values/raw text), with dim comments.
     pub const fn default_colored() -> Self {
         Theme {
-            key: "\x1b[36m",     // cyan
-            string: "\x1b[32m",  // green
-            number: "\x1b[33m",  // yellow
-            keyword: "\x1b[35m", // magenta
-            tag: "\x1b[34m",     // blue
-            comment: "\x1b[2m",  // dim
-            error: "\x1b[31m",   // red    (ERROR / 5xx)
-            warn: "\x1b[33m",    // yellow (WARN / 4xx)
-            info: "\x1b[32m",    // green  (INFO / 2xx)
-            debug: "\x1b[2m",    // dim    (DEBUG/TRACE / 3xx)
+            key: "\x1b[36m",        // cyan
+            string: "\x1b[32m",     // green
+            number: "\x1b[33m",     // yellow
+            keyword: "\x1b[35m",    // magenta
+            html_delim: "\x1b[2m",  // dim brackets / punctuation
+            html_name: "\x1b[36m",  // cyan element names
+            html_attr: "\x1b[33m",  // yellow attributes
+            html_value: "\x1b[32m", // green quoted values
+            html_raw: "\x1b[32m",   // green CSS/JS/title raw text
+            comment: "\x1b[2m",     // dim
+            error: "\x1b[31m",      // red    (ERROR / 5xx)
+            warn: "\x1b[33m",       // yellow (WARN / 4xx)
+            info: "\x1b[32m",       // green  (INFO / 2xx)
+            debug: "\x1b[2m",       // dim    (DEBUG/TRACE / 3xx)
             reset: "\x1b[0m",
         }
     }

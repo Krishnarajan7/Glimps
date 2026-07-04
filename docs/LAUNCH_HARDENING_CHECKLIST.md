@@ -8,6 +8,8 @@ Legend: todo / in progress / done
 
 ## 0. Current State
 
+- done: Competitive product gap analysis added in
+  `docs/COMPETITIVE_PRODUCT_GAP_ANALYSIS.md`.
 - done: Core PTY supervisor wraps an interactive shell.
 - done: OSC-133 zoning keeps prompt/input separate from command output.
 - done: Command headers, badges, JSON, HTML, logs, HTTP status, diffs, and stack
@@ -48,7 +50,7 @@ Legend: todo / in progress / done
   - zsh-autosuggestions
   - zsh-syntax-highlighting
 - todo: Verify commands that should be bypassed or pass through cleanly:
-  - `vim`, `nvim`, `less`, `man`, `ssh`, `tmux`, `fzf`, `top`, `htop`
+  - `vim`, `nvim`, `less`, `ssh`, `tmux`, `fzf`, `top`, `htop`
 - todo: Verify lifecycle behavior repeatedly:
   - `exit`
   - Ctrl-D
@@ -82,13 +84,57 @@ Legend: todo / in progress / done
 
 ## 5. Product Polish
 
+- in progress: Close the P0 product gaps from
+  `docs/COMPETITIVE_PRODUCT_GAP_ANALYSIS.md`.
+- done: Add semantic HTML colors for delimiters, element names, attributes,
+  quoted values, and raw CSS/JS/title text.
 - todo: Generate and commit the demo GIF from `demo/glimps.tape`.
 - done: Add a short "known beta limits" section to the README.
-- todo: Add examples for JSON, HTML, logs, HTTP, diff, and stack traces.
-- todo: Make README claims match shipped install reality.
-- todo: Keep zsh-only support explicit until bash/fish integration lands.
+- done: Add examples for JSON, HTML, logs, HTTP, diff, and stack traces.
+- done: Add a curl/HTTP response formatter that separates status line, headers,
+  cookies, redirects, and JSON/HTML body formatting.
+- done: Improve TUI UX with a safe entry breadcrumb, without coloring inside
+  full-screen apps.
+- todo: Add explicit TUI exit breadcrumbs when they can be emitted without
+  racing the returning prompt.
+- done: Add a small clean-exit farewell message after interactive sessions.
+- done: Add successful `cd` breadcrumbs using the shell-reported post-command
+  working directory.
+- done: Add command-aware `find` path coloring for easier scanning.
+- done: Add more command-aware formatters for high-signal commands such as
+  `ls`, `du`, `df`, `ps`, and `dig`, while keeping pass-through as the default.
+- done: Add man/help rendering that works with pager behavior instead of
+  dumping unreadable plain output.
+- done: Add command duration and exit-code display when the shell reports an
+  exit code.
+- done: Add failure summary for non-zero command exits.
+- done: Add command-aware Markdown rendering for `cat README.md` / docs output.
+- done: Add command-aware YAML/TOML/INI/dotenv config formatting for reader
+  commands.
+- done: Add command-aware CSV/TSV table coloring for reader commands.
+- done: Add command-aware SQL query coloring for reader commands.
+- done: Add JSON-lines support for streaming logs and API output.
+- done: Add source-code syntax coloring for common extensions in reader
+  commands.
+- done: Add SQL result/table coloring for common database CLI output.
+- done: Add Git status, branch, and log coloring for common developer workflows.
+- done: Add Git diff stat, numstat, and name-status coloring.
+- done: Make README claims match shipped install reality.
+- done: Keep zsh-only support explicit until bash/fish integration lands.
 
-## 6. Later, Not Public-Beta Blocking
+## 6. Contributor Growth
+
+- done: Add `CONTRIBUTING.md` with architecture map and formatter rules.
+- done: Add GitHub issue templates for bugs, formatter requests, good-first
+  formatter tasks, and docs/release work.
+- done: Add a pull request template with safety and verification prompts.
+- todo: Add labels for `good first issue`, `formatter`, `command-aware`,
+  `safety`, `docs`, and `release`.
+- todo: Create at least 10 scoped beginner issues from the competitive gap
+  analysis.
+- done: Add a formatter design guide for contributors.
+
+## 7. Later, Not Public-Beta Blocking
 
 - todo: bash support.
 - todo: fish support.

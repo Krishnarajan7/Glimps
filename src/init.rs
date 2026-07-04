@@ -46,7 +46,10 @@ if [[ "$GLIMPS" != "0" ]]; then
     autoload -Uz add-zsh-hook
     __glimps_precmd() {
       local __glimps_exit=$?
-      print -nr -- $'\e]133;D;'"${__glimps_exit}"$'\a\e]133;A\a'
+      # Private OSC 7338 carries the post-command working directory. GLIMPS uses
+      # it for command-specific UX like successful `cd` breadcrumbs; terminals
+      # ignore unknown OSCs.
+      print -nr -- $'\e]7338;'"$PWD"$'\a\e]133;D;'"${__glimps_exit}"$'\a\e]133;A\a'
     }
     __glimps_preexec() {
       # Send GLIMPS the command being run (private OSC 7337) so it can show a
@@ -88,6 +91,7 @@ mod tests {
             ZSH_INIT.contains(r"\e]7337;"),
             "missing command-capture marker"
         );
+        assert!(ZSH_INIT.contains(r"\e]7338;"), "missing cwd marker");
         assert!(
             ZSH_INIT.contains(r"\e]133;D;"),
             "missing D (output end + exit)"

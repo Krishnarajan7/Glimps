@@ -1,24 +1,36 @@
 # Rust build output
-/target
+/target/
 
-# rustfmt backups
-**/*.rs.bk
+# Criterion and coverage/profiling artifacts
+/criterion/
+*.profraw
+*.profdata
+lcov.info
+coverage/
 
-# macOS
+# Local environment and editor state
+.env
+.env.*
+!.env.example
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
 
-# Scratch / local notes (keep the repo clean)
-/scratch
-*.local
+# Local tool caches and logs
+.cache/
+.tmp/
+tmp/
+*.log
 
-# External / non-source artifacts (product docs, exports — not part of the codebase)
+# Local assistant/editor scratch files
+/.claude/
+/CLAUDE.md
+
+# Local binary/product scratch docs
 *.docx
-*.doc
-*.pdf
-*.pages
 
-# Local tooling / assistant config (keep out of the shared repo)
-.claude/
-CLAUDE.md
-
-# NOTE: Cargo.lock IS committed — GLIMPS ships as a binary, so we pin exact deps.
+# Generated demo media; keep source tapes/docs tracked
+/demo/*.gif
+/demo/*.mp4

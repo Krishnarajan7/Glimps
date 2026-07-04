@@ -241,13 +241,12 @@ fn render(tokens: &[Token], bytes: &[u8], theme: &Theme, out: &mut String) {
                 }
             }
             Token::Comment(a, b) | Token::Decl(a, b) => {
-                line(
-                    out,
-                    stack.len(),
-                    theme.comment,
-                    &slice(bytes, *a, *b),
-                    theme.reset,
-                );
+                let text = slice(bytes, *a, *b);
+                if matches!(tok, Token::Decl(_, _)) {
+                    html_markup_line(out, stack.len(), &text, theme);
+                } else {
+                    line(out, stack.len(), theme.comment, &text, theme.reset);
+                }
             }
             Token::Open {
                 start,
@@ -255,13 +254,7 @@ fn render(tokens: &[Token], bytes: &[u8], theme: &Theme, out: &mut String) {
                 name,
                 self_close,
             } => {
-                line(
-                    out,
-                    stack.len(),
-                    theme.tag,
-                    &slice(bytes, *start, *end),
-                    theme.reset,
-                );
+                html_markup_line(out, stack.len(), &slice(bytes, *start, *end), theme);
                 if !self_close && !VOID_ELEMENTS.contains(&name.as_str()) {
                     stack.push(name);
                 }
@@ -272,23 +265,11 @@ fn render(tokens: &[Token], bytes: &[u8], theme: &Theme, out: &mut String) {
                 if let Some(pos) = stack.iter().rposition(|n| *n == name.as_str()) {
                     stack.truncate(pos);
                 }
-                line(
-                    out,
-                    stack.len(),
-                    theme.tag,
-                    &slice(bytes, *start, *end),
-                    theme.reset,
-                );
+                html_markup_line(out, stack.len(), &slice(bytes, *start, *end), theme);
             }
             Token::Raw { open, inner, close } => {
                 let depth = stack.len();
-                line(
-                    out,
-                    depth,
-                    theme.tag,
-                    &slice(bytes, open.0, open.1),
-                    theme.reset,
-                );
+                html_markup_line(out, depth, &slice(bytes, open.0, open.1), theme);
                 let inner_str = slice(bytes, inner.0, inner.1);
                 if inner_str.contains('\n') {
                     // Multi-line (pre/script/style): preserve exactly.
@@ -299,19 +280,23 @@ fn render(tokens: &[Token], bytes: &[u8], theme: &Theme, out: &mut String) {
                 } else {
                     let t = inner_str.trim();
                     if !t.is_empty() {
-                        line(out, depth + 1, "", t, "");
+                        line(out, depth + 1, theme.html_raw, t, theme.reset);
                     }
                 }
-                line(
-                    out,
-                    depth,
-                    theme.tag,
-                    &slice(bytes, close.0, close.1),
-                    theme.reset,
-                );
+                html_markup_line(out, depth, &slice(bytes, close.0, close.1), theme);
             }
         }
     }
+}
+
+/// Emit one indented HTML markup line with semantic token coloring. The plain
+/// theme keeps this byte-identical to `text`, preserving golden-file stability.
+fn html_markup_line(out: &mut String, depth: usize, text: &str, theme: &Theme) {
+    for _ in 0..depth {
+        out.push_str("  ");
+    }
+    colorize_markup(out, text, theme);
+    out.push('\n');
 }
 
 /// Emit one indented, optionally colored line.
@@ -323,6 +308,123 @@ fn line(out: &mut String, depth: usize, color: &str, text: &str, reset: &str) {
     out.push_str(text);
     out.push_str(reset);
     out.push('\n');
+}
+
+fn colorize_markup(out: &mut String, text: &str, theme: &Theme) {
+    if theme.reset.is_empty() {
+        out.push_str(text);
+        return;
+    }
+    if text.starts_with("<!--") {
+        paint(out, theme.comment, theme.reset, text);
+        return;
+    }
+    if text.starts_with("<!") || text.starts_with("<?") {
+        colorize_decl(out, text, theme);
+        return;
+    }
+    colorize_tag(out, text, theme);
+}
+
+fn colorize_decl(out: &mut String, text: &str, theme: &Theme) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' | b'>' | b'?' | b'!' | b'/' => {
+                let end = i + 1;
+                paint(out, theme.html_delim, theme.reset, &text[i..end]);
+                i = end;
+            }
+            b if b.is_ascii_whitespace() => {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            _ => {
+                let start = i;
+                while i < bytes.len()
+                    && !bytes[i].is_ascii_whitespace()
+                    && !matches!(bytes[i], b'<' | b'>' | b'?' | b'!' | b'/')
+                {
+                    i += 1;
+                }
+                paint(out, theme.keyword, theme.reset, &text[start..i]);
+            }
+        }
+    }
+}
+
+fn colorize_tag(out: &mut String, text: &str, theme: &Theme) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' | b'>' | b'/' => {
+                let end = i + 1;
+                paint(out, theme.html_delim, theme.reset, &text[i..end]);
+                i = end;
+            }
+            b if b.is_ascii_whitespace() => {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            _ => {
+                let start = i;
+                while i < bytes.len()
+                    && !bytes[i].is_ascii_whitespace()
+                    && !matches!(bytes[i], b'=' | b'/' | b'>')
+                {
+                    i += 1;
+                }
+                let color = if is_element_name(bytes, start) {
+                    theme.html_name
+                } else {
+                    theme.html_attr
+                };
+                paint(out, color, theme.reset, &text[start..i]);
+            }
+        }
+
+        if i < bytes.len() && bytes[i] == b'=' {
+            paint(out, theme.html_delim, theme.reset, "=");
+            i += 1;
+            if i < bytes.len() && matches!(bytes[i], b'"' | b'\'') {
+                let quote = bytes[i];
+                let start = i;
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+                paint(out, theme.html_value, theme.reset, &text[start..i]);
+            } else {
+                let start = i;
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
+                    i += 1;
+                }
+                paint(out, theme.html_value, theme.reset, &text[start..i]);
+            }
+        }
+    }
+}
+
+fn is_element_name(bytes: &[u8], start: usize) -> bool {
+    if start == 0 || bytes[start.saturating_sub(1)].is_ascii_whitespace() {
+        return false;
+    }
+    let mut j = start;
+    while j > 0 && bytes[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    j > 0 && bytes[j - 1] == b'<' || j > 1 && bytes[j - 2] == b'<' && bytes[j - 1] == b'/'
+}
+
+fn paint(out: &mut String, color: &str, reset: &str, text: &str) {
+    out.push_str(color);
+    out.push_str(text);
+    out.push_str(reset);
 }
 
 fn slice(bytes: &[u8], a: usize, b: usize) -> String {
@@ -488,11 +590,13 @@ mod tests {
     }
 
     #[test]
-    fn colored_output_wraps_tags_and_is_valid_utf8() {
-        let out = try_format(b"<p>hi</p>", &Theme::default_colored()).unwrap();
+    fn colored_output_uses_semantic_html_colors_and_is_valid_utf8() {
+        let out = try_format(br#"<p class="lead">hi</p>"#, &Theme::default_colored()).unwrap();
         let s = std::str::from_utf8(&out).unwrap();
-        assert!(s.contains("\x1b[34m")); // tag color
-        assert!(s.contains("\x1b[0m"));
+        assert!(s.contains("\x1b[2m<\x1b[0m")); // delimiter
+        assert!(s.contains("\x1b[36mp\x1b[0m")); // element name
+        assert!(s.contains("\x1b[33mclass\x1b[0m")); // attribute
+        assert!(s.contains("\x1b[32m\"lead\"\x1b[0m")); // value
     }
 
     #[test]

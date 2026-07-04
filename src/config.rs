@@ -96,8 +96,8 @@ impl Default for Config {
 /// covers ones that don't use it (notably `ssh`).
 fn default_bypass() -> Vec<String> {
     [
-        "vim", "nvim", "vi", "nano", "emacs", "less", "more", "man", "htop", "top", "btop", "fzf",
-        "tmux", "screen", "ssh", "watch", "ncdu", "lazygit", "tig", "ranger",
+        "vim", "nvim", "vi", "nano", "emacs", "less", "more", "htop", "top", "btop", "fzf", "tmux",
+        "screen", "ssh", "watch", "ncdu", "lazygit", "tig", "ranger",
     ]
     .iter()
     .map(|s| s.to_string())

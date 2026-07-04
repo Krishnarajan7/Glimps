@@ -33,6 +33,7 @@
 mod cmdline;
 mod diff;
 mod html;
+mod http;
 mod json;
 mod linefmt;
 mod osc133;
@@ -40,6 +41,7 @@ mod theme;
 
 use std::borrow::Cow;
 use std::io::IsTerminal;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use osc133::{Osc133Scanner, Seg};
@@ -125,6 +127,9 @@ trait StreamingFormatter {
 /// before looser). This single list is the whole buffered-dispatch registry.
 fn enabled_buffered(fmts: &crate::config::Formatters) -> Vec<&'static dyn BufferedFormatter> {
     let mut v: Vec<&'static dyn BufferedFormatter> = Vec::new();
+    if fmts.http {
+        v.push(&http::HttpResponse);
+    }
     if fmts.json {
         v.push(&json::Json);
     }
@@ -176,6 +181,15 @@ pub struct Formatter {
     /// The command for the current output zone (captured at output start), shown
     /// in the header. `None` falls the header back to a plain divider.
     pending_command: Option<Vec<u8>>,
+    /// Monotonic start time for the running command, captured at output start.
+    command_started_at: Option<Instant>,
+    /// Whether this command produced a visible GLIMPS boundary/output. Used to
+    /// avoid noisy success footers for silent commands, while still surfacing
+    /// failures like `false`.
+    command_had_visible_output: bool,
+    /// Complete output lines seen for this command. Used by command-aware
+    /// project-file formatters that treat the first row as a header.
+    command_output_line_count: usize,
     /// Whether the previous chunk left a full-screen TUI on the alternate screen.
     /// Tracked so the chunk that *exits* alt-screen is also passed through.
     was_alt_screen: bool,
@@ -220,6 +234,9 @@ impl Formatter {
             config,
             pending_separator: false,
             pending_command: None,
+            command_started_at: None,
+            command_had_visible_output: false,
+            command_output_line_count: 0,
             was_alt_screen: false,
             buffered,
             streaming,
@@ -252,17 +269,25 @@ impl Formatter {
         // interactive programs, whose lifetimes span many reads.
         let alt = self.scanner.in_alt_screen();
         if alt || self.was_alt_screen {
+            let was_alt = self.was_alt_screen;
+            let entering_alt = alt && !was_alt;
+            let show_tui_badge = entering_alt && self.pending_separator && self.config.separator;
             self.was_alt_screen = alt;
             if matches!(self.collect, Collect::Idle) && !self.pending_separator {
                 return Cow::Borrowed(chunk);
             }
             // Flush any withheld bytes (a TUI shouldn't begin mid-buffer, but we
-            // never drop user bytes), then stream the chunk. Dropping an owed
-            // header here is intentional — including the common case where output
-            // just started with no text yet: a TUI gets no header. Also clear the
-            // captured command so it can't leak into the next command's header.
-            let mut out = Vec::with_capacity(chunk.len());
+            // never drop user bytes), emit the owed command boundary before the
+            // alt-screen switch, then stream the chunk. That leaves a useful TUI
+            // breadcrumb in scrollback without touching the full-screen redraw
+            // stream itself. Also clear the captured command so it can't leak
+            // into the next command's header.
+            let mut out = Vec::with_capacity(chunk.len() + 64);
             self.finalize(&mut out);
+            self.emit_header(&mut out);
+            if show_tui_badge {
+                out.extend_from_slice(&render_badge("TUI", self.config.color));
+            }
             self.pending_separator = false;
             self.pending_command = None;
             out.extend_from_slice(chunk);
@@ -307,6 +332,9 @@ impl Formatter {
                 Seg::OutputStart => {
                     self.pending_separator = true;
                     self.pending_command = self.scanner.take_command();
+                    self.command_started_at = Some(Instant::now());
+                    self.command_had_visible_output = false;
+                    self.command_output_line_count = 0;
                     let bypass = self
                         .pending_command
                         .as_deref()
@@ -319,8 +347,13 @@ impl Formatter {
                 // The output ended: flush, and drop an unfulfilled header/command.
                 Seg::OutputEnd => {
                     self.finalize(&mut out);
+                    self.emit_cd_breadcrumb(&mut out);
+                    self.emit_command_status(&mut out);
                     self.pending_separator = false;
                     self.pending_command = None;
+                    self.command_started_at = None;
+                    self.command_had_visible_output = false;
+                    self.command_output_line_count = 0;
                 }
             }
         }
@@ -384,8 +417,10 @@ impl Formatter {
                 // Does any enabled buffered formatter want to claim this run by its
                 // leading bytes? Confirmation happens later in `recognize`; an
                 // unconfirmed candidate is emitted verbatim, so eagerness is safe.
-                let buffer_candidate = self.buffered.iter().any(|f| f.could_start(&seg[pos..]));
                 acc.extend_from_slice(seg);
+                let buffer_candidate = !self.pending_command_prefers_text_lines()
+                    && !starts_with_complete_json_line(&acc)
+                    && self.buffered.iter().any(|f| f.could_start(&seg[pos..]));
                 self.emit_header(out);
                 if buffer_candidate && acc.len() <= self.config.limits.buffer_cap {
                     Collect::Buffer(acc) // a formatting candidate; hold it
@@ -418,10 +453,97 @@ impl Formatter {
     fn emit_header(&mut self, out: &mut Vec<u8>) {
         if self.pending_separator {
             self.pending_separator = false;
+            self.command_had_visible_output = true;
             if self.config.separator {
                 let header = self.render_header();
                 out.extend_from_slice(&header);
             }
+        }
+    }
+
+    /// `cd` usually succeeds silently, which means the normal lazy separator
+    /// would not show anything. When zsh reports the post-command cwd, leave a
+    /// small breadcrumb so directory changes are visible in scrollback.
+    fn emit_cd_breadcrumb(&mut self, out: &mut Vec<u8>) {
+        if !self.pending_separator || !is_command(&self.pending_command, b"cd") {
+            return;
+        }
+        let Some(cwd) = self.scanner.take_cwd() else {
+            return;
+        };
+        self.emit_header(out);
+        out.extend_from_slice(&render_badge("CD", self.config.color));
+        let color = if self.config.color {
+            self.theme.info
+        } else {
+            ""
+        };
+        let reset = if self.config.color {
+            self.theme.reset
+        } else {
+            ""
+        };
+        let mut line = Vec::new();
+        line.extend_from_slice(color.as_bytes());
+        line.extend_from_slice(b"moved to ");
+        line.extend_from_slice(&cwd);
+        line.extend_from_slice(reset.as_bytes());
+        line.push(b'\n');
+        push_crlf(out, &line);
+    }
+
+    fn emit_command_status(&mut self, out: &mut Vec<u8>) {
+        let exit_code = self.scanner.take_exit_code();
+        let elapsed = self.command_started_at.map(|started| started.elapsed());
+        let Some(exit_code) = exit_code else {
+            return;
+        };
+        let Some(cmd) = self.pending_command.clone() else {
+            return;
+        };
+        let failed = exit_code != 0;
+        if !failed && !self.command_had_visible_output {
+            return;
+        }
+
+        self.emit_header(out);
+        let mut line = Vec::new();
+        let color = if failed {
+            self.theme.error
+        } else if self.config.color {
+            self.theme.debug
+        } else {
+            ""
+        };
+        let reset = if self.config.color {
+            self.theme.reset
+        } else {
+            ""
+        };
+        line.extend_from_slice(color.as_bytes());
+        if failed {
+            line.extend_from_slice(b"failed");
+        } else {
+            line.extend_from_slice(b"done");
+        }
+        line.extend_from_slice(b" exit ");
+        line.extend_from_slice(exit_code.to_string().as_bytes());
+        if let Some(duration) = elapsed {
+            line.extend_from_slice(b" in ");
+            line.extend_from_slice(format_duration(duration).as_bytes());
+        }
+        line.extend_from_slice(reset.as_bytes());
+        line.push(b'\n');
+        push_crlf(out, &line);
+
+        if failed {
+            let mut summary = Vec::new();
+            summary.extend_from_slice(self.theme.error.as_bytes());
+            summary.extend_from_slice(b"command failed: ");
+            summary.extend_from_slice(&cmd);
+            summary.extend_from_slice(reset.as_bytes());
+            summary.push(b'\n');
+            push_crlf(out, &summary);
         }
     }
 
@@ -434,7 +556,7 @@ impl Formatter {
         for (i, &b) in seg.iter().enumerate() {
             if b == b'\n' {
                 line.extend_from_slice(&seg[start..=i]);
-                emit_line(out, &line, &self.theme, &self.streaming);
+                self.emit_stream_line(out, &line);
                 line.clear();
                 start = i + 1;
             }
@@ -446,6 +568,69 @@ impl Formatter {
         } else {
             Collect::Stream(line)
         }
+    }
+
+    fn emit_stream_line(&mut self, out: &mut Vec<u8>, line: &[u8]) {
+        if let Some(formatted) = self.format_command_line(line) {
+            out.extend_from_slice(&formatted);
+            self.command_output_line_count += 1;
+            return;
+        }
+        if self.config.formatters.json {
+            if let Some(formatted) = linefmt::colorize_json_line(line, &self.theme) {
+                out.extend_from_slice(&formatted);
+                self.command_output_line_count += 1;
+                return;
+            }
+        }
+        emit_line(out, line, &self.theme, &self.streaming);
+        self.command_output_line_count += 1;
+    }
+
+    fn format_command_line(&self, line: &[u8]) -> Option<Vec<u8>> {
+        match command_view(&self.pending_command)? {
+            CommandView::Find => linefmt::colorize_find_line(line, &self.theme),
+            CommandView::Ls => linefmt::colorize_ls_line(line, &self.theme),
+            CommandView::Du => linefmt::colorize_du_line(line, &self.theme),
+            CommandView::Df => linefmt::colorize_df_line(line, &self.theme),
+            CommandView::Ps => linefmt::colorize_ps_line(line, &self.theme),
+            CommandView::Dns => linefmt::colorize_dns_line(line, &self.theme),
+            CommandView::Man => linefmt::format_man_line(line, &self.theme),
+            CommandView::Markdown => linefmt::colorize_markdown_line(line, &self.theme),
+            CommandView::Config => linefmt::colorize_config_line(line, &self.theme),
+            CommandView::Delimited(delimiter) => linefmt::colorize_delimited_line(
+                line,
+                &self.theme,
+                delimiter,
+                self.command_output_line_count == 0,
+            ),
+            CommandView::Sql => linefmt::colorize_sql_line(line, &self.theme),
+            CommandView::SqlResult => linefmt::colorize_sql_result_line(
+                line,
+                &self.theme,
+                self.command_output_line_count <= 1,
+            ),
+            CommandView::JsonLines => linefmt::colorize_json_line(line, &self.theme),
+            CommandView::Code(lang) => linefmt::colorize_code_line(line, &self.theme, lang),
+            CommandView::Git(view) => linefmt::colorize_git_line(line, &self.theme, view),
+        }
+    }
+
+    fn pending_command_prefers_text_lines(&self) -> bool {
+        matches!(
+            command_view(&self.pending_command),
+            Some(
+                CommandView::Man
+                    | CommandView::Markdown
+                    | CommandView::Config
+                    | CommandView::Delimited(_)
+                    | CommandView::Sql
+                    | CommandView::SqlResult
+                    | CommandView::JsonLines
+                    | CommandView::Code(_)
+                    | CommandView::Git(_)
+            )
+        )
     }
 
     /// Emit any output still held in the accumulator. **Must** be called once
@@ -588,6 +773,278 @@ fn recognize(
         f.try_format(bytes, theme)
             .map(|out| (f.label(), out, f.needs_crlf()))
     })
+}
+
+fn is_command(command: &Option<Vec<u8>>, expected: &[u8]) -> bool {
+    command
+        .as_deref()
+        .and_then(cmdline::first_word)
+        .is_some_and(|name| name.as_bytes() == expected)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandView {
+    Find,
+    Ls,
+    Du,
+    Df,
+    Ps,
+    Dns,
+    Man,
+    Markdown,
+    Config,
+    Delimited(u8),
+    Sql,
+    SqlResult,
+    JsonLines,
+    Code(linefmt::CodeLanguage),
+    Git(linefmt::GitView),
+}
+
+fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
+    let cmd = command.as_deref()?;
+    let name = cmdline::first_word(cmd)?;
+    if let Some(view) = file_content_view(&name, cmd) {
+        return Some(view);
+    }
+    match name.as_str() {
+        "find" => Some(CommandView::Find),
+        "ls" => Some(CommandView::Ls),
+        "du" => Some(CommandView::Du),
+        "df" => Some(CommandView::Df),
+        "ps" => Some(CommandView::Ps),
+        "dig" | "nslookup" | "host" => Some(CommandView::Dns),
+        "man" | "apropos" => Some(CommandView::Man),
+        "sqlite3" | "psql" | "mysql" | "mariadb" | "duckdb" => Some(CommandView::SqlResult),
+        "git" => git_command_view(cmd),
+        _ if command_requests_help(cmd) => Some(CommandView::Man),
+        _ => None,
+    }
+}
+
+fn git_command_view(command: &[u8]) -> Option<CommandView> {
+    let text = std::str::from_utf8(command).ok()?;
+    let mut words = text.split_whitespace();
+    let _git = words.next()?;
+    let mut args = Vec::new();
+    let mut skip_next = false;
+    for word in words {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if matches!(
+            word,
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace"
+        ) {
+            skip_next = true;
+            continue;
+        }
+        if matches!(word, "--no-pager" | "--paginate" | "--literal-pathspecs") {
+            continue;
+        }
+        if word.starts_with("--git-dir=")
+            || word.starts_with("--work-tree=")
+            || word.starts_with("--namespace=")
+            || word.starts_with("-c")
+        {
+            continue;
+        }
+        args.push(word);
+    }
+    let subcommand = args.first().copied()?;
+    if args
+        .iter()
+        .any(|word| matches!(*word, "--help" | "-h" | "help"))
+    {
+        return None;
+    }
+    match subcommand {
+        "status" => {
+            let short = args
+                .iter()
+                .skip(1)
+                .any(|word| matches!(*word, "-s" | "--short" | "--porcelain" | "--porcelain=v1"));
+            Some(CommandView::Git(if short {
+                linefmt::GitView::ShortStatus
+            } else {
+                linefmt::GitView::Status
+            }))
+        }
+        "diff" if git_args_request_stat(&args[1..]) => {
+            Some(CommandView::Git(linefmt::GitView::DiffStat))
+        }
+        "log" | "show" if git_args_request_stat(&args[1..]) => {
+            Some(CommandView::Git(linefmt::GitView::DiffStat))
+        }
+        "log" | "show" => Some(CommandView::Git(linefmt::GitView::Log)),
+        "branch" => Some(CommandView::Git(linefmt::GitView::Branch)),
+        _ => None,
+    }
+}
+
+fn git_args_request_stat(args: &[&str]) -> bool {
+    args.iter().any(|word| {
+        matches!(
+            *word,
+            "--stat" | "--shortstat" | "--numstat" | "--compact-summary" | "--name-status"
+        ) || word.starts_with("--stat=")
+    })
+}
+
+fn file_content_view(command_name: &str, command: &[u8]) -> Option<CommandView> {
+    if !matches!(command_name, "cat" | "head" | "tail" | "sed") {
+        return None;
+    }
+    let text = std::str::from_utf8(command).ok()?;
+    text.split_whitespace()
+        .filter(|word| !word.starts_with('-') && !shell_operator_word(word))
+        .rev()
+        .find_map(file_view_for_word)
+}
+
+fn shell_operator_word(word: &str) -> bool {
+    matches!(
+        word,
+        "|" | "||" | "&&" | ";" | ">" | ">>" | "<" | "2>" | "2>>"
+    )
+}
+
+fn file_view_for_word(word: &str) -> Option<CommandView> {
+    let clean = word
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | ',' | ':' | ';' | ')' | '('))
+        .rsplit('/')
+        .next()
+        .unwrap_or(word)
+        .to_ascii_lowercase();
+    if clean.is_empty() {
+        return None;
+    }
+    if matches!(
+        clean.as_str(),
+        "readme" | "readme.md" | "changelog.md" | "contributing.md" | "license.md" | "roadmap.md"
+    ) || clean.ends_with(".md")
+        || clean.ends_with(".markdown")
+        || clean.ends_with(".mdown")
+    {
+        return Some(CommandView::Markdown);
+    }
+    if matches!(
+        clean.as_str(),
+        ".env" | ".env.local" | ".env.development" | ".env.production" | ".glimpsrc"
+    ) || clean.ends_with(".yml")
+        || clean.ends_with(".yaml")
+        || clean.ends_with(".toml")
+        || clean.ends_with(".ini")
+        || clean.ends_with(".conf")
+        || clean.ends_with(".cfg")
+        || clean.ends_with(".env")
+    {
+        return Some(CommandView::Config);
+    }
+    if clean.ends_with(".csv") {
+        return Some(CommandView::Delimited(b','));
+    }
+    if clean.ends_with(".tsv") || clean.ends_with(".tab") {
+        return Some(CommandView::Delimited(b'\t'));
+    }
+    if clean.ends_with(".sql") {
+        return Some(CommandView::Sql);
+    }
+    if clean.ends_with(".jsonl") || clean.ends_with(".ndjson") {
+        return Some(CommandView::JsonLines);
+    }
+    if let Some(lang) = code_language_for_file(&clean) {
+        return Some(CommandView::Code(lang));
+    }
+    None
+}
+
+fn code_language_for_file(name: &str) -> Option<linefmt::CodeLanguage> {
+    use linefmt::CodeLanguage;
+    match name {
+        "dockerfile" => return Some(CodeLanguage::Shell),
+        "makefile" | "gnumakefile" => return Some(CodeLanguage::Shell),
+        _ => {}
+    }
+    if matches!(
+        name,
+        ".bashrc" | ".bash_profile" | ".zshrc" | ".zprofile" | ".profile" | ".mkshrc"
+    ) {
+        return Some(CodeLanguage::Shell);
+    }
+    let lang = if name.ends_with(".rs") {
+        CodeLanguage::Rust
+    } else if matches!(
+        extension(name),
+        Some("js" | "jsx" | "mjs" | "cjs" | "vue" | "svelte")
+    ) {
+        CodeLanguage::JavaScript
+    } else if matches!(extension(name), Some("ts" | "tsx")) {
+        CodeLanguage::TypeScript
+    } else if matches!(extension(name), Some("py" | "pyw")) {
+        CodeLanguage::Python
+    } else if matches!(
+        extension(name),
+        Some("sh" | "bash" | "zsh" | "fish" | "ksh")
+    ) {
+        CodeLanguage::Shell
+    } else if name.ends_with(".go") {
+        CodeLanguage::Go
+    } else if matches!(extension(name), Some("java")) {
+        CodeLanguage::Java
+    } else if matches!(extension(name), Some("kt" | "kts")) {
+        CodeLanguage::Kotlin
+    } else if matches!(extension(name), Some("swift")) {
+        CodeLanguage::Swift
+    } else if matches!(extension(name), Some("rb" | "rake")) {
+        CodeLanguage::Ruby
+    } else if matches!(extension(name), Some("php" | "phtml")) {
+        CodeLanguage::Php
+    } else if matches!(extension(name), Some("css" | "scss" | "sass")) {
+        CodeLanguage::Css
+    } else if matches!(
+        extension(name),
+        Some("c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx")
+    ) {
+        CodeLanguage::CLike
+    } else {
+        return None;
+    };
+    Some(lang)
+}
+
+fn extension(name: &str) -> Option<&str> {
+    name.rsplit_once('.').map(|(_, ext)| ext)
+}
+
+fn starts_with_complete_json_line(bytes: &[u8]) -> bool {
+    let Some(newline) = bytes.iter().position(|&b| b == b'\n') else {
+        return false;
+    };
+    let has_more_content = bytes[newline + 1..]
+        .iter()
+        .any(|b| !b.is_ascii_whitespace());
+    has_more_content && linefmt::is_json_line(&bytes[..=newline])
+}
+
+fn command_requests_help(command: &[u8]) -> bool {
+    std::str::from_utf8(command).ok().is_some_and(|cmd| {
+        cmd.split_whitespace()
+            .any(|word| matches!(word, "--help" | "-h" | "help"))
+    })
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs() >= 60 {
+        let minutes = duration.as_secs() / 60;
+        let seconds = duration.as_secs() % 60;
+        format!("{minutes}m{seconds:02}s")
+    } else if duration.as_secs() >= 1 {
+        format!("{}.{}s", duration.as_secs(), duration.subsec_millis() / 100)
+    } else {
+        format!("{}ms", duration.as_millis())
+    }
 }
 
 /// Test-facing convenience: build the registry for `fmts` and run [`recognize`].

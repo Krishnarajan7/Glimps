@@ -1,0 +1,56 @@
+name: Formatter request
+description: Request support for a command output or content type.
+title: "formatter: "
+labels: ["formatter"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Formatter requests should include real output and a pass-through rule. A formatter that cannot prove the shape must decline.
+  - type: input
+    id: command
+    attributes:
+      label: Command or content type
+      placeholder: "git worktree list, kubectl get pods, .env files"
+    validations:
+      required: true
+  - type: textarea
+    id: sample
+    attributes:
+      label: Real output sample
+      description: Paste the smallest representative output. Redact secrets.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: desired
+    attributes:
+      label: Desired formatting
+      description: Which tokens should be highlighted and why?
+    validations:
+      required: true
+  - type: textarea
+    id: false_positives
+    attributes:
+      label: False-positive guard
+      description: What similar-looking output should GLIMPS leave untouched?
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Expected formatter mode
+      options:
+        - Streaming line formatter
+        - Buffered document formatter
+        - Command-aware formatter
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Suggested tests
+      description: Include success and rejection cases if you know them.
+    validations:
+      required: false

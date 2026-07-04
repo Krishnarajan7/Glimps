@@ -86,6 +86,9 @@ const OSC_PREFIX_CAP: usize = 16;
 /// emitted by `glimps init`'s preexec. We capture its whole body (up to
 /// `COMMAND_CAP`) so we can show a colored command header and bypass by name.
 const COMMAND_OSC: &[u8] = b"7337;";
+/// GLIMPS's private OSC carrying the shell's current working directory after a
+/// command (`OSC 7338 ; <pwd>`), emitted by `glimps init`'s precmd.
+const CWD_OSC: &[u8] = b"7338;";
 
 /// Upper bound on a captured command. Commands are short; this just bounds memory
 /// against a pathological/huge one (we then simply don't show a header for it).
@@ -148,6 +151,10 @@ pub struct Osc133Scanner {
     /// The most recent command captured from the `COMMAND_OSC` marker, awaiting
     /// consumption by the formatter at output start. `None` once taken.
     command: Option<Vec<u8>>,
+    /// The most recent post-command cwd captured from the `CWD_OSC` marker.
+    cwd: Option<Vec<u8>>,
+    /// The most recent command exit code captured from `OSC 133;D;<code>`.
+    exit_code: Option<i32>,
 }
 
 impl Osc133Scanner {
@@ -159,6 +166,8 @@ impl Osc133Scanner {
             csi_buf: Vec::with_capacity(CSI_PREFIX_CAP),
             alt_screen: false,
             command: None,
+            cwd: None,
+            exit_code: None,
         }
     }
 
@@ -173,6 +182,16 @@ impl Osc133Scanner {
     /// start to render the colored command header.
     pub fn take_command(&mut self) -> Option<Vec<u8>> {
         self.command.take()
+    }
+
+    /// Take the most recent post-command cwd captured from the shell.
+    pub fn take_cwd(&mut self) -> Option<Vec<u8>> {
+        self.cwd.take()
+    }
+
+    /// Take the exit code captured from the most recent command-end marker.
+    pub fn take_exit_code(&mut self) -> Option<i32> {
+        self.exit_code.take()
     }
 
     /// The zone the stream is currently in, i.e. the zone the *next* byte fed
@@ -319,7 +338,9 @@ impl Osc133Scanner {
                                 // Capture the whole body for our command OSC; just
                                 // a short prefix for any other OSC. Either way the
                                 // capture is bounded.
-                                let cap = if self.osc_buf.starts_with(COMMAND_OSC) {
+                                let cap = if self.osc_buf.starts_with(COMMAND_OSC)
+                                    || self.osc_buf.starts_with(CWD_OSC)
+                                {
                                     COMMAND_CAP
                                 } else {
                                     OSC_PREFIX_CAP
@@ -373,6 +394,11 @@ impl Osc133Scanner {
         if kind == StringKind::Osc {
             if let Some(cmd) = self.osc_buf.strip_prefix(COMMAND_OSC) {
                 self.command = Some(cmd.to_vec());
+            } else if let Some(cwd) = self.osc_buf.strip_prefix(CWD_OSC) {
+                self.cwd = Some(cwd.to_vec());
+            } else if let Some(exit) = parse_osc133_exit_code(&self.osc_buf) {
+                self.exit_code = Some(exit);
+                self.zone = Zone::Unknown;
             } else if let Some(zone) = classify_osc133(&self.osc_buf) {
                 self.zone = zone;
             }
@@ -424,6 +450,19 @@ fn classify_osc133(body: &[u8]) -> Option<Zone> {
         b'D' => Some(Zone::Unknown),
         _ => None,
     }
+}
+
+fn parse_osc133_exit_code(body: &[u8]) -> Option<i32> {
+    let rest = body.strip_prefix(b"133;D;")?;
+    let digits = rest
+        .iter()
+        .take_while(|b| b.is_ascii_digit() || **b == b'-')
+        .copied()
+        .collect::<Vec<_>>();
+    if digits.is_empty() {
+        return None;
+    }
+    std::str::from_utf8(&digits).ok()?.parse().ok()
 }
 
 #[cfg(test)]
@@ -498,6 +537,8 @@ mod tests {
         v.push(BEL);
         s.feed(&v);
         assert_eq!(s.zone(), Zone::Unknown);
+        assert_eq!(s.take_exit_code(), Some(0));
+        assert_eq!(s.take_exit_code(), None);
     }
 
     #[test]
@@ -736,6 +777,18 @@ mod tests {
         );
         // Taken once -> gone.
         assert!(s.take_command().is_none());
+    }
+
+    #[test]
+    fn captures_cwd_from_marker() {
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b]7338;/Users/apple/Projects/Glimps\x07");
+        assert_eq!(
+            s.take_cwd().as_deref(),
+            Some(&b"/Users/apple/Projects/Glimps"[..])
+        );
+        assert!(s.take_cwd().is_none());
+        assert_eq!(s.zone(), Zone::Unknown);
     }
 
     #[test]

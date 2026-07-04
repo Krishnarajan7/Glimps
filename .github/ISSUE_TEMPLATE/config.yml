@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Safety invariants
+    url: https://github.com/Krishnarajan7/Glimps/blob/main/docs/SAFETY_INVARIANTS.md
+    about: Read the terminal-safety rules before proposing formatter or PTY changes.
+  - name: Formatter design guide
+    url: https://github.com/Krishnarajan7/Glimps/blob/main/docs/FORMATTER_DESIGN_GUIDE.md
+    about: Start here before adding or changing a formatter.

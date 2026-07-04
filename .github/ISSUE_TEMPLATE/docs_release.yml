@@ -1,0 +1,37 @@
+name: Docs or release task
+description: Track README, dogfood, install, release, or demo work.
+title: "docs/release: "
+labels: ["docs", "release"]
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: Task
+      description: What user-facing or release-facing gap should be closed?
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Likely files
+      placeholder: |
+        - `README.md`
+        - `docs/LAUNCH_HARDENING_CHECKLIST.md`
+        - `docs/FRESH_MAC_DOGFOOD.md`
+    validations:
+      required: false
+  - type: textarea
+    id: truth
+    attributes:
+      label: Truth check
+      description: What must not be overclaimed?
+      placeholder: "Do not advertise Homebrew until the tap works from a real tag."
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      placeholder: "Spellcheck/read-through, script syntax check, release dry run, etc."
+    validations:
+      required: false

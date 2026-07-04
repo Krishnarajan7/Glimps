@@ -13,6 +13,10 @@ Requirements:
 - zsh
 - optional: `cargo-audit`
 
+Apple Silicon and Intel Macs use the same commands. Run this checklist on both
+architectures before public beta when you have access to both machines; GLIMPS is
+compiled natively by Cargo on whichever Mac is running the checkout.
+
 Clone the repo and run:
 
 ```bash
@@ -49,6 +53,8 @@ Inside the session, verify:
 
 Repeat `scripts/dogfood-macos.sh session` in:
 
+- an Apple Silicon Mac
+- an Intel Mac
 - Terminal.app
 - iTerm2
 - Ghostty

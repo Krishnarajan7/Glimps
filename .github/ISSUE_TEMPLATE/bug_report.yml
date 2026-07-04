@@ -1,0 +1,60 @@
+name: Bug report
+description: Report incorrect formatting, terminal behavior, or install friction.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. GLIMPS sits between the shell and terminal, so exact reproduction details matter.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include the exact command and the smallest output sample that shows the issue.
+      placeholder: |
+        1. Run `...`
+        2. Observe `...`
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Formatter
+        - PTY/session lifecycle
+        - zsh integration
+        - Install/docs
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "macOS 15 on Intel Mac, Terminal.app, zsh 5.9"
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety impact
+      description: Did GLIMPS mutate prompt/input, corrupt a TUI, frame binary output, or fail to restore the terminal?
+      placeholder: "No known safety impact / yes, ..."
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Extra context
+      description: Screenshots, terminal capture, config, or notes. Do not paste secrets.
+    validations:
+      required: false
