@@ -73,6 +73,85 @@ fn header_shows_the_colored_command() {
 }
 
 #[test]
+fn forged_output_markers_do_not_inject_a_command_header() {
+    // BUG #1 end-to-end: a real command runs and gets its header; then its
+    // OUTPUT forges its own `7337`+`C` markers for a scary command. GLIMPS must
+    // NOT render a second, forged header — only the real command is shown.
+    let mut f = Formatter::new(); // default colored theme
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat notes.txt")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"reading...\n")); // real header emitted here
+                                                        // Attacker-controlled output forges markers mid-output:
+    let mut forged = cmd_marker(b"git push --force");
+    forged.extend_from_slice(C);
+    out.extend_from_slice(&f.process(&forged));
+    out.extend_from_slice(&f.process(b"pwned\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8(out).unwrap();
+    // The real command's colored name appears as a header.
+    assert!(
+        s.contains("\x1b[36mcat\x1b[0m"),
+        "real command header missing"
+    );
+    // The forged command name is NEVER rendered as a GLIMPS header (its raw
+    // marker passes through, but GLIMPS never colors it as a command).
+    assert!(
+        !s.contains("\x1b[36mgit\x1b[0m"),
+        "forged command must not produce a header"
+    );
+    // Exactly one command bar total — the real one.
+    assert_eq!(
+        s.matches('▌').count(),
+        1,
+        "exactly one real header expected"
+    );
+}
+
+#[test]
+fn control_bytes_in_captured_command_never_reach_the_header_raw() {
+    // BUG #2 end-to-end: a captured command carrying raw C0 controls (here
+    // backspaces and a DEL — e.g. a hostile filename that redraws the line)
+    // must be sanitized before it lands in GLIMPS's own `▌` header. No raw C0
+    // may leak into our chrome. (An ESC would abort the `7337` OSC capture in
+    // the scanner, so the reachable-via-marker vector is the non-ESC controls.)
+    let mut f = Formatter::new(); // default colored theme
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"echo\x08\x08\x08\x08rm\x7f")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"hi\n")); // commit -> header emitted
+    out.extend_from_slice(&f.process(D));
+
+    // Isolate GLIMPS's header line (from the `▌` bar to its line end); the raw
+    // `7337` marker passes through elsewhere, but the header must be clean.
+    let bar = "▌".as_bytes();
+    let start = out
+        .windows(bar.len())
+        .position(|w| w == bar)
+        .expect("header bar present");
+    let end = out[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(out.len(), |n| start + n);
+    let header = &out[start..end];
+    // No raw backspace or DEL survives in the header (the trailing CRLF is the
+    // only framing control, and it is excluded by slicing up to the `\n`).
+    assert!(
+        !header.iter().any(|&b| b == 0x08 || b == 0x7F),
+        "raw injected control leaked into GLIMPS header"
+    );
+    // The command text is still shown (sanitized: control run -> one space).
+    let hs = String::from_utf8_lossy(header);
+    assert!(hs.contains("echo"), "command text should remain");
+}
+
+#[test]
 fn bypassed_command_output_is_not_formatted() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -1734,5 +1813,136 @@ proptest::proptest! {
         // byte — the truncation/loss guard, robust to binary and split points.
         let recovered = strip_first(&out, &sep());
         proptest::prop_assert_eq!(recovered, input);
+    }
+}
+
+/// Remove every SGR/CSI color escape (`ESC [ … final-byte`) from `bytes`,
+/// leaving all other bytes — text, OSC-133 markers (`ESC ]`), box-drawing —
+/// intact. A byte-safe colorizer only ever *wraps* the user's bytes in these
+/// escapes, so `strip_sgr(colorized) == original`.
+fn strip_sgr(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'[') {
+            // CSI: skip params/intermediates up to and including the final byte.
+            let mut j = i + 2;
+            while j < bytes.len() && !(0x40..=0x7e).contains(&bytes[j]) {
+                j += 1;
+            }
+            i = (j + 1).min(bytes.len());
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// One line of fuzz for the colored command-view byte-safety proptest: either
+/// arbitrary safe text (printable ASCII + tab, no ESC/NUL/newline so it can't
+/// form a marker, look binary, or split a line), or a realistic git
+/// branch-tracking line whose whitespace run before `[ahead/behind …]` is
+/// fuzzed to 1..=4 bytes — the exact shape that exposed the branch-meta
+/// whitespace byte-loss bug (`## main...origin/main␠␠[ahead 1]`).
+fn cmd_view_line() -> impl Strategy<Value = Vec<u8>> {
+    let text = proptest::collection::vec(
+        proptest::prop_oneof![Just(b'\t'), Just(b' '), 0x21u8..=0x7e],
+        0..24,
+    );
+    let branch = (
+        proptest::collection::vec(0x61u8..=0x7a, 1..6),
+        proptest::option::of(proptest::collection::vec(0x61u8..=0x7a, 1..6)),
+        1usize..=4,
+        proptest::prop_oneof![
+            Just(&b"[ahead 1]"[..]),
+            Just(&b"[behind 2]"[..]),
+            Just(&b"[ahead 3, behind 4]"[..]),
+        ],
+    )
+        .prop_map(|(name, upstream, gap, meta)| {
+            let mut line = b"## ".to_vec();
+            line.extend_from_slice(&name);
+            if let Some(up) = upstream {
+                line.extend_from_slice(b"...");
+                line.extend_from_slice(&up);
+            }
+            line.extend(std::iter::repeat_n(b' ', gap));
+            line.extend_from_slice(meta);
+            line
+        });
+    proptest::prop_oneof![text, branch]
+}
+
+proptest::proptest! {
+    /// Byte-safety invariant #4 for the COLORED command-view family. The other
+    /// process-level byte-preservation proptests all run with `Theme::plain()`
+    /// AND no captured command, so the colored command-view colorizers
+    /// (`colorize_git_*`, `colorize_delimited_*`, `colorize_sql*`, markdown,
+    /// code, …) get ZERO coverage there: under a plain theme they early-return,
+    /// and with no command `command_view()` is `None`. Here we inject the
+    /// `7337;<cmd>` command marker (so `command_view` resolves) and the `133;C`
+    /// output-start marker under a COLORED theme (so the colorizers actually
+    /// paint), then prove that stripping the SGR color escapes back out recovers
+    /// the user's bytes EXACTLY — for git status, CSV, SQL, Markdown, and Rust
+    /// source — and that nothing ever panics. Regression guard for the
+    /// `## …␠␠[ahead]` branch-meta whitespace-loss bug.
+    #[test]
+    fn prop_colored_command_views_preserve_every_byte(
+        lines in proptest::collection::vec(cmd_view_line(), 1..12),
+    ) {
+        // One newline-terminated body reused across every view, so no partial
+        // line is ever left dangling at the D marker (finalize emits nothing).
+        let mut body = Vec::new();
+        for line in &lines {
+            body.extend_from_slice(line);
+            body.push(b'\n');
+        }
+        // Need >=1 non-whitespace byte so the owed header is emitted during the
+        // body chunk (not deferred to the D flush), keeping the frame a clean
+        // prefix of the body output.
+        proptest::prop_assume!(body.iter().any(|b| !b.is_ascii_whitespace()));
+
+        for cmd in [
+            &b"git status --short"[..],
+            b"cat data.csv",
+            b"cat schema.sql",
+            b"cat notes.md",
+            b"cat main.rs",
+        ] {
+            let mut f = Formatter::build(Clock::Off, true, Config::default());
+            if !f.is_enabled() {
+                return Ok(());
+            }
+            // 7337;<cmd> -> command_view resolves; 133;C -> output zone begins.
+            let mut prefix = f.process(&cmd_marker(cmd)).into_owned();
+            prefix.extend_from_slice(&f.process(C));
+            // The exact header the formatter will emit lazily before the body.
+            let header = f.render_header();
+            let body_out = f.process(&body).into_owned();
+            let tail = f.process(D).into_owned();
+
+            let mut full = prefix.clone();
+            full.extend_from_slice(&body_out);
+            full.extend_from_slice(&tail);
+
+            // A byte-safe colorizer only ADDS SGR escapes, so stripping them must
+            // recover exactly: <marker passthroughs> <header> <body> <D marker>.
+            let stripped = strip_sgr(&full);
+            let mut want_prefix = strip_sgr(&prefix);
+            want_prefix.extend_from_slice(&strip_sgr(&header));
+            let core = stripped
+                .strip_prefix(&want_prefix[..])
+                .expect("frame is a clean prefix of the colored output");
+            let recovered = core
+                .strip_suffix(D)
+                .expect("colored output ends with the 133;D marker");
+            proptest::prop_assert_eq!(
+                recovered,
+                &body[..],
+                "byte loss under command {:?}",
+                String::from_utf8_lossy(cmd)
+            );
+        }
     }
 }

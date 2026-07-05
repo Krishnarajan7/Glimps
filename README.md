@@ -7,10 +7,16 @@ recognizes: JSON, HTML, logs, HTTP responses, diffs, stack traces, Git output,
 tables, and common project files. No manual piping, no flags, no guessing what
 kind of output is coming.
 
-> Status: **beta** — functional and heavily tested. macOS + zsh today; Linux is a
+> Status: **beta** — functional and heavily tested. macOS + zsh/bash today; Linux is a
 > supported build target (CI covers Linux + macOS). Builds and runs **identically
 > on Apple Silicon and Intel Macs** — same install, no architecture-specific
 > steps. Homebrew packaging and broader shell support are on the roadmap.
+
+> **Want to help?** GLIMPS is beta and there's real, scoped work with clear
+> acceptance criteria waiting for you. Browse the
+> [`good first issue` list](https://github.com/Krishnarajan7/Glimps/labels/good%20first%20issue)
+> and see [Contributing](#contributing) — most tasks teach GLIMPS one more small
+> output type and don't require touching the PTY internals.
 
 <!-- DEMO: run scripts/render-demo.sh (see demo/README.md) to produce
      demo/glimps.gif from demo/glimps.tape, then replace this comment with:
@@ -133,17 +139,24 @@ Not shipped yet:
 
 - `brew install glimps`
 - `cargo install glimps` from crates.io
-- bash/fish shell integration
+- fish shell integration
 
 Those should not be advertised as available until the release/tap flow is tested
 from a real version tag.
 
-## Enable zsh Integration
+## Enable Shell Integration
 
-After installing the binary, add one guarded line to your `~/.zshrc`:
+After installing the binary, add one guarded line **near the top** of your rc
+file — `~/.zshrc` for zsh, `~/.bashrc` for bash:
 
 ```bash
-echo 'command -v glimps >/dev/null 2>&1 && eval "$(glimps init zsh)"' >> ~/.zshrc
+# zsh: near the top of ~/.zshrc
+command -v glimps >/dev/null 2>&1 && eval "$(glimps init zsh)"
+```
+
+```bash
+# bash: near the top of ~/.bashrc
+command -v glimps >/dev/null 2>&1 && eval "$(glimps init bash)"
 ```
 
 Restart your terminal. That's it. The snippet re-execs your interactive shell
@@ -152,7 +165,15 @@ inside GLIMPS once per session and installs the
 shell-integration markers GLIMPS uses to tell your prompt and typed input apart
 from command output. It never touches your prompt.
 
-Prefer not to touch `.zshrc`? Just run `glimps` to start a wrapped shell, and
+> **Why "near the top"?** The snippet re-execs your shell *inside* GLIMPS, and
+> the re-exec'd shell re-sources the same rc file. Anything **above** the line
+> runs in the throwaway outer shell *and again* inside GLIMPS; anything **below**
+> it runs only once. Put it high (after any critical `PATH`/env setup, before
+> plugin managers and prompt frameworks) so your rc isn't run twice per session.
+> Login files like `.zprofile`/`.bash_profile` are **not** re-run — the inner
+> shell is interactive and inherits your environment.
+
+Prefer not to touch your rc file? Just run `glimps` to start a wrapped shell, and
 `exit` to leave.
 
 ## Configuration
@@ -212,8 +233,15 @@ new raw shell with `GLIMPS=0 zsh`.
 
 ## Known beta limits
 
-- zsh is the only shell integration today. Bash and fish are planned, but not
-  public-beta blockers.
+- zsh and bash shell integration are supported today. fish is planned, but not a
+  public-beta blocker.
+- **bash integration is beta.** It uses a `DEBUG` trap (bash has no native
+  `preexec`). GLIMPS chains any `DEBUG` trap that was installed *before* its line,
+  and tools built on `bash-preexec` (atuin, etc.) chain GLIMPS the same way — but
+  a tool that installs a *raw* `DEBUG` trap *below* the GLIMPS line will override
+  it and quietly stop the output markers. If you use such a tool, put the GLIMPS
+  line after it. The command captured for the header is the full history line, so
+  it needs interactive history enabled (the default).
 - Homebrew and crates.io installs are not live yet. Use the repo-local dogfood
   session or `cargo install --path .` from a checkout until the tap/release flow
   is verified from a real version tag.
@@ -230,9 +258,10 @@ new raw shell with `GLIMPS=0 zsh`.
 
 ## Uninstall
 
-1. Remove the line from `~/.zshrc`:
+1. Remove the line from your rc file:
    ```bash
-   sed -i '' '/glimps init zsh/d' ~/.zshrc   # macOS
+   sed -i '' '/glimps init/d' ~/.zshrc    # zsh, macOS
+   sed -i '' '/glimps init/d' ~/.bashrc   # bash, macOS
    ```
 2. Remove the binary: `cargo uninstall glimps` (or delete it from your `PATH`).
 3. Optionally delete `~/.glimpsrc`.
@@ -262,6 +291,28 @@ ends, and reformats only that — never your prompt or input. Full rationale in
 | [`docs/SAFETY_INVARIANTS.md`](./docs/SAFETY_INVARIANTS.md) | Public safety invariants |
 | `src/pty.rs` | The PTY supervisor |
 | `src/format/` | All output transforms (the one formatting seam) |
+
+## Contributing
+
+GLIMPS is small, sharp, and sits between a person and their shell — so a good
+contribution makes output easier to read *without* making the terminal less
+trustworthy. The single rule that matters most: **when GLIMPS is unsure, it gets
+out of the way.**
+
+The friendliest way in is to teach GLIMPS one more small, well-shaped output
+type. Those tasks are labeled and scoped, and none of them require touching the
+PTY supervisor, raw-mode handling, or the OSC-133 scanner:
+
+- **Pick a task:** the [`good first issue` list](https://github.com/Krishnarajan7/Glimps/labels/good%20first%20issue).
+  Each one names the files to touch, what "done" looks like, and what output your
+  change must leave alone.
+- **Read first:** [`CONTRIBUTING.md`](./CONTRIBUTING.md) and
+  [`docs/FORMATTER_DESIGN_GUIDE.md`](./docs/FORMATTER_DESIGN_GUIDE.md).
+- **Try it like a user:** `scripts/dogfood-macos.sh session` wraps a throwaway
+  zsh and cleans up on exit — it won't touch your `~/.zshrc`.
+
+Comment on an issue to claim it before you start. A ten-line question beats a
+two-hundred-line PR that went the wrong way.
 
 ## Build & test
 

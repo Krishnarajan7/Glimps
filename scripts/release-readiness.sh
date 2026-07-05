@@ -7,7 +7,7 @@ OPTIONAL_MISSING=0
 
 usage() {
   cat <<'EOF'
-Usage: scripts/release-readiness.sh [--strict]
+Usage: scripts/release-readiness.sh [--strict] [--tag vX.Y.Z]
 
 Runs the repo-local gates that should pass before cutting a public beta:
   - cargo fmt --all -- --check
@@ -15,6 +15,14 @@ Runs the repo-local gates that should pass before cutting a public beta:
   - cargo test --all --all-features
   - cargo bench --no-run
   - release config sanity checks
+  - (with --tag) Cargo.toml version matches the release tag
+
+Options:
+  --strict         missing optional tools (cargo-audit, dist) fail the script
+  --tag vX.Y.Z     assert Cargo.toml's package version equals X.Y.Z before you
+                   tag. cargo-dist rejects a tag whose version doesn't match a
+                   workspace package version, so run this before every release
+                   tag to catch a forgotten version bump early.
 
 Optional tools:
   - cargo-audit, if installed, checks RustSec advisories
@@ -54,25 +62,60 @@ check_contains() {
   fi
 }
 
-case "${1:-}" in
-  --strict)
-    STRICT=1
-    ;;
-  -h|--help|help)
-    usage
-    exit 0
-    ;;
-  "")
-    ;;
-  *)
-    usage >&2
-    exit 2
-    ;;
-esac
+EXPECT_TAG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --strict)
+      STRICT=1
+      shift
+      ;;
+    --tag)
+      EXPECT_TAG="${2:-}"
+      if [[ -z "$EXPECT_TAG" ]]; then
+        echo "--tag requires an argument, e.g. --tag v0.1.0" >&2
+        exit 2
+      fi
+      shift 2
+      ;;
+    --tag=*)
+      EXPECT_TAG="${1#--tag=}"
+      shift
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
 
 require_tool cargo
 
 cd "$ROOT"
+
+# The package version cargo-dist will match the release tag against.
+cargo_version() {
+  grep -m1 -E '^version = "' "$ROOT/Cargo.toml" | sed -E 's/^version = "(.+)"/\1/' || true
+}
+
+# Guard the most common first-release failure: the git tag and the Cargo.toml
+# version must agree or `dist` errors ("no package with version X.Y.Z").
+if [[ -n "$EXPECT_TAG" ]]; then
+  want="${EXPECT_TAG#v}"
+  have="$(cargo_version)"
+  if [[ "$want" != "$have" ]]; then
+    echo "release version mismatch:" >&2
+    echo "  Cargo.toml version = ${have:-<unreadable>}" >&2
+    echo "  release tag        = $EXPECT_TAG (expects package version $want)" >&2
+    echo "  cargo-dist requires them to match. Bump Cargo.toml 'version' to $want," >&2
+    echo "  commit, then tag $EXPECT_TAG." >&2
+    exit 1
+  fi
+  echo "version check: Cargo.toml $have matches tag $EXPECT_TAG"
+fi
 
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings

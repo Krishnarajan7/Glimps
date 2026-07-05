@@ -27,7 +27,14 @@ scripts/release-readiness.sh --strict
 ```
 
 Strict mode fails if release-only tools such as `cargo-audit` or `dist` are not
-installed. For day-to-day contributor checks, this is enough:
+installed. When you are cutting a specific tag, also pass `--tag` so the script
+verifies `Cargo.toml`'s version matches (see step 5):
+
+```bash
+scripts/release-readiness.sh --strict --tag v0.1.0-rc.1
+```
+
+For day-to-day contributor checks, this is enough:
 
 ```bash
 scripts/release-readiness.sh
@@ -86,7 +93,27 @@ Before pushing a public release tag:
 - confirm the README still says Homebrew is unavailable until the tap has been
   tested end-to-end.
 
-## 5. Test Tag
+## 5. Bump the version to match the tag
+
+`cargo-dist` rejects a tag whose version does not equal a workspace package
+version (`dist` errors with "no package with version X.Y.Z"). The repo ships at
+`version = "0.0.1"` as a placeholder, so **before tagging** set `Cargo.toml`'s
+`[package]` `version` to exactly the tag you are about to push (without the
+leading `v`), and commit it:
+
+```bash
+# for the release candidate below, set version = "0.1.0-rc.1"; for the final
+# public tag in step 7, set version = "0.1.0". SemVer strings must match exactly.
+$EDITOR Cargo.toml         # edit [package] version
+cargo build                # refresh Cargo.lock with the new version
+git add Cargo.toml Cargo.lock
+git commit -m "chore: release v0.1.0-rc.1"
+
+# Preflight guards this for you — it fails if the version and tag disagree:
+scripts/release-readiness.sh --strict --tag v0.1.0-rc.1
+```
+
+## 6. Test Tag
 
 Use a release candidate first:
 
@@ -107,11 +134,16 @@ Then verify:
 Do not promote a failed release candidate in the README. Fix it, tag another
 candidate, and keep the public install path honest.
 
-## 6. Public Tag
+## 7. Public Tag
 
-Only after the release candidate is boring:
+Only after the release candidate is boring. Bump the version again (step 5) to
+the final `0.1.0`, commit, guard it, then tag:
 
 ```bash
+$EDITOR Cargo.toml         # [package] version = "0.1.0"
+cargo build
+git add Cargo.toml Cargo.lock && git commit -m "chore: release v0.1.0"
+scripts/release-readiness.sh --strict --tag v0.1.0
 git tag v0.1.0
 git push origin v0.1.0
 ```
@@ -119,7 +151,12 @@ git push origin v0.1.0
 After the workflow publishes, update the README install section only with
 commands that actually work from a clean machine.
 
-## 7. Rollback
+> Note: GitHub Releases artifacts downloaded in a **browser** get the macOS
+> quarantine xattr (Gatekeeper "unidentified developer") because the binaries are
+> not notarized. The shell installer and Homebrew paths do not — steer users to
+> those, or tell browser-downloaders to run `xattr -d com.apple.quarantine ./glimps`.
+
+## 8. Rollback
 
 If a release is bad:
 

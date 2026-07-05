@@ -393,14 +393,36 @@ impl Osc133Scanner {
     fn finish_string(&mut self, kind: StringKind) {
         if kind == StringKind::Osc {
             if let Some(cmd) = self.osc_buf.strip_prefix(COMMAND_OSC) {
-                self.command = Some(cmd.to_vec());
+                // Zone-guard the trusted command-capture marker: a real preexec
+                // fires the `7337` command OSC from the PROMPT zone, never
+                // mid-output. Honoring it in the Output zone would let
+                // attacker-controlled command output forge a fake command
+                // header (spoofing / phishing primitive — BUG #1).
+                if self.zone != Zone::Output {
+                    self.command = Some(cmd.to_vec());
+                }
             } else if let Some(cwd) = self.osc_buf.strip_prefix(CWD_OSC) {
+                // ACCEPTED RESIDUAL: the `7338` cwd marker legitimately arrives
+                // while the zone is still Output (precmd runs after a command's
+                // output), so it cannot be zone-guarded. Its injection risk is
+                // fully covered by the display sanitizer in `cmdline`/`mod`.
                 self.cwd = Some(cwd.to_vec());
             } else if let Some(exit) = parse_osc133_exit_code(&self.osc_buf) {
                 self.exit_code = Some(exit);
                 self.zone = Zone::Unknown;
             } else if let Some(zone) = classify_osc133(&self.osc_buf) {
-                self.zone = zone;
+                // Zone-guard the Output-start (`133;C`) transition: a redundant
+                // or forged `C` while ALREADY in Output must not re-open output.
+                // Leaving `self.zone` unchanged also keeps `feed_segments` from
+                // emitting a spurious `OutputStart` edge (and thus a forged
+                // header) for the ignored marker.
+                //
+                // ACCEPTED RESIDUAL: a forged early `133;D` only splits output
+                // (low severity, no command spoof), so `D` and the other
+                // transitions are applied as-is.
+                if !(zone == Zone::Output && self.zone == Zone::Output) {
+                    self.zone = zone;
+                }
             }
         }
         self.osc_buf.clear();
@@ -818,6 +840,66 @@ mod tests {
         assert_eq!(s.zone(), Zone::Unknown); // it's a command, not a zone marker
         s.feed(&marker_bel('C'));
         assert_eq!(s.zone(), Zone::Output);
+    }
+
+    #[test]
+    fn legit_command_capture_and_output_start_edge() {
+        // The legit flow: `7337` command capture fires from the (non-Output)
+        // zone, then `133;C` opens Output and produces exactly one OutputStart.
+        let mut s = Osc133Scanner::new();
+        let cmd = s.feed_segments(b"\x1b]7337;git push --force\x07");
+        assert!(!cmd
+            .iter()
+            .any(|x| matches!(x, Seg::OutputStart | Seg::OutputEnd)));
+        let segs = s.feed_segments(&marker_bel('C'));
+        assert_eq!(
+            segs.iter()
+                .filter(|x| matches!(x, Seg::OutputStart))
+                .count(),
+            1
+        );
+        assert_eq!(s.zone(), Zone::Output);
+        assert_eq!(s.take_command().as_deref(), Some(&b"git push --force"[..]));
+    }
+
+    #[test]
+    fn forged_command_and_c_marker_in_output_are_ignored() {
+        // Attacker-controlled OUTPUT emits its own `7337`+`C`. Both must be
+        // ignored: no command captured, and no spurious OutputStart edge (the
+        // zone is already Output), so no forged header can be produced (BUG #1).
+        let mut s = Osc133Scanner::new();
+        s.feed(&marker_bel('C')); // we are in Output (a real command ran)
+        let _ = s.take_command(); // drain any prior capture
+
+        let mut forged = Vec::new();
+        forged.extend_from_slice(b"\x1b]7337;git push --force\x07"); // forged capture
+        forged.extend_from_slice(&marker_bel('C')); // forged re-entry
+        let segs = s.feed_segments(&forged);
+
+        // No captured command (the 7337 was in the Output zone).
+        assert!(s.take_command().is_none());
+        // No spurious edge for the ignored, redundant `C`.
+        assert!(!segs
+            .iter()
+            .any(|x| matches!(x, Seg::OutputStart | Seg::OutputEnd)));
+        // Still Output — the forged `C` did not re-open anything.
+        assert_eq!(s.zone(), Zone::Output);
+    }
+
+    #[test]
+    fn legit_d_still_closes_output_after_forged_markers() {
+        // Even after a forged `C` was ignored, a legit `133;D` still closes
+        // Output exactly once (the accepted-residual behavior is preserved).
+        let mut s = Osc133Scanner::new();
+        s.feed(&marker_bel('C'));
+        s.feed(&marker_bel('C')); // forged/redundant, ignored
+        assert_eq!(s.zone(), Zone::Output);
+        let segs = s.feed_segments(&marker_bel('D'));
+        assert_eq!(
+            segs.iter().filter(|x| matches!(x, Seg::OutputEnd)).count(),
+            1
+        );
+        assert_eq!(s.zone(), Zone::Unknown);
     }
 
     #[test]

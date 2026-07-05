@@ -79,8 +79,9 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     needle.len() <= haystack.len() && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Spawn `glimps` wrapping `shell` inside a fresh PTY. If `zdot` is given it is
-/// exported as `ZDOTDIR`/`HOME` so the inner zsh sources our integration.
+/// Spawn `glimps` wrapping `shell` inside a fresh PTY. If `home` is given it is
+/// exported as `ZDOTDIR`/`HOME` so the inner shell sources our integration —
+/// zsh reads `$ZDOTDIR/.zshrc`, bash reads `$HOME/.bashrc`.
 fn spawn(shell: &str, zdot: Option<&Path>) -> Session {
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -155,6 +156,54 @@ fn zsh_path() -> Option<String> {
     }
     let path = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (!path.is_empty()).then_some(path)
+}
+
+/// The absolute path to `bash`, or `None` if it isn't installed. Mirrors
+/// [`zsh_path`] so the bash formatting test gates and spawns the same way.
+fn bash_path() -> Option<String> {
+    let out = std::process::Command::new("sh")
+        .args(["-c", "command -v bash"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+/// A throwaway `$HOME` containing a `.bashrc` with GLIMPS's bash integration, so
+/// the wrapped bash emits the same OSC-133 markers. Removed on drop (incl. panic).
+struct BashHome {
+    path: PathBuf,
+}
+
+impl BashHome {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("glimps-bit-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create bash home");
+        let init = std::process::Command::new(GLIMPS)
+            .args(["init", "bash"])
+            .output()
+            .expect("glimps init bash");
+        assert!(init.status.success(), "glimps init bash failed");
+        std::fs::write(path.join(".bashrc"), init.stdout).expect("write .bashrc");
+        BashHome { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for BashHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 /// A throwaway ZDOTDIR containing GLIMPS's zsh integration (so the wrapped shell
@@ -257,6 +306,28 @@ fn json_output_is_formatted_end_to_end() {
     assert!(
         s.wait_for(b"JSON", FORMAT_BUDGET),
         "JSON output was not formatted (no badge). Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
+fn bash_json_output_is_formatted_end_to_end() {
+    // Same end-to-end contract as zsh, but through the bash DEBUG-trap /
+    // PROMPT_COMMAND integration: markers must frame the output and the buffered
+    // JSON formatter must run. Skips gracefully where bash isn't installed.
+    let Some(bash) = bash_path() else {
+        eprintln!("skipping: bash not available");
+        return;
+    };
+    let home = BashHome::new();
+    let mut s = spawn(&bash, Some(home.path()));
+    s.wait_for(PROMPT_READY, READY_BUDGET);
+    s.write(b"echo '{\"alpha\":1}'\n");
+    assert!(
+        s.wait_for(b"JSON", FORMAT_BUDGET),
+        "JSON output was not formatted under bash (no badge). Captured: {:?}",
         String::from_utf8_lossy(&s.snapshot())
     );
     s.write(b"exit\n");

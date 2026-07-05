@@ -1716,14 +1716,10 @@ fn paint_git_branch_meta(out: &mut Vec<u8>, bytes: &[u8], theme: &Theme) {
         paint_bytes(out, theme.html_delim, b"...", theme.reset);
         let rest = &bytes[pos + 3..];
         if let Some(meta_start) = rest.iter().position(|&b| b == b'[') {
-            paint_bytes(
-                out,
-                theme.key,
-                trim_ascii_end(&rest[..meta_start]),
-                theme.reset,
-            );
-            if meta_start > 0 && rest[meta_start - 1].is_ascii_whitespace() {
-                out.push(rest[meta_start - 1]);
+            let branch = trim_ascii_end(&rest[..meta_start]);
+            paint_bytes(out, theme.key, branch, theme.reset);
+            if meta_start > branch.len() {
+                out.extend_from_slice(&rest[branch.len()..meta_start]);
             }
             paint_bytes(out, theme.warn, &rest[meta_start..], theme.reset);
         } else {

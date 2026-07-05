@@ -115,14 +115,16 @@ fn print_help() {
          \n\
          USAGE:\n\
          \x20   glimps              Wrap your shell inside GLIMPS (formats output).\n\
-         \x20   glimps init zsh     Print shell integration for ~/.zshrc.\n\
+         \x20   glimps init zsh     Print zsh shell integration (for ~/.zshrc).\n\
+         \x20   glimps init bash    Print bash shell integration (for ~/.bashrc).\n\
          \x20   glimps --help       Show this help.\n\
          \x20   glimps --version    Show the version.\n\
          \n\
          ENVIRONMENT:\n\
          \x20   GLIMPS=0            Disable all formatting (pure pass-through).\n\
          \n\
-         Enable in zsh:  echo 'command -v glimps >/dev/null 2>&1 && eval \"$(glimps init zsh)\"' >> ~/.zshrc",
+         Enable it: add near the TOP of your ~/.zshrc (or ~/.bashrc):\n\
+         \x20   command -v glimps >/dev/null 2>&1 && eval \"$(glimps init zsh)\"",
         env!("CARGO_PKG_VERSION")
     );
 }

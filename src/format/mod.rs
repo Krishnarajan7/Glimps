@@ -492,7 +492,10 @@ impl Formatter {
         let mut line = Vec::new();
         line.extend_from_slice(color.as_bytes());
         line.extend_from_slice(b"moved to ");
-        line.extend_from_slice(&cwd);
+        // Strip control bytes from the captured cwd before it enters this
+        // GLIMPS-authored breadcrumb (BUG #2 — a maliciously named dir or a
+        // forged `7338` could otherwise inject escapes into our chrome).
+        line.extend_from_slice(&cmdline::sanitize_display(&cwd));
         line.extend_from_slice(reset.as_bytes());
         line.push(b'\n');
         push_crlf(out, &line);
@@ -549,7 +552,9 @@ impl Formatter {
             let mut summary = Vec::new();
             summary.extend_from_slice(self.theme.error.as_bytes());
             summary.extend_from_slice(b"command failed: ");
-            summary.extend_from_slice(&cmd);
+            // Strip control bytes from the captured command before it enters
+            // this GLIMPS-authored footer line (BUG #2).
+            summary.extend_from_slice(&cmdline::sanitize_display(&cmd));
             summary.extend_from_slice(reset.as_bytes());
             summary.push(b'\n');
             push_crlf(out, &summary);
@@ -723,9 +728,12 @@ impl Formatter {
                 h.extend_from_slice(dim);
                 h.extend_from_slice("▌ ".as_bytes());
                 h.extend_from_slice(reset);
-                // The command is GLIMPS-rendered display: convert any newline to
-                // CRLF for the raw terminal.
-                push_crlf(&mut h, &cmdline::render(cmd, &self.theme));
+                // The command is GLIMPS-rendered display: strip any control
+                // bytes (BUG #2 — a raw ESC/C0 in the captured command would
+                // otherwise escape our own chrome line), then convert any
+                // newline to CRLF for the raw terminal.
+                let safe = cmdline::sanitize_display(cmd);
+                push_crlf(&mut h, &cmdline::render(&safe, &self.theme));
                 if let Some(ts) = self.timestamp() {
                     h.extend_from_slice(dim);
                     h.extend_from_slice(b"  ");

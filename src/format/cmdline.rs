@@ -122,6 +122,38 @@ fn is_env_assignment(word: &str) -> bool {
     }
 }
 
+/// Neutralize control bytes that are unsafe inside a single-line, GLIMPS-authored
+/// display line (the `▌` command header, the `moved to <cwd>` breadcrumb, the
+/// `command failed: <cmd>` footer). A captured command or cwd can carry raw
+/// `ESC`/C0 controls — planted by a forged marker or a maliciously named
+/// file/dir — which, emitted verbatim inside GLIMPS's own trusted-looking
+/// chrome, would move the cursor, clear the screen, or inject an OSC-8 link
+/// (BUG #2). Any run of control bytes (`0x00..=0x1F`, which includes ESC, CR,
+/// LF and TAB — a header is one line — plus DEL `0x7F`) collapses to a single
+/// space, keeping the visible text readable and on one line.
+///
+/// Byte-safe on arbitrary input: control bytes are all single-byte ASCII, so
+/// dropping them can never split a multibyte UTF-8 sequence, and it never
+/// panics. This must ONLY be applied to GLIMPS-generated chrome — never to
+/// pass-through output.
+pub(crate) fn sanitize_display(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut in_control_run = false;
+    for &b in bytes {
+        if b <= 0x1F || b == 0x7F {
+            // Collapse a run of control bytes into one space.
+            if !in_control_run {
+                out.push(b' ');
+                in_control_run = true;
+            }
+        } else {
+            out.push(b);
+            in_control_run = false;
+        }
+    }
+    out
+}
+
 fn paint(out: &mut Vec<u8>, color: &str, text: &[u8], reset: &str) {
     out.extend_from_slice(color.as_bytes());
     out.extend_from_slice(text);
@@ -176,6 +208,25 @@ mod tests {
         assert_eq!(first_word(b"sudo").as_deref(), None); // only a wrapper
     }
 
+    #[test]
+    fn sanitize_display_strips_controls_keeps_text() {
+        // Each control byte (ESC, C0, DEL) is neutralized; a run collapses to
+        // one space. Only the control bytes go: the `[2J` printables of a CSI
+        // survive, but with their ESC gone they can no longer act.
+        assert_eq!(sanitize_display(b"clear\x1b[2J"), b"clear [2J".to_vec());
+        assert_eq!(
+            sanitize_display(b"a\x00\x07\x1b\x7fb"), // run of controls -> one space
+            b"a b".to_vec()
+        );
+        assert_eq!(
+            sanitize_display(b"line1\r\nline2"), // CR/LF are controls -> one space
+            b"line1 line2".to_vec()
+        );
+        // Normal printable text (incl. multibyte UTF-8) is untouched.
+        assert_eq!(sanitize_display(b"echo hi"), b"echo hi".to_vec());
+        assert_eq!("café ▌".as_bytes(), sanitize_display("café ▌".as_bytes()));
+    }
+
     proptest::proptest! {
         /// Byte-safety: with the plain theme, coloring is the identity — no input
         /// byte is ever dropped, reordered, or altered; and it never panics.
@@ -188,6 +239,14 @@ mod tests {
         #[test]
         fn prop_first_word_never_panics(cmd: Vec<u8>) {
             let _ = first_word(&cmd);
+        }
+
+        /// sanitize_display never panics and never emits a control byte; on
+        /// arbitrary input the output holds no `0x00..=0x1F` or `0x7F`.
+        #[test]
+        fn prop_sanitize_display_removes_all_controls(bytes: Vec<u8>) {
+            let out = sanitize_display(&bytes);
+            proptest::prop_assert!(out.iter().all(|&b| b > 0x1F && b != 0x7F));
         }
     }
 }

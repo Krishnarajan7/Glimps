@@ -41,10 +41,21 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<i32> {
         })
         .context("failed to open pty")?;
 
-    // Spawn the shell as a login shell on the slave side, marking the
-    // environment so a nested GLIMPS won't re-wrap (see main.rs guard).
+    // Spawn the shell as an *interactive* (not login) shell on the slave side,
+    // marking the environment so a nested GLIMPS won't re-wrap (see main.rs
+    // guard). `-i`, not `-l`, on purpose:
+    //   * The outer shell (the one whose rc `exec`s us) already sourced the login
+    //     files (`.zprofile`/`.bash_profile`/`.zlogin`) and we inherit its whole
+    //     environment. A login inner shell would re-run those files — doubling
+    //     PATH edits, banners, and startup work every session. An interactive
+    //     shell re-runs only the interactive rc (`.zshrc`/`.bashrc`), once.
+    //   * bash reads `.bashrc` for an interactive shell but `.bash_profile` for a
+    //     login one — and the integration line lives in `.bashrc`. `-i` is what
+    //     makes the inner bash actually load the hooks.
+    // The shell is interactive anyway (its stdio is this PTY); `-i` just makes it
+    // explicit and picks the right rc file.
     let mut cmd = CommandBuilder::new(shell);
-    cmd.arg("-l");
+    cmd.arg("-i");
     cmd.env("GLIMPS_ACTIVE", "1");
     if let Ok(cwd) = std::env::current_dir() {
         cmd.cwd(cwd);
