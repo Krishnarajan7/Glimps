@@ -1,8 +1,11 @@
 # GLIMPS Launch Hardening Checklist
 
-This is the working checklist for taking GLIMPS from a strong local beta to a
-public beta that strangers can install without us hand-holding them. Keep this
-file honest: mark an item done only after it is verified on the current code.
+This is the working checklist for taking GLIMPS from "good on our machines" to
+"safe for strangers to try." Keep this file honest: mark an item done only after
+it is verified on the current code.
+
+The checklist is intentionally plain. It is here to prevent launch excitement
+from turning into install surprises.
 
 Legend: todo / in progress / done
 
@@ -62,6 +65,10 @@ Legend: todo / in progress / done
 
 - todo: Create or verify `Krishnarajan7/homebrew-tap`.
 - todo: Add the required GitHub secret for Homebrew publishing.
+- done: Add a repo-local release-readiness preflight script that does not
+  install GLIMPS globally or start an interactive session.
+- done: Add a public-beta release runbook for preflight, dogfood, demo,
+  Homebrew, release candidate, public tag, and rollback.
 - todo: Run the release workflow from a test tag.
 - todo: Confirm generated macOS arm64, macOS x64, Linux arm64, and Linux x64
   artifacts.
@@ -88,6 +95,7 @@ Legend: todo / in progress / done
   `docs/COMPETITIVE_PRODUCT_GAP_ANALYSIS.md`.
 - done: Add semantic HTML colors for delimiters, element names, attributes,
   quoted values, and raw CSS/JS/title text.
+- done: Add a repo-local demo rendering script for `demo/glimps.tape`.
 - todo: Generate and commit the demo GIF from `demo/glimps.tape`.
 - done: Add a short "known beta limits" section to the README.
 - done: Add examples for JSON, HTML, logs, HTTP, diff, and stack traces.
@@ -130,8 +138,10 @@ Legend: todo / in progress / done
 - done: Add a pull request template with safety and verification prompts.
 - todo: Add labels for `good first issue`, `formatter`, `command-aware`,
   `safety`, `docs`, and `release`.
-- todo: Create at least 10 scoped beginner issues from the competitive gap
-  analysis.
+- done: Draft 10 scoped beginner issue specs from the competitive gap analysis
+  in `docs/GOOD_FIRST_ISSUES.md`.
+- todo: Create live GitHub issues from `docs/GOOD_FIRST_ISSUES.md` after labels
+  exist.
 - done: Add a formatter design guide for contributors.
 
 ## 7. Later, Not Public-Beta Blocking

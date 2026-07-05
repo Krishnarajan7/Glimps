@@ -2,15 +2,16 @@
 
 Date: 2026-07-04
 
-Goal: make GLIMPS feel like a complete product, not just a clever PTY formatter.
-The product bet is simple: competitors are excellent at explicit commands or
-manual pipes; GLIMPS should make the same quality appear automatically in the
-user's normal shell session.
+Goal: make GLIMPS feel like a product people can trust, not just a clever PTY
+trick. The bet is simple: the best terminal tools are excellent when you
+remember to call them. GLIMPS should bring that kind of clarity to the shell
+session you were already using.
 
 ## Positioning
 
-GLIMPS should not become another `bat`, `delta`, `eza`, `fx`, `lnav`, `grc`, or
-ChromaTerm clone. The win is to be the automatic session layer:
+GLIMPS should not become a clone of `bat`, `delta`, `eza`, `fx`, `lnav`, `grc`,
+or ChromaTerm. Those tools have their own jobs. GLIMPS wins only if it becomes
+the automatic session layer:
 
 - no command replacement required;
 - no remembered pipe required;
@@ -46,8 +47,9 @@ Sources:
 
 ### 1. Command Awareness
 
-The shell integration already captures the command and post-command cwd. Use that
-for command-specific output, but only when it is safe:
+The shell integration already captures the command and post-command cwd. That is
+useful context, but it is not permission to color everything. Use it when the
+command and the output shape agree:
 
 - `cd`: show cwd breadcrumb after successful silent directory changes.
 - `find`: color path segments and filenames.
@@ -60,24 +62,26 @@ for command-specific output, but only when it is safe:
   codes, and file paths; deeper diff/stat polish remains open.
 
 Rule: if a command formatter cannot prove the shape, it must pass through.
+Looking helpful is not worth being wrong.
 
 ### 2. Content Format Depth
 
-Current: JSON, HTML, logs, HTTP status, HTTP responses, diffs, stack traces,
-Markdown project files, and YAML/TOML/INI/dotenv-style config files through
-reader commands, CSV/TSV table coloring, SQL query coloring, and JSON-lines
-stream coloring. Common source-code extensions also get lightweight syntax
-coloring through reader commands. Common database CLI result tables get
-value-aware table coloring. Git status, branch, log, stat, numstat, and
-name-status output gets developer-focused coloring.
+Current: GLIMPS handles JSON, HTML, logs, HTTP status lines, full HTTP
+responses, diffs, stack traces, Markdown project files, YAML/TOML/INI/dotenv
+config files, CSV/TSV tables, SQL query files, JSON-lines, common source files,
+database result tables, and common Git output.
+
+That is already enough to feel useful in real work. The next step is depth, not
+random breadth.
 
 Next:
 
 - Broader source-code highlighting depth, including more languages, multiline
   parser state, and command output that is clearly code but lacks a filename.
 
-Rule: source-code and Markdown should use a proven syntax/highlight library when
-the dependency/security story is acceptable.
+Rule: source-code and Markdown should use a proven syntax/highlight library only
+when the dependency and security story is acceptable. A heavy dependency is not
+free just because it makes a demo pretty.
 
 ### 3. Premium Terminal UX
 

@@ -1,14 +1,15 @@
-# GLIMPS — Versioned Roadmap
+# GLIMPS - Versioned Roadmap
 
-The releasing strategy is deliberate: **first make it solve YOUR exact problem end-to-end
-(v0.1), then widen it into the full product (v1.0), then scale.** Each version is a thing a
-user can actually install and benefit from — no half-states shipped.
+The release strategy is deliberate: first solve the original problem end to end,
+then widen into a product other people can trust, then scale. Each version should
+be something a real user can install and benefit from. No half-states shipped as
+launches.
 
 Legend: ☐ todo ◐ in progress ☑ done
 
 ---
 
-## v0.1 — "Scratch the itch" (private / your machine)
+## v0.1 - "Scratch the itch" (private / your machine)
 Goal: **you can tell input from output, and long JSON/HTML is readable.** Mac + zsh only.
 This is the version that fixes the problem you started with.
 
@@ -27,7 +28,7 @@ This is the version that fixes the problem you started with.
 
 Exit criteria: you use it daily for a week without turning it off.
 
-## v0.2 — Safety & breadth (still local / early testers)
+## v0.2 - Safety And Breadth (still local / early testers)
 Goal: it never gets in the way, on any command.
 
 - ☑ Interactive bypass (vim, htop, less, fzf, ssh, …) — pass through untouched
@@ -48,7 +49,7 @@ Goal: it never gets in the way, on any command.
 
 Exit criteria: zero interference on the top 50 common commands.
 
-## v0.3 — Robustness & config
+## v0.3 - Robustness And Config
 Goal: trustworthy enough to hand to strangers.
 
 - ◐ `.glimpsrc` (TOML): thresholds, enable/disable per type, color/separator/
@@ -64,15 +65,16 @@ Goal: trustworthy enough to hand to strangers.
 
 Exit criteria: CI green on Linux + macOS; latency budget held.
 
-## v1.0 — Public launch
-Goal: `brew install glimps`, a README that sells it, and a demo GIF that spreads.
+## v1.0 - Public Launch
+Goal: a clean install path, a README that explains the value quickly, and a demo
+GIF people can understand without a private walkthrough.
 
 - ◐ Homebrew formula + prebuilt binaries via `cargo-dist` + release CI
       (configured: `dist-workspace.toml` + `.github/workflows/release.yml` build
       macOS+Linux binaries, a shell installer, and a Homebrew formula on version
       tags. To go live: create the `Krishnarajan7/homebrew-tap` repo + token secret,
       bump the version, and push a `vX.Y.Z` tag.)
-- ◐ Polished README (done) with an animated before/after demo GIF — tooling done
+- ◐ Polished README (done) with an animated before/after demo GIF - tooling done
       (`demo/glimps.tape` + `demo/README.md`, self-contained VHS script); the GIF
       itself just needs `vhs demo/glimps.tape` run on a machine with VHS installed
 - ☑ Docs: install, config, safety/privacy statement, uninstall (README + `.glimpsrc.example`)
@@ -84,9 +86,10 @@ Goal: `brew install glimps`, a README that sells it, and a demo GIF that spreads
       pin exit/Ctrl-D/SIGTERM termination and live JSON-format / binary-passthrough.
 - ☐ Launch: Show HN, r/commandline, r/rust, Lobsters
 
-Exit criteria: a stranger installs it in <30s and it "just works."
+Exit criteria: a stranger installs it from a verified release path and it "just
+works."
 
-## v1.x — Scale & reach (post-launch, demand-driven)
+## v1.x - Scale And Reach (post-launch, demand-driven)
 - ☐ Mixed-content segmentation (the multi-format screenshot case)
 - ☐ URL highlighting / clickable hyperlinks (OSC 8)
 - ☐ Error-line pinning / summary panel for long output
@@ -96,7 +99,7 @@ Exit criteria: a stranger installs it in <30s and it "just works."
       coloring, hunk-anchored detection) and **stack traces ☑** (Rust panics +
       Python tracebacks, streaming); YAML, CSV, SQL still ☐
 
-## v2.0 — Ambition (only if v1 has real traction)
+## v2.0 - Ambition (only if v1 has real traction)
 - ☐ Optional, **local/offline**, opt-in AI output summarization (privacy-preserving)
 - ☐ Plugin API for community formatters
 - ☐ Per-project / per-directory config profiles
@@ -104,7 +107,7 @@ Exit criteria: a stranger installs it in <30s and it "just works."
 ---
 
 ## Notes
-- Anything that can't be turned off, or that risks corrupting output, does not ship — see
+- Anything that can't be turned off, or that risks corrupting output, does not ship - see
   the invariants in `docs/SAFETY_INVARIANTS.md`.
 - Public-beta hardening work is tracked in `docs/LAUNCH_HARDENING_CHECKLIST.md`.
 - Cut without guilt if v1 slips: mixed-content segmentation and URL hyperlinking are the

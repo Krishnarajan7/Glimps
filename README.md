@@ -1,28 +1,31 @@
 # GLIMPS
 
-**Zero-config smart terminal output formatter.** GLIMPS runs your shell inside a
-PTY it owns and does two things automatically: it shows **where your input is** —
-repeating your command, syntax-colored, right above its output — and it
-**reformats recognized content** (JSON, HTML, logs, HTTP status) with structure
-and color. No manual piping, no flags, no remembering what's coming.
+**Zero-config smart terminal output formatter.** GLIMPS wraps your shell in a
+PTY and quietly improves the scrollback you already have. It repeats your
+command above its output so you can find what you ran, then formats output it
+recognizes: JSON, HTML, logs, HTTP responses, diffs, stack traces, Git output,
+tables, and common project files. No manual piping, no flags, no guessing what
+kind of output is coming.
 
 > Status: **beta** — functional and heavily tested. macOS + zsh today; Linux is a
 > supported build target (CI covers Linux + macOS). Builds and runs **identically
 > on Apple Silicon and Intel Macs** — same install, no architecture-specific
 > steps. Homebrew packaging and broader shell support are on the roadmap.
 
-<!-- DEMO: render demo/glimps.tape with VHS (see demo/README.md) to produce
-     demo/glimps.gif, then replace this comment with:
+<!-- DEMO: run scripts/render-demo.sh (see demo/README.md) to produce
+     demo/glimps.gif from demo/glimps.tape, then replace this comment with:
      ![GLIMPS in action](demo/glimps.gif)
      The static example below is the same idea. -->
 
 ## What it looks like
 
-The problem GLIMPS was built to solve first: in a long scrollback you can't find
-your own command. So before a command's output, GLIMPS prints a **header bar** —
-your command, repeated and syntax-colored — so your input is never lost in the
-wall of output. When it also recognizes the output (here, JSON), it pretty-prints
-it with a content badge:
+The first problem GLIMPS solves is painfully ordinary: after a few commands,
+scrollback turns into a wall. You know you ran the thing, but finding where its
+output began is annoying.
+
+So GLIMPS prints a small **header bar** before command output. The command is
+repeated there, syntax-colored, with an optional timestamp. If the output is a
+known format, GLIMPS also makes it readable. Here is the basic idea with JSON:
 
 ```
 $ curl -s api.example.com/user
@@ -36,23 +39,15 @@ $ curl -s api.example.com/user
 }
 ```
 
-The `▌` line is GLIMPS marking where output begins (command name, strings, and
-flags each colored); the timestamp is optional. Logs get severity coloring as
-they stream (great for `tail -f`); HTTP status lines are colored by class; long
-HTML becomes an indented tree; unified diffs get added/removed/hunk coloring;
-common commands like `cd`, `find`, `ls`, `du`, `df`, `ps`, `dig`, and `man` get
-command-aware polish; `cat README.md`, `cat Cargo.toml`, `cat data.csv`,
-`cat schema.sql`, `cat events.jsonl`, and `cat src/main.rs` style project files
-get Markdown/config/table/SQL/JSON-lines/source-code coloring; database result
-tables from tools like `sqlite3`, `psql`, and `mysql` get value-aware table
-coloring; Git status, branch, log, and stat output gets developer-focused
-coloring; and stack traces / panics are highlighted so the failure jumps out.
-Commands also get a compact
-completion footer with exit code and duration, and non-zero exits get a visible
-failure summary. Anything GLIMPS
-doesn't recognize — `vim`, `ssh`, **a binary file** — passes through **exactly**
-as it would without GLIMPS (binary and already-colored output are detected and
-never touched).
+The `▌` line is GLIMPS marking where output begins. Logs get severity coloring
+as they stream. HTTP responses are split into status, headers, cookies,
+redirects, and body. Long HTML becomes an indented tree. Diffs, stack traces,
+Git output, CSV/TSV, SQL, JSON-lines, source files, config files, and database
+tables get focused formatting too.
+
+Just as important: output GLIMPS should not touch is left alone. Full-screen
+apps like `vim`, SSH sessions, binary output, and already-colored output pass
+through as normal. If GLIMPS is not confident, it gets out of the way.
 
 Try these inside a GLIMPS session:
 
@@ -95,13 +90,14 @@ git --no-pager diff -- README.md
 
 ## Why
 
-Terminal output is a flat monochrome wall. Scroll up after a few commands and you
-can't tell where your command ended and its output began — let alone read a 200-line
-JSON blob. Tools like `jq`, `bat`, and `glow` each fix one format but make you know
-what's coming and pipe it yourself. GLIMPS does it automatically, for everything,
-transparently: it marks your input with a colored command header and reformats the
-output it recognizes — because it sits on the output stream itself, not behind a
-manual pipe.
+Most terminal helpers ask you to predict the output first. Use `jq` if it is
+JSON. Use `bat` if it is a file. Use a pager or a Git tool if you remembered in
+time. Those tools are great, but the normal shell loop is messier than that.
+
+GLIMPS lives one layer lower. It sees the command output as it happens, marks the
+boundary, and formats only the parts it understands. The goal is not to replace
+your favorite CLI tools. The goal is to make the default terminal experience
+less punishing when you did not know you needed them.
 
 ## Try Without Installing
 
@@ -259,8 +255,10 @@ ends, and reformats only that — never your prompt or input. Full rationale in
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Contributor setup and review expectations |
 | [`docs/COMPETITIVE_PRODUCT_GAP_ANALYSIS.md`](./docs/COMPETITIVE_PRODUCT_GAP_ANALYSIS.md) | Competitor lessons and product gap roadmap |
 | [`docs/FORMATTER_DESIGN_GUIDE.md`](./docs/FORMATTER_DESIGN_GUIDE.md) | Rules for adding safe formatters |
+| [`docs/GOOD_FIRST_ISSUES.md`](./docs/GOOD_FIRST_ISSUES.md) | Copy-ready beginner issue specs |
 | [`docs/LAUNCH_HARDENING_CHECKLIST.md`](./docs/LAUNCH_HARDENING_CHECKLIST.md) | Public-beta hardening checklist |
 | [`docs/FRESH_MAC_DOGFOOD.md`](./docs/FRESH_MAC_DOGFOOD.md) | Fresh-machine dogfood procedure |
+| [`docs/PUBLIC_BETA_RELEASE_RUNBOOK.md`](./docs/PUBLIC_BETA_RELEASE_RUNBOOK.md) | Maintainer release and Homebrew verification runbook |
 | [`docs/SAFETY_INVARIANTS.md`](./docs/SAFETY_INVARIANTS.md) | Public safety invariants |
 | `src/pty.rs` | The PTY supervisor |
 | `src/format/` | All output transforms (the one formatting seam) |
@@ -271,6 +269,7 @@ ends, and reformats only that — never your prompt or input. Full rationale in
 cargo build --release
 cargo test --all          # unit + property + golden + corpus tests
 cargo bench               # latency benchmarks
+scripts/release-readiness.sh
 ```
 
 ## License

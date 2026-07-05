@@ -1,7 +1,8 @@
 # GLIMPS demo tape — for VHS (https://github.com/charmbracelet/vhs)
 #
-# Render:   vhs demo/glimps.tape      ->  produces demo/glimps.gif
-# Needs:    `glimps` on PATH (cargo install --path .) and `vhs` installed.
+# Render:   scripts/render-demo.sh    ->  produces demo/glimps.gif
+# Needs:    `cargo`, `zsh`, and `vhs`. The script builds the repo-local binary
+#           and places target/debug on PATH for the render process only.
 #
 # It is fully self-contained: it writes the GLIMPS integration into a throwaway
 # zsh config and starts a wrapped shell, so it does NOT depend on your ~/.zshrc

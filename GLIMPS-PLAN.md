@@ -1,4 +1,10 @@
-# GLIMPS — R&D Findings & Full Setup Plan
+# GLIMPS - R&D Findings And Setup Plan
+
+> Historical note: this was the original research memo for GLIMPS. Keep it
+> around because it explains why the project uses a PTY supervisor instead of a
+> shell hook. For current install, release, and dogfood instructions, use
+> `README.md`, `docs/FRESH_MAC_DOGFOOD.md`, and
+> `docs/PUBLIC_BETA_RELEASE_RUNBOOK.md`.
 
 > Smart, zero-config terminal output formatter (formerly "Pipelight" in your doc).
 > This file is my full research + build plan. Read it top to bottom, then we decide.
@@ -141,15 +147,21 @@ Core language: **Rust** (keep — the doc is right).
 
 ---
 
-## 6. Corrected install experience
+## 6. Corrected Install Experience
 
 ```bash
-# Step 1 — install
-brew install glimps
+# Current source install
+git clone https://github.com/Krishnarajan7/Glimps
+cd Glimps
+cargo install --path .
 
-# Step 2 — enable (one line; this re-execs your shell under GLIMPS once per session)
-echo 'eval "$(glimps init zsh)"' >> ~/.zshrc
+# Enable zsh integration after installing the binary
+echo 'command -v glimps >/dev/null 2>&1 && eval "$(glimps init zsh)"' >> ~/.zshrc
 ```
+
+The original plan assumed Homebrew would be the launch install path. That is
+still the goal, but it should not be advertised until the tap has been tested
+from a real release tag.
 
 `glimps init zsh` prints a tiny snippet that:
 - checks if we're already inside a GLIMPS PTY (avoid infinite nesting),
@@ -157,6 +169,7 @@ echo 'eval "$(glimps init zsh)"' >> ~/.zshrc
 - installs the OSC-133 prompt markers so GLIMPS can tell command-input from command-output.
 
 Still two steps. Still "restart terminal, done." But honest about the mechanism.
+For a no-install test, use `scripts/dogfood-macos.sh session` instead.
 
 ---
 

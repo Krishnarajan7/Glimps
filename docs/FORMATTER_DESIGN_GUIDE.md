@@ -1,15 +1,18 @@
 # GLIMPS Formatter Design Guide
 
-This guide is for contributors adding or changing output formatting. GLIMPS is a
-terminal supervisor, not a pretty-printer users invoke manually, so a formatter
-must be conservative: a missed format is acceptable; corrupting normal terminal
-output is not.
+This guide is for the person adding the next formatter. The job is not to make
+the terminal colorful for its own sake. The job is to make output easier to read
+when GLIMPS can prove what it is looking at, and to leave everything else alone.
 
-## Core Rule
+That last part matters. GLIMPS is not a command you pipe into when you feel like
+it. It sits in the session. A formatter that guesses too eagerly can ruin normal
+terminal output.
 
-If the formatter cannot prove the shape, pass through.
+## The Rule
 
-Every formatter must preserve the safety invariants in
+If you cannot prove the shape, pass through.
+
+Every formatter must keep the promises in
 [`docs/SAFETY_INVARIANTS.md`](./SAFETY_INVARIANTS.md):
 
 - never mutate prompt or typed input;
@@ -18,130 +21,136 @@ Every formatter must preserve the safety invariants in
 - keep buffering bounded;
 - keep the plain/no-color path clean and predictable.
 
-## Where Formatting Happens
+Missing a formatting opportunity is fine. Breaking a user's terminal is not.
+
+## Where Formatting Belongs
 
 All output changes go through [`src/format/mod.rs`](../src/format/mod.rs).
 
-The PTY scanner splits bytes into zones:
+The scanner divides bytes into zones:
 
-- prompt/input/markers: always pass through;
+- prompt, typed input, and markers: always pass through;
 - command output: the only zone formatters may touch.
 
-Do not add formatting in the PTY supervisor or shell integration. Add it through
-the formatter seam.
+Do not add formatting in the PTY supervisor or shell integration. Those layers
+should move bytes and preserve terminal behavior. Formatting belongs at the
+formatter boundary.
 
-## Choose The Smallest Formatter Type
+## Pick The Smallest Formatter
 
 ### Streaming Line Formatter
 
-Use this when each line can be recognized independently and output may be
-unbounded.
+Use this when each line can be recognized on its own and the output might never
+end.
 
-Examples:
+Good fits:
 
 - log severity lines;
 - HTTP status lines;
 - stack-trace lines.
 
-Implementation path:
+Usual path:
 
-- add a small recognizer in `src/format/linefmt.rs`;
-- wire it through the streaming registry only when it is a global formatter;
-- add line-level tests and rejection tests.
+- add a recognizer in `src/format/linefmt.rs`;
+- wire it through the streaming registry only if it is a global formatter;
+- add positive tests and rejection tests.
 
 ### Buffered Document Formatter
 
-Use this when the whole output run is needed before formatting.
+Use this when GLIMPS needs the whole output run before it can safely format.
 
-Examples:
+Good fits:
 
 - JSON documents;
 - HTML documents;
 - HTTP responses;
 - unified diffs.
 
-Implementation path:
+Usual path:
 
 - create or update a formatter module under `src/format/`;
 - implement `BufferedFormatter`;
 - add the formatter to `enabled_buffered` in `src/format/mod.rs`;
 - keep `could_start` cheap and conservative;
-- decline with `None` when parsing or structural proof fails.
+- return `None` when parsing or structural proof fails.
 
-Buffered formatters must respect config limits. If the output is too large or
-does not parse, GLIMPS must emit the original bytes.
+Buffered formatters must respect config limits. If output is too large,
+malformed, or incomplete, emit the original bytes.
 
 ### Command-Aware Formatter
 
-Use this when the command tells us the output shape.
+Use this when the command narrows the output shape enough to be safe.
 
-Examples:
+Good fits:
 
 - `cat README.md`;
 - `git status --short`;
 - `sqlite3` result tables;
 - `ls -la`.
 
-Implementation path:
+Usual path:
 
 - add or reuse a `CommandView` in `src/format/mod.rs`;
 - detect the command or file extension in `command_view` / `file_content_view`;
 - implement the line colorizer in `src/format/linefmt.rs`;
-- make sure unrelated command output is untouched.
+- prove unrelated command output is untouched.
 
-Command-aware formatters are often the safest way to add polish because the
-command name or file extension narrows the input shape.
+Command-aware formatting is often the safest polish because it combines two
+signals: what command ran and what shape came back.
 
-## Color And Layout Rules
+## Color And Layout
 
-- Only insert ANSI SGR escapes around existing bytes.
-- Do not wrap, align, truncate, reorder, or synthesize user output unless the
-  formatter is explicitly a structural document renderer such as JSON/HTML.
+- Only insert ANSI SGR escapes around existing bytes unless the formatter is a
+  structural renderer such as JSON or HTML.
+- Do not wrap, align, truncate, reorder, or invent user output unless that is the
+  explicit behavior of the formatter.
 - Preserve line endings. CRLF input must not become doubled CRLF.
-- Keep colors semantic and reused from `Theme`.
-- With `Theme::plain()`, output should be byte-identical for color-only
-  formatters.
+- Reuse colors from `Theme`; do not make each formatter invent its own palette.
+- With `Theme::plain()`, color-only formatters should be byte-identical.
 
-## Required Tests
+## Tests We Expect
 
 For every formatter change, add focused tests in
 [`src/format/tests.rs`](../src/format/tests.rs) or the formatter module.
 
-Minimum coverage:
+Minimum useful coverage:
 
-- positive sample: recognized output is colored or structured;
-- rejection sample: similar-looking non-target output passes through;
-- line ending sample when the formatter touches CRLF-sensitive output;
-- plain theme identity when the formatter is color-only;
-- split/chunk behavior when the formatter depends on streaming boundaries.
+- a positive sample: recognized output is colored or structured;
+- a rejection sample: similar-looking non-target output passes through;
+- a line-ending sample when CRLF could be affected;
+- a plain-theme identity test for color-only formatters;
+- a split/chunk test when streaming boundaries matter.
 
-For buffered formatters, also test malformed or incomplete input declines.
+For buffered formatters, malformed and incomplete input should decline.
 
 For command-aware formatters, test through the OSC-133 command marker helpers so
 the real dispatch path is covered.
 
 ## Manual Dogfood
 
-Before marking a visual formatter complete, add a command to
-[`scripts/dogfood-macos.sh`](../scripts/dogfood-macos.sh) when it is useful for
-manual verification. The dogfood script must stay non-invasive:
+If a visual change is worth shipping, it is worth trying in a real GLIMPS
+session. Add a command to
+[`scripts/dogfood-macos.sh`](../scripts/dogfood-macos.sh) when it helps manual
+review.
+
+That script must stay non-invasive:
 
 - no global install;
 - no edits to `~/.zshrc`;
-- no login shell changes.
+- no login-shell changes.
 
-## Review Checklist
+## Before Opening A PR
 
-Before opening a PR:
+Check the basics:
 
-- The formatter has a clear proof of shape.
-- False positives are tested.
-- Binary and already-colored output are not newly touched.
-- Buffering remains bounded.
-- `cargo fmt --all -- --check` passes.
-- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- the formatter has a clear proof of shape;
+- false positives are tested;
+- binary and already-colored output are not newly touched;
+- buffering remains bounded;
+- `cargo fmt --all -- --check` passes;
+- `cargo clippy --all-targets --all-features -- -D warnings` passes;
 - `cargo test --all --all-features` passes.
 
-Small, narrow formatter PRs are preferred. If a change touches PTY lifecycle,
-terminal raw mode, or OSC-133 scanning, it is no longer a simple formatter PR and
-needs extra integration-test coverage.
+Small formatter PRs are easier to review and safer to ship. If a change touches
+PTY lifecycle, terminal raw mode, or OSC-133 scanning, it is no longer a simple
+formatter PR; give it integration coverage and a very clear explanation.

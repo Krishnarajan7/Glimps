@@ -31,6 +31,9 @@ tmp/
 # Local binary/product scratch docs
 *.docx
 
-# Generated demo media; keep source tapes/docs tracked
-/demo/*.gif
+# Generated demo scratch media; keep source tapes/docs tracked.
+#
+# Do not ignore /demo/glimps.gif: that is the reviewed README demo artifact once
+# rendered for release.
+/demo/*.draft.gif
 /demo/*.mp4
