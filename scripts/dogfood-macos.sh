@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/debug/glimps"
+DOGFOOD_TMP=""
 
 usage() {
   cat <<'EOF'
@@ -53,19 +54,21 @@ run_session() {
   cd "$ROOT"
   cargo build
 
-  local tmp
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/glimps-dogfood.XXXXXX")"
+  DOGFOOD_TMP="$(mktemp -d "${TMPDIR:-/tmp}/glimps-dogfood.XXXXXX")"
   cleanup() {
-    rm -rf "$tmp"
+    if [[ -n "${DOGFOOD_TMP:-}" ]]; then
+      rm -rf "$DOGFOOD_TMP"
+      DOGFOOD_TMP=""
+    fi
   }
   trap cleanup EXIT
 
-  cat >"$tmp/.zshrc" <<EOF
+  cat >"$DOGFOOD_TMP/.zshrc" <<EOF
 export PROMPT='glimps-dogfood %~ %# '
 eval "\$("$BIN" init zsh)"
 EOF
 
-  cat >"$tmp/.glimpsrc" <<'EOF'
+  cat >"$DOGFOOD_TMP/.glimpsrc" <<'EOF'
 enabled = true
 color = true
 separator = true
@@ -117,7 +120,7 @@ Try these commands:
 Exit with: exit
 EOF
 
-  ZDOTDIR="$tmp" HOME="$tmp" GLIMPSRC="$tmp/.glimpsrc" SHELL="$(command -v zsh)" "$BIN"
+  ZDOTDIR="$DOGFOOD_TMP" HOME="$DOGFOOD_TMP" GLIMPSRC="$DOGFOOD_TMP/.glimpsrc" SHELL="$(command -v zsh)" "$BIN"
 }
 
 main() {

@@ -190,6 +190,10 @@ pub struct Formatter {
     /// Complete output lines seen for this command. Used by command-aware
     /// project-file formatters that treat the first row as a header.
     command_output_line_count: usize,
+    /// Fenced code language while streaming a Markdown file. This lets
+    /// `cat README.md` color all lines inside ```bash / ```rust blocks
+    /// consistently instead of treating each line as unrelated prose.
+    markdown_fence: Option<linefmt::CodeLanguage>,
     /// Whether the previous chunk left a full-screen TUI on the alternate screen.
     /// Tracked so the chunk that *exits* alt-screen is also passed through.
     was_alt_screen: bool,
@@ -237,6 +241,7 @@ impl Formatter {
             command_started_at: None,
             command_had_visible_output: false,
             command_output_line_count: 0,
+            markdown_fence: None,
             was_alt_screen: false,
             buffered,
             streaming,
@@ -335,6 +340,7 @@ impl Formatter {
                     self.command_started_at = Some(Instant::now());
                     self.command_had_visible_output = false;
                     self.command_output_line_count = 0;
+                    self.markdown_fence = None;
                     let bypass = self
                         .pending_command
                         .as_deref()
@@ -354,6 +360,7 @@ impl Formatter {
                     self.command_started_at = None;
                     self.command_had_visible_output = false;
                     self.command_output_line_count = 0;
+                    self.markdown_fence = None;
                 }
             }
         }
@@ -472,7 +479,6 @@ impl Formatter {
             return;
         };
         self.emit_header(out);
-        out.extend_from_slice(&render_badge("CD", self.config.color));
         let color = if self.config.color {
             self.theme.info
         } else {
@@ -503,6 +509,9 @@ impl Formatter {
         };
         let failed = exit_code != 0;
         if !failed && !self.command_had_visible_output {
+            return;
+        }
+        if !failed && is_command(&self.pending_command, b"cd") {
             return;
         }
 
@@ -587,7 +596,7 @@ impl Formatter {
         self.command_output_line_count += 1;
     }
 
-    fn format_command_line(&self, line: &[u8]) -> Option<Vec<u8>> {
+    fn format_command_line(&mut self, line: &[u8]) -> Option<Vec<u8>> {
         match command_view(&self.pending_command)? {
             CommandView::Find => linefmt::colorize_find_line(line, &self.theme),
             CommandView::Ls => linefmt::colorize_ls_line(line, &self.theme),
@@ -596,7 +605,7 @@ impl Formatter {
             CommandView::Ps => linefmt::colorize_ps_line(line, &self.theme),
             CommandView::Dns => linefmt::colorize_dns_line(line, &self.theme),
             CommandView::Man => linefmt::format_man_line(line, &self.theme),
-            CommandView::Markdown => linefmt::colorize_markdown_line(line, &self.theme),
+            CommandView::Markdown => self.format_markdown_line(line),
             CommandView::Config => linefmt::colorize_config_line(line, &self.theme),
             CommandView::Delimited(delimiter) => linefmt::colorize_delimited_line(
                 line,
@@ -614,6 +623,23 @@ impl Formatter {
             CommandView::Code(lang) => linefmt::colorize_code_line(line, &self.theme, lang),
             CommandView::Git(view) => linefmt::colorize_git_line(line, &self.theme, view),
         }
+    }
+
+    fn format_markdown_line(&mut self, line: &[u8]) -> Option<Vec<u8>> {
+        if let Some(lang) = linefmt::markdown_fence_language(line) {
+            let formatted = linefmt::colorize_markdown_line(line, &self.theme);
+            self.markdown_fence = if self.markdown_fence.is_some() {
+                None
+            } else {
+                lang
+            };
+            return formatted;
+        }
+        if let Some(lang) = self.markdown_fence {
+            return linefmt::colorize_code_line(line, &self.theme, lang)
+                .or_else(|| linefmt::colorize_markdown_line(line, &self.theme));
+        }
+        linefmt::colorize_markdown_line(line, &self.theme)
     }
 
     fn pending_command_prefers_text_lines(&self) -> bool {

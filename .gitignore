@@ -31,6 +31,16 @@ tmp/
 # Local binary/product scratch docs
 *.docx
 
+# Website (site/) — Node/JS build artifacts and deps
+/site/node_modules/
+/site/dist/
+/site/build/
+/site/.vite/
+/site/.turbo/
+/site/*.tsbuildinfo
+/site/.vercel/
+/site/.wrangler/
+
 # Generated demo scratch media; keep source tapes/docs tracked.
 #
 # Do not ignore /demo/glimps.gif: that is the reviewed README demo artifact once

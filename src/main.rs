@@ -9,6 +9,22 @@ use glimps::config::Config;
 use glimps::format::Clock;
 use glimps::{init, pty};
 use std::io::{IsTerminal, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const FAREWELLS: &[&str] = &[
+    "okay, leaving. Try not to miss the readable stuff.",
+    "session packed away. Your scrollback can breathe now.",
+    "done here. Go make some beautifully readable chaos.",
+    "wrapping up. The terminal is yours again.",
+    "stepping out. Behave, raw shell.",
+    "bye for now. I left the output nicer than I found it.",
+    "all clear. No bytes were emotionally harmed.",
+    "exiting. Come back when the logs get dramatic.",
+    "session closed. The readable stuff will miss you.",
+    "leaving quietly. Well, mostly quietly.",
+    "done. If the shell looks plain now, that is on you.",
+    "signing off. May your JSON stay indented.",
+];
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -77,9 +93,20 @@ fn print_farewell(status: i32) {
     let mut stderr = std::io::stderr();
     let _ = writeln!(
         stderr,
-        "glimps: okay, leaving. Try not to miss the readable stuff."
+        "\x1b[1;36m✨ glimps:\x1b[0m {}",
+        choose_farewell(SystemTime::now())
     );
     let _ = stderr.flush();
+}
+
+fn choose_farewell(now: SystemTime) -> &'static str {
+    let nanos = now
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let pid = u128::from(std::process::id());
+    let idx = ((nanos ^ pid) as usize) % FAREWELLS.len();
+    FAREWELLS[idx]
 }
 
 fn print_help() {
@@ -98,4 +125,25 @@ fn print_help() {
          Enable in zsh:  echo 'command -v glimps >/dev/null 2>&1 && eval \"$(glimps init zsh)\"' >> ~/.zshrc",
         env!("CARGO_PKG_VERSION")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{choose_farewell, FAREWELLS};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn farewell_picker_uses_the_message_pool() {
+        let message = choose_farewell(UNIX_EPOCH + Duration::from_nanos(42));
+        assert!(FAREWELLS.contains(&message));
+    }
+
+    #[test]
+    fn farewell_pool_has_enough_variety_to_feel_alive() {
+        assert!(FAREWELLS.len() >= 10);
+        for message in FAREWELLS {
+            assert!(!message.contains("AI"));
+            assert!(!message.trim().is_empty());
+        }
+    }
 }

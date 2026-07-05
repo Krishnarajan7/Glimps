@@ -463,7 +463,7 @@ pub fn colorize_markdown_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
         return Some(paint_whole(content, ending, theme.comment, theme.reset));
     }
     if markdown_list_marker_len(trimmed).is_some() {
-        return Some(paint_prefix(content, ending, theme, trimmed, theme.warn));
+        return paint_markdown_inline(content, ending, theme, Some((trimmed, theme.warn)));
     }
     if let Some((start, end)) = fenced_code_span(content) {
         return Some(paint_span(
@@ -475,27 +475,29 @@ pub fn colorize_markdown_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
             theme.reset,
         ));
     }
-    if let Some((start, end)) = inline_code_span(content) {
-        return Some(paint_span(
-            content,
-            ending,
-            start,
-            end,
-            theme.keyword,
-            theme.reset,
-        ));
+    paint_markdown_inline(content, ending, theme, None)
+}
+
+pub fn markdown_fence_language(line: &[u8]) -> Option<Option<CodeLanguage>> {
+    let (content, _) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    let fence = if trimmed.starts_with(b"```") {
+        b"```"
+    } else if trimmed.starts_with(b"~~~") {
+        b"~~~"
+    } else {
+        return None;
+    };
+    let rest = trim_ascii(&trimmed[fence.len()..]);
+    if rest.is_empty() {
+        return Some(None);
     }
-    if let Some((start, end)) = markdown_link_label_span(content) {
-        return Some(paint_span(
-            content,
-            ending,
-            start,
-            end,
-            theme.string,
-            theme.reset,
-        ));
-    }
-    None
+    let lang = rest
+        .iter()
+        .take_while(|b| b.is_ascii_alphanumeric() || matches!(**b, b'+' | b'#' | b'-' | b'_'))
+        .copied()
+        .collect::<Vec<_>>();
+    Some(markdown_code_language(&lang))
 }
 
 /// Color YAML / TOML / INI / dotenv-style config lines.
@@ -806,25 +808,6 @@ fn paint_whole(content: &[u8], ending: &[u8], color: &str, reset: &str) -> Vec<u
     out
 }
 
-fn paint_prefix(
-    content: &[u8],
-    ending: &[u8],
-    theme: &Theme,
-    trimmed: &[u8],
-    color: &str,
-) -> Vec<u8> {
-    let offset = content.len() - trimmed.len();
-    let prefix_len = markdown_list_marker_len(trimmed).unwrap_or(2);
-    let mut out = Vec::with_capacity(content.len() + ending.len() + 16);
-    out.extend_from_slice(&content[..offset]);
-    out.extend_from_slice(color.as_bytes());
-    out.extend_from_slice(&trimmed[..prefix_len.min(trimmed.len())]);
-    out.extend_from_slice(theme.reset.as_bytes());
-    out.extend_from_slice(&trimmed[prefix_len.min(trimmed.len())..]);
-    out.extend_from_slice(ending);
-    out
-}
-
 fn paint_span(
     content: &[u8],
     ending: &[u8],
@@ -841,6 +824,83 @@ fn paint_span(
     out.extend_from_slice(&content[end..]);
     out.extend_from_slice(ending);
     out
+}
+
+fn paint_prefix(
+    content: &[u8],
+    ending: &[u8],
+    theme: &Theme,
+    trimmed: &[u8],
+    color: &str,
+) -> Vec<u8> {
+    let offset = content.len() - trimmed.len();
+    let prefix_len = markdown_list_marker_len(trimmed).unwrap_or(2);
+    let prefix_end = offset + prefix_len.min(trimmed.len());
+    let mut out = Vec::with_capacity(content.len() + ending.len() + 16);
+    out.extend_from_slice(&content[..offset]);
+    out.extend_from_slice(color.as_bytes());
+    out.extend_from_slice(&content[offset..prefix_end]);
+    out.extend_from_slice(theme.reset.as_bytes());
+    out.extend_from_slice(&content[prefix_end..]);
+    out.extend_from_slice(ending);
+    out
+}
+
+fn paint_markdown_inline(
+    content: &[u8],
+    ending: &[u8],
+    theme: &Theme,
+    prefix: Option<(&[u8], &str)>,
+) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(content.len() + ending.len() + 96);
+    let mut i = 0;
+    let mut colored_any = false;
+    if let Some((trimmed, color)) = prefix {
+        let offset = content.len() - trimmed.len();
+        let prefix_len = markdown_list_marker_len(trimmed).unwrap_or(2);
+        let prefix_end = offset + prefix_len.min(trimmed.len());
+        out.extend_from_slice(&content[..offset]);
+        out.extend_from_slice(color.as_bytes());
+        out.extend_from_slice(&content[offset..prefix_end]);
+        out.extend_from_slice(theme.reset.as_bytes());
+        i = prefix_end;
+        colored_any = true;
+    }
+
+    while i < content.len() {
+        if let Some(end) = markdown_html_comment_end(content, i) {
+            paint_bytes(&mut out, theme.comment, &content[i..end], theme.reset);
+            colored_any = true;
+            i = end;
+        } else if let Some(end) = markdown_inline_code_end(content, i) {
+            paint_bytes(&mut out, theme.keyword, &content[i..end], theme.reset);
+            colored_any = true;
+            i = end;
+        } else if let Some(end) = markdown_strong_end(content, i) {
+            paint_bytes(&mut out, theme.string, &content[i..end], theme.reset);
+            colored_any = true;
+            i = end;
+        } else if let Some((label_end, url_end)) = markdown_link_end(content, i) {
+            paint_bytes(&mut out, theme.string, &content[i..label_end], theme.reset);
+            paint_bytes(
+                &mut out,
+                theme.debug,
+                &content[label_end..url_end],
+                theme.reset,
+            );
+            colored_any = true;
+            i = url_end;
+        } else {
+            out.push(content[i]);
+            i += 1;
+        }
+    }
+
+    if !colored_any {
+        return None;
+    }
+    out.extend_from_slice(ending);
+    Some(out)
 }
 
 fn heading_marker_len(bytes: &[u8]) -> Option<usize> {
@@ -884,16 +944,66 @@ fn fenced_code_span(bytes: &[u8]) -> Option<(usize, usize)> {
     (trimmed.starts_with(b"```") || trimmed.starts_with(b"~~~")).then_some((offset, bytes.len()))
 }
 
-fn inline_code_span(bytes: &[u8]) -> Option<(usize, usize)> {
-    let start = bytes.iter().position(|&b| b == b'`')?;
+fn markdown_inline_code_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'`') {
+        return None;
+    }
     let end_rel = bytes[start + 1..].iter().position(|&b| b == b'`')?;
-    Some((start, start + 2 + end_rel))
+    Some(start + 2 + end_rel)
 }
 
-fn markdown_link_label_span(bytes: &[u8]) -> Option<(usize, usize)> {
-    let start = bytes.iter().position(|&b| b == b'[')?;
+fn markdown_strong_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let marker = match (bytes.get(start), bytes.get(start + 1)) {
+        (Some(b'*'), Some(b'*')) => b"**",
+        (Some(b'_'), Some(b'_')) => b"__",
+        _ => return None,
+    };
+    let end_rel = bytes[start + 2..]
+        .windows(2)
+        .position(|window| window == marker)?;
+    Some(start + 4 + end_rel)
+}
+
+fn markdown_link_end(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    if bytes.get(start) != Some(&b'[') {
+        return None;
+    }
     let close = bytes[start + 1..].iter().position(|&b| b == b']')? + start + 1;
-    (bytes.get(close + 1) == Some(&b'(')).then_some((start, close + 1))
+    if bytes.get(close + 1) != Some(&b'(') {
+        return None;
+    }
+    let url_close = bytes[close + 2..].iter().position(|&b| b == b')')? + close + 2;
+    Some((close + 1, url_close + 1))
+}
+
+fn markdown_html_comment_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if !bytes[start..].starts_with(b"<!--") {
+        return None;
+    }
+    let end_rel = bytes[start + 4..]
+        .windows(3)
+        .position(|window| window == b"-->")?;
+    Some(start + 7 + end_rel)
+}
+
+fn markdown_code_language(lang: &[u8]) -> Option<CodeLanguage> {
+    let lower = lang.to_ascii_lowercase();
+    match lower.as_slice() {
+        b"bash" | b"sh" | b"shell" | b"zsh" | b"fish" | b"console" => Some(CodeLanguage::Shell),
+        b"rust" | b"rs" => Some(CodeLanguage::Rust),
+        b"python" | b"py" => Some(CodeLanguage::Python),
+        b"javascript" | b"js" | b"jsx" => Some(CodeLanguage::JavaScript),
+        b"typescript" | b"ts" | b"tsx" => Some(CodeLanguage::TypeScript),
+        b"go" => Some(CodeLanguage::Go),
+        b"java" => Some(CodeLanguage::Java),
+        b"kotlin" | b"kt" => Some(CodeLanguage::Kotlin),
+        b"swift" => Some(CodeLanguage::Swift),
+        b"ruby" | b"rb" => Some(CodeLanguage::Ruby),
+        b"php" => Some(CodeLanguage::Php),
+        b"css" | b"scss" | b"sass" => Some(CodeLanguage::Css),
+        b"c" | b"h" | b"cpp" | b"cc" | b"cxx" | b"hpp" => Some(CodeLanguage::CLike),
+        _ => None,
+    }
 }
 
 fn key_value_separator(bytes: &[u8]) -> Option<usize> {

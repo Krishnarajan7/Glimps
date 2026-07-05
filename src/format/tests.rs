@@ -504,8 +504,10 @@ fn successful_silent_cd_gets_a_moved_breadcrumb() {
     out.extend_from_slice(&f.process(D));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("cd docs"));
-    assert!(s.contains("CD"));
+    assert!(!s.contains("[CD]"));
+    assert!(!s.contains("\x1b[7m CD \x1b[0m"));
     assert!(s.contains("moved to /Users/apple/Projects/Glimps/docs"));
+    assert!(!s.contains("done exit 0"));
 }
 
 #[test]
@@ -570,12 +572,18 @@ fn cat_markdown_gets_project_doc_coloring() {
     let mut out = Vec::new();
     out.extend_from_slice(&f.process(&cmd_marker(b"cat README.md")));
     out.extend_from_slice(&f.process(C));
-    out.extend_from_slice(&f.process(b"# GLIMPS\n- install\nUse `cargo test`.\n"));
+    out.extend_from_slice(&f.process(
+        b"# GLIMPS\n- use `cat README.md`, `git status`, and **safe pass-through**.\nSee [`docs/SAFETY_INVARIANTS.md`](./docs/SAFETY_INVARIANTS.md) and [`ROADMAP.md`](./ROADMAP.md).\n```bash\nGLIMPS=0 zsh     # start a raw shell\n```\n",
+    ));
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[36m# GLIMPS\x1b[0m"));
-    assert!(s.contains("\x1b[33m- \x1b[0minstall"));
-    assert!(s.contains("Use \x1b[35m`cargo test`\x1b[0m."));
+    assert!(s.contains("\x1b[33m- \x1b[0muse \x1b[35m`cat README.md`\x1b[0m, \x1b[35m`git status`\x1b[0m, and \x1b[32m**safe pass-through**\x1b[0m."));
+    assert!(s.contains("\x1b[32m[`docs/SAFETY_INVARIANTS.md`]\x1b[0m\x1b[2m(./docs/SAFETY_INVARIANTS.md)\x1b[0m and \x1b[32m[`ROADMAP.md`]\x1b[0m\x1b[2m(./ROADMAP.md)\x1b[0m."));
+    assert!(s.contains("\x1b[35m```bash\x1b[0m"));
+    assert!(s.contains("GLIMPS"));
+    assert!(s.contains("zsh"));
+    assert!(s.contains("\x1b[2m# start a raw shell\x1b[0m"));
 }
 
 #[test]
