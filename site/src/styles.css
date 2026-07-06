@@ -69,7 +69,7 @@
   --secondary: oklch(0.94 0.01 85);
   --secondary-foreground: oklch(0.28 0.02 260);
   --muted: oklch(0.95 0.008 85);
-  --muted-foreground: oklch(0.5 0.015 260);
+  --muted-foreground: oklch(0.44 0.016 260); /* darkened for AA contrast on paper */
   --accent: oklch(0.6 0.13 200);
   --accent-foreground: oklch(0.98 0.005 85);
   --destructive: oklch(0.58 0.22 27);
@@ -134,6 +134,21 @@
 
   html {
     font-family: var(--font-sans);
+    scroll-behavior: smooth;
+  }
+
+  /* Applied to the docs article, which is its own scroll container, so in-page
+     anchor clicks (the "On this page" list, inline links) animate too. */
+  .smooth-scroll {
+    scroll-behavior: smooth;
+  }
+
+  /* Honor users who ask for less motion. */
+  @media (prefers-reduced-motion: reduce) {
+    html,
+    .smooth-scroll {
+      scroll-behavior: auto;
+    }
   }
 
   body {

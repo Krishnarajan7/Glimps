@@ -1,7 +1,23 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 
 export const Route = createFileRoute("/")({
+  head: () => ({
+    meta: [
+      { title: "GLIMPS — your terminal output, finally readable" },
+      {
+        name: "description",
+        content:
+          "Zero-config terminal formatter that marks where your output starts and colors what it recognizes — JSON, logs, HTTP, diffs, and more. It keeps your terminal; it just makes it legible.",
+      },
+      { property: "og:title", content: "GLIMPS — your terminal output, finally readable" },
+      {
+        property: "og:description",
+        content:
+          "A zero-config PTY-based formatter that makes everyday terminal output legible, and gets out of the way when it isn't sure.",
+      },
+    ],
+  }),
   component: Landing,
 });
 
@@ -188,7 +204,7 @@ function Nav({ theme, onToggle }: { theme: "light" | "dark"; onToggle: () => voi
     <header className="relative z-10 border-b" style={{ borderColor: "var(--color-border)" }}>
       <div className="mx-auto max-w-6xl px-4 sm:px-6 py-3 sm:py-4 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 sm:gap-4">
         <a href="#top" className="flex min-w-0 items-center gap-2 font-mono font-semibold">
-          <span className="text-[var(--color-bar)] text-xl leading-none">▌</span>
+          <span className="text-[var(--color-bar)] text-xl leading-none" aria-hidden="true">▌</span>
           <span className="truncate">glimps</span>
           <span className="ml-1 sm:ml-2 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
             style={{ background: "var(--color-muted)", color: "var(--color-muted-foreground)" }}>
@@ -196,10 +212,10 @@ function Nav({ theme, onToggle }: { theme: "light" | "dark"; onToggle: () => voi
           </span>
         </a>
         <nav className="flex items-center gap-1 sm:gap-2 text-sm font-mono">
-          <a href="#transform" className="hidden sm:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">formats</a>
-          <a href="#trust" className="hidden sm:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">trust</a>
-          <a href="#install" className="px-2.5 sm:px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">install</a>
-          <a href="https://github.com" className="hidden md:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">github</a>
+          <Link to="/about" className="hidden sm:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">about</Link>
+          <Link to="/features" className="hidden sm:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">features</Link>
+          <Link to="/installation" className="px-2.5 sm:px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">install</Link>
+          <a href="https://github.com/Krishnarajan7/Glimps" target="_blank" rel="noopener noreferrer" className="hidden md:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">github</a>
           <button
             onClick={onToggle}
             aria-label="Toggle theme"
@@ -308,19 +324,17 @@ function DiffCard() {
 
 function StackCard() {
   return (
-    <TerminalFrame title="node server.js">
-      <CmdHeader cmd="node server.js" badge="trace" />
+    <TerminalFrame title="python app.py">
+      <CmdHeader cmd="python app.py" badge="trace" />
       <div className="px-4 py-3 space-y-1">
+        <div className="text-[var(--color-syn-dim)]">Traceback (most recent call last):</div>
+        <div className="text-[var(--color-syn-dim)]">  File "<span className="text-[var(--color-syn-key)]">app/api/user.py</span>", line <span className="text-[var(--color-syn-number)]">47</span>, in <span className="text-foreground">resolve_user</span></div>
+        <div className="text-[var(--color-syn-dim)]">  File "<span className="text-[var(--color-syn-key)]">app/server.py</span>", line <span className="text-[var(--color-syn-number)]">112</span>, in <span className="text-foreground">handle_request</span></div>
         <div>
-          <span className="text-[var(--color-syn-error)] font-semibold">TypeError</span>
+          <span className="text-[var(--color-syn-error)] font-semibold">KeyError</span>
           <span className="text-[var(--color-syn-dim)]">: </span>
-          <span>Cannot read properties of undefined (reading </span>
           <span className="text-[var(--color-syn-string)]">'id'</span>
-          <span>)</span>
         </div>
-        <div className="text-[var(--color-syn-dim)]">    at <span className="text-foreground">resolveUser</span> (<span className="text-[var(--color-syn-key)]">src/api/user.ts</span>:<span className="text-[var(--color-syn-number)]">47</span>:<span className="text-[var(--color-syn-number)]">18</span>)</div>
-        <div className="text-[var(--color-syn-dim)]">    at <span className="text-foreground">handleRequest</span> (<span className="text-[var(--color-syn-key)]">src/server.ts</span>:<span className="text-[var(--color-syn-number)]">112</span>:<span className="text-[var(--color-syn-number)]">9</span>)</div>
-        <div className="text-[var(--color-syn-dim)]">    at <span className="text-[var(--color-syn-dim)]">node:internal/process/task_queues</span>:<span className="text-[var(--color-syn-number)]">95</span>:<span className="text-[var(--color-syn-number)]">5</span></div>
       </div>
     </TerminalFrame>
   );
@@ -372,6 +386,7 @@ function JsonMiniCard() {
 
 function InstallBlock({ label, cmd }: { label: string; cmd: string }) {
   const [copied, setCopied] = useState(false);
+  const lines = cmd.split("\n");
   return (
     <div>
       <div className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2 font-mono">
@@ -383,9 +398,13 @@ function InstallBlock({ label, cmd }: { label: string; cmd: string }) {
       >
         <div className="flex items-start gap-3 px-4 py-3 pr-14">
           <span className="text-[var(--color-bar)] leading-6 select-none">▌</span>
-          <code className="flex-1 min-w-0 overflow-x-auto whitespace-pre">
-            <span className="text-[var(--color-syn-dim)]">$ </span>
-            {cmd}
+          <code className="flex-1 min-w-0 overflow-x-auto whitespace-pre pb-1">
+            {lines.map((line, i) => (
+              <span key={i} className="block">
+                <span className="text-[var(--color-syn-dim)]">$ </span>
+                {line}
+              </span>
+            ))}
           </code>
         </div>
         <button
@@ -415,7 +434,7 @@ function Landing() {
   }, [theme]);
 
   return (
-    <div id="top" className="min-h-screen relative">
+    <div id="top" className="min-h-screen relative overflow-x-hidden">
       <Nav theme={theme} onToggle={() => setTheme((t) => (t === "light" ? "dark" : "light"))} />
 
       {/* HERO */}
@@ -423,7 +442,7 @@ function Landing() {
         <div className="grid lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] gap-10 sm:gap-12 items-center">
           <div>
             <div className="inline-flex items-center gap-2 font-mono text-xs text-muted-foreground mb-5 sm:mb-6">
-              <span className="text-[var(--color-bar)]">▌</span>
+              <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span>
               <span>zero-config · pass-through · MIT</span>
             </div>
             <h1 className="font-mono text-[2rem] sm:text-4xl md:text-5xl lg:text-[3.4rem] leading-[1.1] tracking-tight font-semibold">
@@ -466,7 +485,7 @@ function Landing() {
           <div className="grid md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
             <div>
               <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
-                <span className="text-[var(--color-bar)]">▌</span> the problem
+                <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> the problem
               </div>
               <h2 className="font-mono text-2xl md:text-3xl font-semibold leading-tight">
                 After a few commands, scrollback is a wall of text.
@@ -498,7 +517,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
         <div className="mx-auto max-w-6xl px-4 sm:px-6 py-14 sm:py-20">
           <div className="max-w-2xl mb-12">
             <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
-              <span className="text-[var(--color-bar)]">▌</span> the transform
+              <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> the transform
             </div>
             <h2 className="font-mono text-2xl md:text-3xl font-semibold leading-tight">
               Same bytes. Now legible.
@@ -528,7 +547,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
           <div className="grid md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
             <div>
               <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
-                <span className="text-[var(--color-bar)]">▌</span> it gets out of the way
+                <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> it gets out of the way
               </div>
               <h2 className="font-mono text-2xl md:text-3xl font-semibold leading-tight">
                 When GLIMPS isn't confident, it does nothing.
@@ -570,7 +589,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
         <div className="mx-auto max-w-6xl px-4 sm:px-6 py-14 sm:py-20">
           <div className="max-w-2xl mb-10">
             <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
-              <span className="text-[var(--color-bar)]">▌</span> trust & safety
+              <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> trust & safety
             </div>
             <h2 className="font-mono text-2xl md:text-3xl font-semibold leading-tight">
               Four hard promises.
@@ -623,7 +642,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
           <div className="grid md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
             <div>
               <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
-                <span className="text-[var(--color-bar)]">▌</span> get started
+                <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> get started
               </div>
               <h2 className="font-mono text-2xl md:text-3xl font-semibold leading-tight">
                 One install. One guarded line.
@@ -639,19 +658,34 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
               <p className="mt-4 text-sm text-muted-foreground">
                 Prefer to try it first? Run{" "}
                 <code className="px-1 py-0.5 rounded bg-muted text-foreground text-xs">
-                  glimps demo
+                  scripts/dogfood-macos.sh session
                 </code>{" "}
-                without adding anything to your shell startup.
+                — it wraps a throwaway zsh and cleans up on exit, without touching your
+                shell startup. Or just run{" "}
+                <code className="px-1 py-0.5 rounded bg-muted text-foreground text-xs">
+                  glimps
+                </code>{" "}
+                to start a wrapped shell and{" "}
+                <code className="px-1 py-0.5 rounded bg-muted text-foreground text-xs">
+                  exit
+                </code>{" "}
+                to leave.
               </p>
             </div>
 
             <div className="space-y-5">
-              <InstallBlock label="1 · install" cmd="brew install glimps" />
               <InstallBlock
-                label="2 · enable in your shell (add to ~/.zshrc)"
-                cmd='command -v glimps >/dev/null && eval "$(glimps init zsh)"'
+                label="1 · build & install (requires Rust)"
+                cmd={"git clone https://github.com/Krishnarajan7/Glimps\ncd Glimps\ncargo install --path ."}
               />
-              <InstallBlock label="3 · try it (no install)" cmd="npx glimps demo" />
+              <InstallBlock
+                label="2 · enable in your shell (near top of ~/.zshrc)"
+                cmd='command -v glimps >/dev/null 2>&1 && eval "$(glimps init zsh)"'
+              />
+              <InstallBlock
+                label="3 · or try without installing (macOS)"
+                cmd="scripts/dogfood-macos.sh session"
+              />
             </div>
           </div>
         </div>
@@ -661,15 +695,15 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
       <footer className="relative z-[1] border-t" style={{ borderColor: "var(--color-border)" }}>
         <div className="mx-auto max-w-6xl px-4 sm:px-6 py-8 sm:py-10 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4">
           <div className="flex min-w-0 items-center gap-2 font-mono text-sm">
-            <span className="text-[var(--color-bar)] text-lg">▌</span>
+            <span className="text-[var(--color-bar)] text-lg" aria-hidden="true">▌</span>
             <span className="text-foreground">glimps</span>
             <span className="text-muted-foreground truncate">
               — a terminal you already have, just legible.
             </span>
           </div>
           <div className="flex items-center gap-4 text-sm font-mono text-muted-foreground">
-            <a href="https://github.com" className="hover:text-foreground transition-colors">github</a>
-            <a href="#" className="hover:text-foreground transition-colors">docs</a>
+            <a href="https://github.com/Krishnarajan7/Glimps" target="_blank" rel="noopener noreferrer" className="hover:text-foreground transition-colors">github</a>
+            <Link to="/about" className="hover:text-foreground transition-colors">docs</Link>
             <span className="text-[var(--color-syn-dim)]">MIT</span>
           </div>
         </div>
@@ -677,4 +711,3 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
     </div>
   );
 }
-  

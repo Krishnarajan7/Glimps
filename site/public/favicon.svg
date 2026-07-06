@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <rect width="32" height="32" rx="7" fill="#1b1c22"/>
+  <!-- the ▌ command marker -->
+  <rect x="6" y="7" width="4" height="18" rx="2" fill="#5fd08a"/>
+  <!-- formatted output lines -->
+  <rect x="13" y="8.5" width="13" height="3" rx="1.5" fill="#ecebe4" opacity="0.92"/>
+  <rect x="13" y="14.5" width="9" height="3" rx="1.5" fill="#7fc7ff" opacity="0.85"/>
+  <rect x="13" y="20.5" width="11" height="3" rx="1.5" fill="#8a8b93" opacity="0.8"/>
+</svg>
