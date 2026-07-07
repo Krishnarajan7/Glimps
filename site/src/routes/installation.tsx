@@ -10,6 +10,7 @@ import {
   Callout,
   type TocItem,
 } from "../components/DocsLayout";
+import { canonical } from "@/lib/seo";
 import { Glimps } from "@/components/ui/glimps";
 
 export const Route = createFileRoute("/installation")({
@@ -27,7 +28,9 @@ export const Route = createFileRoute("/installation")({
         content:
           "Build GLIMPS from source on macOS and Linux, enable it in bash or zsh, and try it without touching your shell.",
       },
+      { property: "og:url", content: canonical("/installation") },
     ],
+    links: [{ rel: "canonical", href: canonical("/installation") }],
   }),
   component: InstallPage,
 });

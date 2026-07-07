@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { HeroVideoDialog } from "@/components/ui/hero-video-dialog";
 import { Glimps } from "@/components/ui/glimps";
 import { GlimpsMark } from "@/components/ui/glimps-mark";
+import { canonical } from "@/lib/seo";
 
 /* ------------------------------------------------------------------ */
 /*  DEMO VIDEO — replace these two with your real assets.              */
@@ -34,7 +35,9 @@ export const Route = createFileRoute("/")({
         content:
           "A zero-config PTY-based formatter that makes everyday terminal output legible, and gets out of the way when it isn't sure.",
       },
+      { property: "og:url", content: canonical("/") },
     ],
+    links: [{ rel: "canonical", href: canonical("/") }],
   }),
   component: Landing,
 });

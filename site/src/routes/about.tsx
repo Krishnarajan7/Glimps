@@ -9,6 +9,7 @@ import {
   Callout,
   type TocItem,
 } from "../components/DocsLayout";
+import { canonical } from "@/lib/seo";
 import { Glimps } from "@/components/ui/glimps";
 
 export const Route = createFileRoute("/about")({
@@ -26,7 +27,9 @@ export const Route = createFileRoute("/about")({
         content:
           "A short honest read on GLIMPS: what it does, what it refuses to do, and why your terminal stays yours.",
       },
+      { property: "og:url", content: canonical("/about") },
     ],
+    links: [{ rel: "canonical", href: canonical("/about") }],
   }),
   component: AboutPage,
 });

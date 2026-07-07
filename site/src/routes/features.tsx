@@ -10,6 +10,7 @@ import {
   Callout,
   type TocItem,
 } from "../components/DocsLayout";
+import { canonical } from "@/lib/seo";
 import { Glimps } from "@/components/ui/glimps";
 
 export const Route = createFileRoute("/features")({
@@ -27,7 +28,9 @@ export const Route = createFileRoute("/features")({
         content:
           "The full list of formats GLIMPS recognizes and the behavior you can rely on.",
       },
+      { property: "og:url", content: canonical("/features") },
     ],
+    links: [{ rel: "canonical", href: canonical("/features") }],
   }),
   component: FeaturesPage,
 });

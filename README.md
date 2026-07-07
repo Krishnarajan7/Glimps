@@ -1,4 +1,18 @@
-# GLIMPS
+<p align="center">
+  <img src="site/public/favicon.svg" width="96" height="96" alt="GLIMPS logo">
+</p>
+
+<h1 align="center">GLIMPS</h1>
+
+<p align="center">
+  <a href="https://glimpps.netlify.app/">Website</a>
+  ·
+  <a href="https://github.com/Krishnarajan7/Glimps/discussions/12">Discussions</a>
+  ·
+  <a href="https://github.com/Krishnarajan7/Glimps/issues/1">Start contributing</a>
+  ·
+  <a href="https://github.com/Krishnarajan7/Glimps/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22">Good first issues</a>
+</p>
 
 **Zero-config smart terminal output formatter.** GLIMPS wraps your shell in a
 PTY and quietly improves the scrollback you already have. It repeats your
@@ -14,9 +28,11 @@ kind of output is coming.
 
 > **Want to help?** GLIMPS is beta and there's real, scoped work with clear
 > acceptance criteria waiting for you. Browse the
-> [`good first issue` list](https://github.com/Krishnarajan7/Glimps/labels/good%20first%20issue)
-> and see [Contributing](#contributing) — most tasks teach GLIMPS one more small
-> output type and don't require touching the PTY internals.
+> [`good first issue` list](https://github.com/Krishnarajan7/Glimps/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22),
+> start with [issue #1](https://github.com/Krishnarajan7/Glimps/issues/1), and
+> ask questions in [Discussions](https://github.com/Krishnarajan7/Glimps/discussions/12).
+> Most tasks teach GLIMPS one more small output type and don't require touching
+> the PTY internals.
 
 <!-- DEMO: run scripts/render-demo.sh (see demo/README.md) to produce
      demo/glimps.gif from demo/glimps.tape, then replace this comment with:

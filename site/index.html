@@ -3,14 +3,64 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="manifest" href="/manifest.json" />
-    <meta name="theme-color" content="#1b1c22" />
+
+    <title>GLIMPS — zero-config smart terminal output formatter</title>
     <meta
       name="description"
       content="GLIMPS is a zero-config smart terminal output formatter. It marks where each command's output begins and colors what it can confidently recognize — JSON, logs, HTTP, diffs, stack traces, and more."
     />
-    <title>GLIMPS — zero-config smart terminal output formatter</title>
+    <link rel="canonical" href="https://glimpps.netlify.app/" />
+    <meta name="robots" content="index, follow" />
+    <meta name="author" content="Krishnarajan" />
+    <meta name="theme-color" content="#1b1c22" />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- Open Graph (link previews on Slack, iMessage, LinkedIn, Facebook…) -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="GLIMPS" />
+    <meta property="og:url" content="https://glimpps.netlify.app/" />
+    <meta property="og:title" content="GLIMPS — your terminal output, finally readable" />
+    <meta
+      property="og:description"
+      content="Zero-config terminal formatter that marks where your output starts and colors what it recognizes — JSON, logs, HTTP, diffs, and more. It keeps your terminal; it just makes it legible."
+    />
+    <meta property="og:image" content="https://glimpps.netlify.app/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="GLIMPS — zero-config terminal output formatter" />
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="GLIMPS — your terminal output, finally readable" />
+    <meta
+      name="twitter:description"
+      content="A zero-config PTY-based formatter that makes everyday terminal output legible, and gets out of the way when it isn't sure."
+    />
+    <meta name="twitter:image" content="https://glimpps.netlify.app/og.png" />
+
+    <!-- Structured data: this page describes a software application -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "GLIMPS",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Linux",
+        "description": "A zero-config smart terminal output formatter. It runs your shell inside a PTY it supervises and reformats recognized output — JSON, logs, HTTP, diffs, stack traces — with structure and color, automatically.",
+        "url": "https://glimpps.netlify.app/",
+        "codeRepository": "https://github.com/Krishnarajan7/Glimps",
+        "license": "https://opensource.org/licenses/MIT",
+        "softwareVersion": "0.0.1",
+        "author": {
+          "@type": "Person",
+          "name": "Krishnarajan",
+          "url": "https://github.com/Krishnarajan7"
+        },
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+      }
+    </script>
   </head>
   <body>
     <div id="app"></div>
