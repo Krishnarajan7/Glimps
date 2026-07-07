@@ -2,8 +2,8 @@
 //!
 //! Knowing whether a given byte belongs to the PROMPT, the user's typed INPUT,
 //! or a command's OUTPUT is the technical core of GLIMPS: we may only ever
-//! reformat OUTPUT, and must never touch the prompt or input (CLAUDE.md
-//! architecture truth). The boundary is found via OSC-133 markers, not guessing.
+//! reformat OUTPUT, and must never touch the prompt or input. The boundary is
+//! found via OSC-133 markers, not guessing.
 //!
 //! The markers (FinalTerm / iTerm2 / VS Code "semantic prompt" convention):
 //!   OSC 133 ; A ST   prompt start          -> PROMPT zone

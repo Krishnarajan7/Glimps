@@ -16,8 +16,8 @@
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
 
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -189,6 +189,15 @@
   }
 }
 
+/* Keep the scroll, hide the bar. Applied to the docs scroll containers so the
+   article/sidebars still scroll but don't paint a visible scrollbar. */
+@utility no-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  &::-webkit-scrollbar {
+    display: none; /* Chrome / Safari / Edge */
+  }
+}
+
 @utility term-cursor {
   &::after {
     content: "";
@@ -206,23 +215,66 @@
   50% { opacity: 0; }
 }
 
+/* --- Brand wordmark ------------------------------------------------- */
+/* GLIMPS set as a live terminal token: mono, ending in the ▌ cursor.   */
+/* Default blinks softly; the `--quiet` variant (dense docs prose)      */
+/* keeps a static dim cursor that only wakes on hover. Hovering the     */
+/* word retypes it, terminal-style.                                     */
+.glimps-word {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 0.94em;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  /* The name is set in the palette's "key" cyan — the color GLIMPS itself
+     uses for names — darkened a touch in light mode for AA contrast. */
+  color: oklch(0.47 0.12 210);
+}
+.dark .glimps-word {
+  color: var(--syn-key);
+}
+.glimps-word-inner {
+  display: inline-block;
+  white-space: nowrap;
+}
+.glimps-word::after {
+  content: "";
+  display: inline-block;
+  width: 0.45ch;
+  height: 0.92em;
+  margin-left: 0.08em;
+  background: var(--color-bar);
+  vertical-align: baseline;
+  transform: translateY(0.1em);
+  animation: term-blink 1.3s steps(2) infinite;
+}
+.glimps-word:hover .glimps-word-inner {
+  animation: glimps-retype 0.55s steps(6) both;
+}
+.glimps-word--quiet::after {
+  animation: none;
+  opacity: 0.45;
+}
+.glimps-word--quiet:hover::after {
+  opacity: 1;
+  animation: term-blink 1.3s steps(2) infinite;
+}
+/* Reveal via clip-path, NOT width: animating width collapses the hover
+   target, which drops :hover mid-animation and flickers in a loop. */
+@keyframes glimps-retype {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .glimps-word::after,
+  .glimps-word--quiet:hover::after,
+  .glimps-word:hover .glimps-word-inner {
+    animation: none;
+  }
+}
+
 @keyframes type-in {
   from { width: 0; }
   to { width: 100%; }
 }
 
-@keyframes fade-swap-out {
-  0%, 45% { opacity: 1; }
-  55%, 100% { opacity: 0; }
-}
-
-@keyframes fade-swap-in {
-  0%, 45% { opacity: 0; transform: translateY(4px); }
-  60%, 100% { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes bar-sweep {
-  0%, 40% { transform: scaleY(0); opacity: 0; }
-  50%     { transform: scaleY(1); opacity: 1; }
-  100%    { transform: scaleY(1); opacity: 1; }
-}

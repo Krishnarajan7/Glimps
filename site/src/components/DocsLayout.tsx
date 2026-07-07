@@ -1,4 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
+import { GlimpsMark } from "@/components/ui/glimps-mark";
 import {
   useEffect,
   useRef,
@@ -194,11 +195,9 @@ export function DocsLayout({
         className="sticky top-0 z-30 border-b backdrop-blur bg-[var(--color-background)]/85 lg:shrink-0"
         style={{ borderColor: "var(--color-border)" }}
       >
-        <div className="mx-auto max-w-[1400px] px-4 sm:px-6 h-14 flex items-center gap-4">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 h-14 flex items-center gap-4">
           <Link to="/" className="flex items-center gap-2 font-mono font-semibold min-w-0">
-            <span className="text-[var(--color-bar)] text-xl leading-none" aria-hidden="true">
-              ▌
-            </span>
+            <GlimpsMark size={22} className="shrink-0" />
             <span className="truncate">glimps</span>
             <span
               className="ml-1 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
@@ -236,11 +235,11 @@ export function DocsLayout({
       </header>
 
       <div className="lg:flex-1 lg:min-h-0">
-        <div className="mx-auto max-w-[1400px] h-full px-4 sm:px-6 grid grid-cols-1 lg:grid-cols-[240px_minmax(0,1fr)_220px] gap-8 lg:gap-10">
+        <div className="mx-auto max-w-7xl h-full px-4 sm:px-6 grid grid-cols-1 lg:grid-cols-[240px_minmax(0,1fr)_220px] gap-8 lg:gap-10">
         {/* Left nav */}
         <aside
           className={
-            "lg:h-full lg:overflow-y-auto lg:py-10 " +
+            "no-scrollbar lg:h-full lg:overflow-y-auto lg:py-10 " +
             (navOpen ? "block py-6 border-b" : "hidden lg:block")
           }
           style={{ borderColor: "var(--color-border)" }}
@@ -282,7 +281,7 @@ export function DocsLayout({
         {/* Main article */}
         <main
           ref={mainRef}
-          className="smooth-scroll min-w-0 lg:h-full lg:overflow-y-auto py-8 lg:py-14"
+          className="no-scrollbar smooth-scroll min-w-0 lg:h-full lg:overflow-y-auto py-8 lg:py-14"
         >
           <div className="flex items-center gap-2 font-mono text-xs text-muted-foreground mb-6">
             <Link to="/" className="hover:text-foreground transition-colors">
@@ -308,7 +307,7 @@ export function DocsLayout({
         </main>
 
         {/* Right TOC */}
-        <aside className="hidden lg:block lg:h-full lg:overflow-y-auto py-14">
+        <aside className="no-scrollbar hidden lg:block lg:h-full lg:overflow-y-auto py-14">
           <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3 font-mono">
             On this page
           </div>
@@ -349,8 +348,8 @@ export function DocsLayout({
       >
         <div className="mx-auto max-w-7xl px-4 sm:px-6 py-6 flex flex-wrap gap-4 items-center justify-between font-mono text-xs text-muted-foreground">
           <span>
-            <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> glimps — a terminal you already
-            have, just legible.
+            <GlimpsMark size={15} className="inline-block align-[-0.24em] mr-1.5" /> glimps — a
+            terminal you already have, just legible.
           </span>
           <span>MIT · docs v0.1</span>
         </div>

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" width="1920" height="1080" font-family="'JetBrains Mono', ui-monospace, Menlo, monospace">
+  <rect width="1920" height="1080" fill="#1b1c22"/>
+  <!-- window chrome -->
+  <rect width="1920" height="76" fill="#26272e"/>
+  <circle cx="52" cy="38" r="9" fill="#ff5f57"/>
+  <circle cx="92" cy="38" r="9" fill="#febc2e"/>
+  <circle cx="132" cy="38" r="9" fill="#28c840"/>
+  <text x="176" y="48" fill="#8a8b93" font-size="27">~/projects/glimps — zsh</text>
+
+  <!-- command header -->
+  <text x="64" y="178" font-size="34"><tspan fill="#5fd08a" font-weight="700">▌ </tspan><tspan fill="#8a8b93">$ </tspan><tspan fill="#e6e6e6">curl -s api.example.com/user</tspan></text>
+  <rect x="1636" y="150" width="112" height="40" rx="8" fill="#2f3038"/>
+  <text x="1662" y="178" fill="#8a8b93" font-size="24">JSON</text>
+
+  <!-- formatted JSON body -->
+  <g font-size="34">
+    <text x="64"  y="290" fill="#8a8b93">{</text>
+    <text x="112" y="342"><tspan fill="#7fc7ff">"user"</tspan><tspan fill="#8a8b93">: {</tspan></text>
+    <text x="160" y="394"><tspan fill="#7fc7ff">"id"</tspan><tspan fill="#8a8b93">: </tspan><tspan fill="#e5c07b">8421</tspan><tspan fill="#8a8b93">,</tspan></text>
+    <text x="160" y="446"><tspan fill="#7fc7ff">"name"</tspan><tspan fill="#8a8b93">: </tspan><tspan fill="#5fd08a">"Ada Lovelace"</tspan><tspan fill="#8a8b93">,</tspan></text>
+    <text x="160" y="498"><tspan fill="#7fc7ff">"email"</tspan><tspan fill="#8a8b93">: </tspan><tspan fill="#5fd08a">"ada@analytical.dev"</tspan><tspan fill="#8a8b93">,</tspan></text>
+    <text x="160" y="550"><tspan fill="#7fc7ff">"active"</tspan><tspan fill="#8a8b93">: </tspan><tspan fill="#d18ee0">true</tspan><tspan fill="#8a8b93">,</tspan></text>
+    <text x="160" y="602"><tspan fill="#7fc7ff">"role"</tspan><tspan fill="#8a8b93">: </tspan><tspan fill="#5fd08a">"admin"</tspan><tspan fill="#8a8b93">,</tspan></text>
+    <text x="160" y="654"><tspan fill="#7fc7ff">"tags"</tspan><tspan fill="#8a8b93">: [</tspan><tspan fill="#5fd08a">"founder"</tspan><tspan fill="#8a8b93">, </tspan><tspan fill="#5fd08a">"math"</tspan><tspan fill="#8a8b93">, </tspan><tspan fill="#5fd08a">"poetry"</tspan><tspan fill="#8a8b93">]</tspan></text>
+    <text x="112" y="706" fill="#8a8b93">},</text>
+    <text x="112" y="758"><tspan fill="#7fc7ff">"meta"</tspan><tspan fill="#8a8b93">: { </tspan><tspan fill="#7fc7ff">"count"</tspan><tspan fill="#8a8b93">: </tspan><tspan fill="#e5c07b">1</tspan><tspan fill="#8a8b93">, </tspan><tspan fill="#7fc7ff">"latency_ms"</tspan><tspan fill="#8a8b93">: </tspan><tspan fill="#e5c07b">38</tspan><tspan fill="#8a8b93">, </tspan><tspan fill="#7fc7ff">"cached"</tspan><tspan fill="#8a8b93">: </tspan><tspan fill="#d18ee0">false</tspan><tspan fill="#8a8b93"> }</tspan></text>
+    <text x="64"  y="810" fill="#8a8b93">}</text>
+  </g>
+</svg>

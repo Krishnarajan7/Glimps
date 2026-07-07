@@ -1,9 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
-  <rect width="32" height="32" rx="7" fill="#1b1c22"/>
-  <!-- the ▌ command marker -->
-  <rect x="6" y="7" width="4" height="18" rx="2" fill="#5fd08a"/>
-  <!-- formatted output lines -->
-  <rect x="13" y="8.5" width="13" height="3" rx="1.5" fill="#ecebe4" opacity="0.92"/>
-  <rect x="13" y="14.5" width="9" height="3" rx="1.5" fill="#7fc7ff" opacity="0.85"/>
-  <rect x="13" y="20.5" width="11" height="3" rx="1.5" fill="#8a8b93" opacity="0.8"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- GLIMPS "Reveal" mark: the ▌ is the seam where raw bytes (dim, left)
+       become legible, colored structure (right). -->
+  <rect width="64" height="64" rx="15" fill="#1b1c22"/>
+  <rect x="10" y="21" width="11" height="4" rx="2" fill="#8a8b93" opacity=".5"/>
+  <rect x="10" y="30" width="15" height="4" rx="2" fill="#8a8b93" opacity=".5"/>
+  <rect x="10" y="39" width="8" height="4" rx="2" fill="#8a8b93" opacity=".5"/>
+  <rect x="29" y="13" width="6" height="38" rx="3" fill="#5fd08a"/>
+  <rect x="40" y="21" width="14" height="4" rx="2" fill="#7fc7ff"/>
+  <rect x="40" y="30" width="10" height="4" rx="2" fill="#ecebe4"/>
+  <rect x="40" y="39" width="13" height="4" rx="2" fill="#e5c07b"/>
 </svg>

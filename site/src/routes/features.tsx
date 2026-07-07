@@ -10,6 +10,7 @@ import {
   Callout,
   type TocItem,
 } from "../components/DocsLayout";
+import { Glimps } from "@/components/ui/glimps";
 
 export const Route = createFileRoute("/features")({
   head: () => ({
@@ -55,7 +56,7 @@ function FeaturesPage() {
       title="Features"
       intro={
         <>
-          The features GLIMPS supports and the promises it keeps. Everything here is
+          The features <Glimps quiet /> supports and the promises it keeps. Everything here is
           on by default — there is nothing to configure.
         </>
       }
@@ -73,8 +74,8 @@ function FeaturesPage() {
             output so scrollback has visible anchors.
           </li>
           <li>
-            <b>Streaming JSON.</b> Compact JSON is reflowed and colored as it arrives —
-            no need to pipe through <Code>jq</Code>.
+            <b>Whole-document JSON.</b> When a command's entire output is JSON, it's
+            reflowed and colored — no need to pipe through <Code>jq</Code>.
           </li>
           <li>
             <b>Log levels.</b> Common log formats have their level highlighted (INFO,
@@ -97,7 +98,7 @@ function FeaturesPage() {
         <div className="space-y-3">
           <H3 id="json">JSON</H3>
           <P>
-            GLIMPS reformats a JSON document only when the entire output of a command
+            <Glimps quiet /> reformats a JSON document only when the entire output of a command
             parses as JSON. Partial or mixed output is left alone. Keys, strings,
             numbers, and literals ( <Code>true</Code>, <Code>false</Code>,{" "}
             <Code>null</Code>) get distinct colors.
@@ -129,7 +130,7 @@ function FeaturesPage() {
         <div className="space-y-3">
           <H3 id="http">HTTP exchanges</H3>
           <P>
-            When GLIMPS sees an HTTP status line ( <Code>HTTP/1.1 200 OK</Code>,{" "}
+            When <Glimps quiet /> sees an HTTP status line ( <Code>HTTP/1.1 200 OK</Code>,{" "}
             <Code>HTTP/2 404</Code>) followed by header-like lines, it colors the status
             by class and dims the header names.
           </P>
@@ -139,33 +140,36 @@ function FeaturesPage() {
           <H3 id="diffs">Diffs</H3>
           <P>
             Unified diffs (from <Code>git</Code>, <Code>diff -u</Code>, or patch files)
-            get red/green line backgrounds with a small tint that stays readable on both
-            themes. Hunk headers are dimmed but preserved verbatim.
+            get red/green line coloring that stays readable on both themes. Detection
+            requires a real hunk header (<Code>@@ … @@</Code>), so ordinary code with
+            leading <Code>+</Code>/<Code>-</Code> is never mistaken for a diff. Hunk
+            headers are dimmed but preserved verbatim.
           </P>
         </div>
 
         <div className="space-y-3">
           <H3 id="stack">Stack traces</H3>
           <P>
-            The exception line is colored, file paths and line numbers are highlighted,
-            and framework noise is dimmed. GLIMPS recognizes Rust panics and Python
-            tracebacks.
+            The panic or exception line is colored and the stack frames beneath it are
+            dimmed, so the error stands out from the noise. <Glimps quiet /> recognizes
+            Rust panics and Python tracebacks.
           </P>
         </div>
 
         <div className="space-y-3">
           <H3 id="tables">Small tables</H3>
           <P>
-            Fixed-width tables (from <Code>psql</Code>, <Code>kubectl</Code>,{" "}
-            <Code>docker ps</Code>) get a subtle header underline and column-aligned
-            values. Long tables are passed through untouched to avoid reflow surprises.
+            Result tables from database clients (<Code>psql</Code>, <Code>sqlite3</Code>,{" "}
+            <Code>mysql</Code>, <Code>duckdb</Code>) get a subtle header underline and
+            column-aligned values. Long tables are passed through untouched to avoid reflow
+            surprises.
           </P>
         </div>
 
         <div className="space-y-3">
           <H3 id="command-aware">Command-aware output</H3>
           <P>
-            Beyond whole-document and streaming detection, GLIMPS knows the shape of many
+            Beyond whole-document and streaming detection, <Glimps quiet /> knows the shape of many
             everyday commands and files and formats them accordingly: Git (
             <Code>status</Code>, <Code>branch</Code>, <Code>log</Code>, <Code>stat</Code>),
             CSV/TSV, SQL, config files (YAML, TOML, INI, dotenv), JSON-lines (
@@ -185,7 +189,7 @@ function FeaturesPage() {
       <section className="space-y-4">
         <H2 id="bar">The ▌ command bar</H2>
         <P>
-          The most visible thing GLIMPS does. A short vertical bar is drawn just before
+          The most visible thing <Glimps quiet /> does. A short vertical bar is drawn just before
           the first line of every command's output. It gives scrollback a structural
           rhythm and lets you scroll by "command", not by "line".
         </P>
@@ -198,7 +202,7 @@ function FeaturesPage() {
 
       <section className="space-y-4">
         <H2 id="passthrough">Pass-through rules</H2>
-        <P>GLIMPS will never touch output when any of these are true:</P>
+        <P><Glimps quiet /> will never touch output when any of these are true:</P>
         <UL>
           <li>
             The program has taken over the alternate (full) screen (<Code>vim</Code>,{" "}
@@ -221,7 +225,7 @@ function FeaturesPage() {
       <section className="space-y-4">
         <H2 id="kill-switch">Kill switch</H2>
         <P>
-          GLIMPS wraps your whole shell, so the switch is per-shell or per-environment,
+          <Glimps quiet /> wraps your whole shell, so the switch is per-shell or per-environment,
           not per-command. Three ways to turn it off, in order of scope:
         </P>
         <UL>
@@ -242,12 +246,12 @@ function FeaturesPage() {
       <section className="space-y-4">
         <H2 id="performance">Performance</H2>
         <P>
-          GLIMPS processes output as it streams. Its recognition step is a single-pass
+          <Glimps quiet /> processes output as it streams. Its recognition step is a single-pass
           scan, and buffering is hard-bounded: a whole-document formatter holds at most
           1 MiB (<Code>buffer_cap = 1048576</Code>) before falling back to pass-through,
           and streaming line formatters cap a single line at 64 KiB (
-          <Code>line_cap = 65536</Code>). On a typical laptop the overhead is well under
-          a millisecond per command.
+          <Code>line_cap = 65536</Code>). Detection is a single pass over a small, bounded
+          buffer, so the overhead is negligible in normal use.
         </P>
       </section>
 
@@ -256,7 +260,7 @@ function FeaturesPage() {
         <UL>
           <li>No telemetry, ever. No network calls.</li>
           <li>
-            Nothing is written to disk. GLIMPS only ever (optionally) reads your{" "}
+            Nothing is written to disk. <Glimps quiet /> only ever (optionally) reads your{" "}
             <Code>~/.glimpsrc</Code> config — no state directory, no cache, no logs.
           </li>
           <li>Your terminal is restored on exit, even after a crash.</li>

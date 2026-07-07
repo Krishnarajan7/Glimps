@@ -10,6 +10,7 @@ import {
   Callout,
   type TocItem,
 } from "../components/DocsLayout";
+import { Glimps } from "@/components/ui/glimps";
 
 export const Route = createFileRoute("/installation")({
   head: () => ({
@@ -54,7 +55,7 @@ function InstallPage() {
       title="Installation"
       intro={
         <>
-          A GLIMPS install is two things: a single binary on your <Code>PATH</Code>, and
+          A <Glimps quiet /> install is two things: a single binary on your <Code>PATH</Code>, and
           one line in your shell startup file. Nothing else — no config, no daemon, no
           reboot. Today you build that binary from source with Rust.
         </>
@@ -64,8 +65,10 @@ function InstallPage() {
       <section className="space-y-4">
         <H2 id="requirements">Requirements</H2>
         <UL>
-          <li>macOS 12+ (Apple Silicon or Intel), or any recent Linux distribution.</li>
-          <li>An interactive shell: bash 4+ or zsh 5+.</li>
+          <li>macOS (Apple Silicon or Intel), or any recent Linux distribution.</li>
+          <li>
+            An interactive shell: zsh, or bash 3.2+ (the macOS system bash works).
+          </li>
           <li>
             A Rust toolchain (<Code>rustc</Code> + <Code>cargo</Code>) to build from
             source — install it from{" "}
@@ -74,7 +77,10 @@ function InstallPage() {
             </a>
             .
           </li>
-          <li>A terminal that supports 24-bit color (all modern terminals do).</li>
+          <li>
+            Any terminal with basic ANSI color — GLIMPS emits standard 16-color output,
+            so nothing special is required.
+          </li>
         </UL>
       </section>
 
@@ -124,12 +130,12 @@ function InstallPage() {
       <section className="space-y-6">
         <H2 id="enable">Enable in your shell</H2>
         <P>
-          GLIMPS prints a small init script per shell. Add one guarded line to the
+          <Glimps quiet /> prints a small init script per shell. Add one guarded line to the
           appropriate startup file and open a new terminal.
         </P>
 
         <Callout title="put it near the top">
-          The init snippet re-execs your shell inside GLIMPS, and the inner shell
+          The init snippet re-execs your shell inside <Glimps quiet />, and the inner shell
           re-sources the same startup file. Place the line high up — after your critical{" "}
           <Code>PATH</Code>/env setup but before plugin managers and prompt frameworks —
           so those don't run twice per session. It never touches your prompt.
@@ -152,8 +158,11 @@ function InstallPage() {
         <div className="space-y-3">
           <H3 id="bash">bash</H3>
           <P>
-            Add near the top of <Code>~/.bashrc</Code> (or <Code>~/.bash_profile</Code>{" "}
-            on macOS):
+            Add near the top of <Code>~/.bashrc</Code>. GLIMPS re-execs an{" "}
+            <em>interactive, non-login</em> shell, which sources <Code>~/.bashrc</Code> —
+            so on macOS, if your <Code>~/.bash_profile</Code> doesn't already source{" "}
+            <Code>~/.bashrc</Code>, add the line to <Code>~/.bashrc</Code> anyway (not just{" "}
+            <Code>~/.bash_profile</Code>), or the hook won't load.
           </P>
           <Shell
             lines={[
@@ -167,7 +176,7 @@ function InstallPage() {
         <Callout title="the guarded form">
           The <Code>command -v glimps</Code> check keeps your shell startup working even
           if the binary is missing (fresh machine, restored dotfiles, container). If
-          GLIMPS isn't installed, the line is a no-op. fish integration is planned but
+          <Glimps quiet /> isn't installed, the line is a no-op. fish integration is planned but
           not available yet.
         </Callout>
       </section>
@@ -191,14 +200,14 @@ function InstallPage() {
       <section className="space-y-4">
         <H2 id="demo">Try without installing</H2>
         <P>
-          You can dogfood GLIMPS straight from a checkout without installing it globally
+          You can dogfood <Glimps quiet /> straight from a checkout without installing it globally
           or editing <Code>~/.zshrc</Code>. On macOS, this builds{" "}
           <Code>target/debug/glimps</Code> and wraps a throwaway zsh via a temporary{" "}
           <Code>ZDOTDIR</Code>, cleaning everything up on exit:
         </P>
         <Shell lines={[{ cmd: "scripts/dogfood-macos.sh session" }]} />
         <P>
-          Once GLIMPS is installed, you can also just run <Code>glimps</Code> to start a
+          Once <Glimps quiet /> is installed, you can also just run <Code>glimps</Code> to start a
           wrapped shell and <Code>exit</Code> to leave it.
         </P>
       </section>
@@ -206,7 +215,7 @@ function InstallPage() {
       <section className="space-y-4">
         <H2 id="upgrade">Upgrade</H2>
         <P>
-          Because GLIMPS is built from source, upgrading means rebuilding. From your
+          Because <Glimps quiet /> is built from source, upgrading means rebuilding. From your
           checkout, pull the latest changes and reinstall:
         </P>
         <Shell
@@ -246,15 +255,15 @@ function InstallPage() {
 
         <H3 id="ts-colors">Colors look wrong</H3>
         <P>
-          A true-color terminal reads best; on 256-color terminals the palette falls back
-          to 256 colors automatically. If you'd rather skip color entirely, set{" "}
-          <Code>color = false</Code> in <Code>~/.glimpsrc</Code> for a structure-only,
-          no-color mode.
+          GLIMPS uses standard 16-color ANSI, so the exact hues come from your terminal's
+          color theme — adjust the palette there if a color reads badly. If you'd rather
+          skip color entirely, set <Code>color = false</Code> in <Code>~/.glimpsrc</Code>{" "}
+          for a structure-only, no-color mode.
         </P>
 
         <H3 id="ts-disable">Turn it off temporarily</H3>
         <P>
-          Because GLIMPS wraps the whole shell, the switch is per-shell, not per-command.
+          Because <Glimps quiet /> wraps the whole shell, the switch is per-shell, not per-command.
           Start a raw shell with <Code>GLIMPS=0 zsh</Code>, keep future shells raw with{" "}
           <Code>export GLIMPS=0</Code>, or set <Code>enabled = false</Code> in{" "}
           <Code>~/.glimpsrc</Code> to turn it off persistently.

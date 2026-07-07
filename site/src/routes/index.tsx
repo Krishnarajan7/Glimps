@@ -1,5 +1,23 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { HeroVideoDialog } from "@/components/ui/hero-video-dialog";
+import { Glimps } from "@/components/ui/glimps";
+import { GlimpsMark } from "@/components/ui/glimps-mark";
+
+/* ------------------------------------------------------------------ */
+/*  DEMO VIDEO — replace these two with your real assets.              */
+/*                                                                    */
+/*  DEMO_VIDEO_SRC: an EMBED url (not a watch url). Examples:          */
+/*    YouTube → https://www.youtube.com/embed/<VIDEO_ID>              */
+/*    Vimeo   → https://player.vimeo.com/video/<VIDEO_ID>            */
+/*    Self-hosted mp4 also works as the src.                          */
+/*                                                                    */
+/*  DEMO_POSTER: a 16:9 image in /public shown before play. Swap      */
+/*    /demo-poster.svg for a real screenshot (e.g. /demo-poster.png). */
+/* ------------------------------------------------------------------ */
+const DEMO_VIDEO_SRC = "https://www.youtube.com/embed/qh3NGpYRG3I"; // TODO: real GLIMPS demo
+const DEMO_POSTER = "/demo-poster.svg";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -93,72 +111,223 @@ function CmdHeader({ cmd, badge, time }: { cmd: string; badge?: string; time?: s
 }
 
 /* ------------------------------------------------------------------ */
-/*  Hero animation — raw JSON morphs into a formatted tree             */
+/*  Hero animation — a live session. Each command runs, dumps raw      */
+/*  output, then GLIMPS anchors it with the ▌ header + format badge    */
+/*  and resolves it line-by-line into color. Finished commands         */
+/*  collapse into their ▌ header rows — scrollback you can actually    */
+/*  read by command, which is the whole product in one loop.           */
 /* ------------------------------------------------------------------ */
 
-function HeroTerminal() {
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 4200);
-    return () => clearInterval(id);
-  }, []);
+type Seg = { t: string; c?: string };
+type HeroScene = {
+  cmd: string;
+  badge: string;
+  time: string;
+  raw: string;
+  lines: Seg[][];
+};
+type ScenePhase = "typing" | "raw" | "fmt";
 
-  const raw = `{"user":{"id":8421,"name":"Ada Lovelace","email":"ada@analytical.dev","active":true,"role":"admin","tags":["founder","math","poetry"]},"meta":{"count":1,"latency_ms":38,"cached":false}}`;
+const SYN = {
+  key: "text-[var(--color-syn-key)]",
+  str: "text-[var(--color-syn-string)]",
+  num: "text-[var(--color-syn-number)]",
+  kw: "text-[var(--color-syn-keyword)]",
+  err: "text-[var(--color-syn-error)]",
+  dim: "text-[var(--color-syn-dim)]",
+};
+
+const HERO_SCENES: HeroScene[] = [
+  {
+    cmd: "curl -s api.example.com/user",
+    badge: "json",
+    time: "14:23:01",
+    raw: '{"user":{"id":8421,"name":"Ada Lovelace","active":true,"tags":["founder","math"]},"latency_ms":38}',
+    lines: [
+      [{ t: "{", c: SYN.dim }],
+      [{ t: "  " }, { t: '"user"', c: SYN.key }, { t: ": {", c: SYN.dim }],
+      [{ t: "    " }, { t: '"id"', c: SYN.key }, { t: ": ", c: SYN.dim }, { t: "8421", c: SYN.num }, { t: ",", c: SYN.dim }],
+      [{ t: "    " }, { t: '"name"', c: SYN.key }, { t: ": ", c: SYN.dim }, { t: '"Ada Lovelace"', c: SYN.str }, { t: ",", c: SYN.dim }],
+      [{ t: "    " }, { t: '"active"', c: SYN.key }, { t: ": ", c: SYN.dim }, { t: "true", c: SYN.kw }, { t: ",", c: SYN.dim }],
+      [{ t: "    " }, { t: '"tags"', c: SYN.key }, { t: ": [", c: SYN.dim }, { t: '"founder"', c: SYN.str }, { t: ", ", c: SYN.dim }, { t: '"math"', c: SYN.str }, { t: "]", c: SYN.dim }],
+      [{ t: "  },", c: SYN.dim }],
+      [{ t: "  " }, { t: '"latency_ms"', c: SYN.key }, { t: ": ", c: SYN.dim }, { t: "38", c: SYN.num }],
+      [{ t: "}", c: SYN.dim }],
+    ],
+  },
+  {
+    cmd: "tail -n 4 app.log",
+    badge: "log",
+    time: "14:23:12",
+    raw: "14:22:01 INFO  server started on :8080\n14:22:04 WARN  cache miss key=session:8421\n14:22:06 ERROR upstream timeout after 3000ms\n14:22:07 INFO  retrying request (1/3)",
+    lines: [
+      [{ t: "14:22:01 ", c: SYN.dim }, { t: "INFO ", c: SYN.str }, { t: " server started on :8080" }],
+      [{ t: "14:22:04 ", c: SYN.dim }, { t: "WARN ", c: SYN.num }, { t: " cache miss key=session:8421" }],
+      [{ t: "14:22:06 ", c: SYN.dim }, { t: "ERROR", c: SYN.err }, { t: " upstream timeout after 3000ms" }],
+      [{ t: "14:22:07 ", c: SYN.dim }, { t: "INFO ", c: SYN.str }, { t: " retrying request (1/3)" }],
+    ],
+  },
+  {
+    cmd: "git diff src/api.ts",
+    badge: "diff",
+    time: "14:23:26",
+    raw: "@@ -12,2 +12,3 @@\n- return fetch(url).then(r => r.json())\n+ const r = await fetch(url)\n+ if (!r.ok) throw new HttpError(r.status)",
+    lines: [
+      [{ t: "@@ -12,2 +12,3 @@", c: SYN.dim }],
+      [{ t: "- return fetch(url).then(r => r.json())", c: SYN.err }],
+      [{ t: "+ const r = await fetch(url)", c: SYN.str }],
+      [{ t: "+ if (!r.ok) throw new HttpError(r.status)", c: SYN.str }],
+    ],
+  },
+];
+
+function usePrefersReducedMotion() {
+  const [reduce, setReduce] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setReduce(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => setReduce(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return reduce;
+}
+
+function FormatBadge({ label }: { label: string }) {
+  return (
+    <span
+      className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+      style={{ background: "var(--color-muted)", color: "var(--color-muted-foreground)" }}
+    >
+      {label}
+    </span>
+  );
+}
+
+const heroLineV = {
+  hidden: { opacity: 0, y: 4 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.18 } },
+};
+
+function HeroTerminal() {
+  const reduce = usePrefersReducedMotion();
+  const [scene, setScene] = useState(0);
+  const [phase, setPhase] = useState<ScenePhase>("typing");
+
+  useEffect(() => {
+    if (reduce) return;
+    const wait = phase === "typing" ? 1100 : phase === "raw" ? 900 : 2700;
+    const t = setTimeout(() => {
+      if (phase === "typing") setPhase("raw");
+      else if (phase === "raw") setPhase("fmt");
+      else {
+        setScene((s) => (s + 1) % HERO_SCENES.length);
+        setPhase("typing");
+      }
+    }, wait);
+    return () => clearTimeout(t);
+  }, [phase, scene, reduce]);
+
+  const active = HERO_SCENES[reduce ? 0 : scene];
+  const history = reduce ? [] : HERO_SCENES.slice(0, scene);
+  const shownPhase: ScenePhase = reduce ? "fmt" : phase;
 
   return (
-    <TerminalFrame title="~/projects/glimps — zsh">
-      <div key={tick} className="relative">
-        {/* Typed command */}
-        <div className="px-4 pt-4 pb-2">
-          <code>
-            <span className="text-[var(--color-syn-dim)]">ada@paper </span>
-            <span className="text-[var(--color-syn-string)]">~/projects/glimps</span>
-            <span className="text-[var(--color-syn-dim)]"> $ </span>
-            <span
-              className="inline-block whitespace-nowrap overflow-hidden align-bottom term-cursor"
-              style={{ animation: "type-in 1.1s steps(30) 0.15s both" }}
+    <TerminalFrame title="~/glimps — glimps session">
+      <p className="sr-only">
+        Animated demo: commands run in a terminal, and GLIMPS marks each one
+        with a ▌ header and formats its output — JSON, logs, and diffs.
+      </p>
+      <div aria-hidden="true" className="h-[310px] sm:h-[330px] overflow-hidden">
+        {/* Finished commands, collapsed to their ▌ anchors */}
+        <AnimatePresence initial={false}>
+          {history.map((s) => (
+            <motion.div
+              key={s.cmd}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, height: 0 }}
+              className="flex items-center gap-2 px-4 py-1.5 border-b border-dashed"
+              style={{ borderColor: "var(--color-terminal-border)" }}
             >
-              curl -s api.example.com/user
-            </span>
+              <span className="text-[var(--color-bar)] select-none">▌</span>
+              <code className={"truncate " + SYN.dim}>$ {s.cmd}</code>
+              <FormatBadge label={s.badge} />
+              <span className={"ml-auto shrink-0 text-[10px] " + SYN.dim}>{s.time}</span>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+
+        {/* Active command: prompt line */}
+        <div className="px-4 pt-3 pb-1">
+          <code>
+            <span className={SYN.str}>~/glimps</span>
+            <span className={SYN.dim}> $ </span>
+            {shownPhase === "typing" ? (
+              <span
+                key={active.cmd}
+                className="inline-block whitespace-nowrap overflow-hidden align-bottom term-cursor"
+                style={{ animation: `type-in 0.85s steps(${active.cmd.length}) 0.1s both` }}
+              >
+                {active.cmd}
+              </span>
+            ) : (
+              <span>{active.cmd}</span>
+            )}
           </code>
         </div>
 
-        {/* Bar sweeps in */}
-        <div className="relative pl-4">
-          <div
-            className="absolute left-4 top-0 bottom-0 w-[3px] origin-top"
-            style={{
-              background: "var(--color-bar)",
-              animation: "bar-sweep 4.2s ease-out infinite",
-            }}
-          />
-
-          {/* Raw output (fades out) */}
-          <pre
-            className="px-4 pt-2 pb-4 text-[var(--color-syn-dim)] whitespace-pre-wrap break-all"
-            style={{ animation: "fade-swap-out 4.2s ease-in-out infinite" }}
-          >
-            {raw}
-          </pre>
-
-          {/* Formatted output (fades in over the raw) */}
-          <pre
-            className="absolute inset-0 px-4 pt-2 pb-4"
-            style={{ animation: "fade-swap-in 4.2s ease-in-out infinite" }}
-          >
-            <JsonTree />
-          </pre>
-        </div>
-
-        {/* Header bar label appears after sweep */}
-        <div
-          className="absolute left-4 top-[3.05rem] -translate-x-[calc(100%+8px)] hidden md:block"
-          style={{ animation: "fade-swap-in 4.2s ease-in-out infinite" }}
-        >
-          <span className="rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-            style={{ background: "var(--color-muted)", color: "var(--color-muted-foreground)" }}>
-            json
-          </span>
+        {/* Active command: output area */}
+        <div className="px-4 pb-3">
+          <AnimatePresence mode="wait">
+            {shownPhase === "raw" && (
+              <motion.pre
+                key={"raw-" + scene}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.14 }}
+                className={"whitespace-pre-wrap break-all " + SYN.dim}
+              >
+                {active.raw}
+              </motion.pre>
+            )}
+            {shownPhase === "fmt" && (
+              <motion.div
+                key={"fmt-" + scene}
+                initial={reduce ? false : "hidden"}
+                animate="show"
+                exit={{ opacity: 0, transition: { duration: 0.12 } }}
+                variants={{ show: { transition: { staggerChildren: 0.045 } } }}
+              >
+                {/* GLIMPS repeats the command in its ▌ header */}
+                <motion.div variants={heroLineV} className="flex items-center gap-2 pb-1">
+                  <span className="text-[var(--color-bar)] font-bold select-none">▌</span>
+                  <code className={"truncate " + SYN.dim}>{active.cmd}</code>
+                  <FormatBadge label={active.badge} />
+                  <span className={"ml-auto shrink-0 text-[10px] " + SYN.dim}>{active.time}</span>
+                </motion.div>
+                <div className="relative pl-3.5">
+                  <motion.div
+                    className="absolute left-0.5 top-0.5 bottom-0.5 w-[3px] rounded-full origin-top"
+                    style={{ background: "var(--color-bar)" }}
+                    initial={reduce ? false : { scaleY: 0 }}
+                    animate={{ scaleY: 1 }}
+                    transition={{ duration: 0.45, ease: "easeOut" }}
+                  />
+                  {active.lines.map((ln, i) => (
+                    <motion.div key={i} variants={heroLineV} className="whitespace-pre">
+                      {ln.map((seg, j) => (
+                        <span key={j} className={seg.c}>
+                          {seg.t}
+                        </span>
+                      ))}
+                    </motion.div>
+                  ))}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </div>
     </TerminalFrame>
@@ -202,9 +371,9 @@ function JsonTree() {
 function Nav({ theme, onToggle }: { theme: "light" | "dark"; onToggle: () => void }) {
   return (
     <header className="relative z-10 border-b" style={{ borderColor: "var(--color-border)" }}>
-      <div className="mx-auto max-w-6xl px-4 sm:px-6 py-3 sm:py-4 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 sm:gap-4">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 py-3 sm:py-4 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 sm:gap-4">
         <a href="#top" className="flex min-w-0 items-center gap-2 font-mono font-semibold">
-          <span className="text-[var(--color-bar)] text-xl leading-none" aria-hidden="true">▌</span>
+          <GlimpsMark size={22} className="shrink-0" />
           <span className="truncate">glimps</span>
           <span className="ml-1 sm:ml-2 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
             style={{ background: "var(--color-muted)", color: "var(--color-muted-foreground)" }}>
@@ -296,12 +465,8 @@ function DiffCard() {
       sign === "+" ? "var(--color-syn-string)" :
       sign === "-" ? "var(--color-syn-error)" :
       "var(--color-syn-dim)";
-    const bg =
-      sign === "+" ? "color-mix(in oklab, var(--color-syn-string) 10%, transparent)" :
-      sign === "-" ? "color-mix(in oklab, var(--color-syn-error) 10%, transparent)" :
-      "transparent";
     return (
-      <div className="px-4 py-0.5" style={{ background: bg, color }}>
+      <div className="px-4 py-0.5" style={{ color }}>
         <span className="inline-block w-4">{sign}</span>{text}
       </div>
     );
@@ -310,6 +475,7 @@ function DiffCard() {
     <TerminalFrame title="git diff HEAD~1 src/api.ts">
       <CmdHeader cmd="git diff HEAD~1 src/api.ts" badge="diff" />
       <div className="py-2">
+        <div className="px-4 py-0.5 text-[var(--color-syn-dim)]">@@ -11,7 +11,8 @@ getUser</div>
         {line(" ", "export async function getUser(id: number) {")}
         {line("-", "  const r = await fetch(`/api/user/${id}`)")}
         {line("+", "  const r = await fetch(`/api/user/${id}`, { cache: 'no-store' })")}
@@ -327,14 +493,10 @@ function StackCard() {
     <TerminalFrame title="python app.py">
       <CmdHeader cmd="python app.py" badge="trace" />
       <div className="px-4 py-3 space-y-1">
-        <div className="text-[var(--color-syn-dim)]">Traceback (most recent call last):</div>
-        <div className="text-[var(--color-syn-dim)]">  File "<span className="text-[var(--color-syn-key)]">app/api/user.py</span>", line <span className="text-[var(--color-syn-number)]">47</span>, in <span className="text-foreground">resolve_user</span></div>
-        <div className="text-[var(--color-syn-dim)]">  File "<span className="text-[var(--color-syn-key)]">app/server.py</span>", line <span className="text-[var(--color-syn-number)]">112</span>, in <span className="text-foreground">handle_request</span></div>
-        <div>
-          <span className="text-[var(--color-syn-error)] font-semibold">KeyError</span>
-          <span className="text-[var(--color-syn-dim)]">: </span>
-          <span className="text-[var(--color-syn-string)]">'id'</span>
-        </div>
+        <div className="text-[var(--color-syn-error)] font-semibold">Traceback (most recent call last):</div>
+        <div className="text-[var(--color-syn-dim)]">  File "app/api/user.py", line 47, in resolve_user</div>
+        <div className="text-[var(--color-syn-dim)]">  File "app/server.py", line 112, in handle_request</div>
+        <div className="text-[var(--color-syn-error)] font-semibold">KeyError: 'id'</div>
       </div>
     </TerminalFrame>
   );
@@ -438,18 +600,21 @@ function Landing() {
       <Nav theme={theme} onToggle={() => setTheme((t) => (t === "light" ? "dark" : "light"))} />
 
       {/* HERO */}
-      <section className="relative z-[1] mx-auto max-w-6xl px-4 sm:px-6 pt-10 sm:pt-16 md:pt-24 pb-14 sm:pb-20">
-        <div className="grid lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] gap-10 sm:gap-12 items-center">
+      <section className="relative z-[1] mx-auto max-w-7xl px-4 sm:px-6 pt-10 sm:pt-16 md:pt-24 pb-14 sm:pb-20">
+        <div className="grid lg:grid-cols-2 gap-10 sm:gap-12 items-center">
           <div>
             <div className="inline-flex items-center gap-2 font-mono text-xs text-muted-foreground mb-5 sm:mb-6">
               <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span>
               <span>zero-config · pass-through · MIT</span>
             </div>
-            <h1 className="font-mono text-[2rem] sm:text-4xl md:text-5xl lg:text-[3.4rem] leading-[1.1] tracking-tight font-semibold">
-              Your terminal output,<br />
-              <span className="text-[var(--color-syn-key)]">finally</span>{" "}
-              <span className="text-[var(--color-syn-string)]">readable</span>
-              <span className="text-[var(--color-bar)]">.</span>
+            <h1 className="font-mono text-[clamp(1.5rem,7.4vw,2.25rem)] sm:text-4xl md:text-5xl lg:text-[clamp(2.4rem,3.7vw,3rem)] leading-[1.12] tracking-tight font-semibold">
+              <span className="whitespace-nowrap">Your terminal output,</span>
+              <br />
+              <span className="whitespace-nowrap">
+                <span className="text-[var(--color-syn-key)]">finally</span>{" "}
+                <span className="text-[var(--color-syn-string)]">readable</span>
+                <span className="text-[var(--color-bar)]">.</span>
+              </span>
             </h1>
             <p className="mt-5 sm:mt-6 text-base md:text-lg text-muted-foreground max-w-xl leading-relaxed">
               Zero-config formatter that marks where your output starts and colors what it
@@ -465,7 +630,7 @@ function Landing() {
                 <span className="text-[var(--color-syn-string)]">→</span>
               </a>
               <a
-                href="#transform"
+                href="#demo"
                 className="inline-flex items-center gap-2 rounded-md border px-5 py-2.5 font-mono text-sm font-medium hover:bg-muted transition-colors"
                 style={{ borderColor: "var(--color-border)" }}
               >
@@ -478,10 +643,40 @@ function Landing() {
         </div>
       </section>
 
+      {/* DEMO */}
+      <section
+        id="demo"
+        className="relative z-[1] border-t"
+        style={{ borderColor: "var(--color-border)" }}
+      >
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 py-14 sm:py-20">
+          <div className="mx-auto max-w-2xl text-center mb-10 sm:mb-12">
+            <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
+              <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> see it in action
+            </div>
+            <h2 className="font-mono text-2xl md:text-3xl font-semibold leading-tight">
+              Watch <Glimps /> format a live session.
+            </h2>
+            <p className="mt-4 text-muted-foreground leading-relaxed">
+              A short screen recording: real commands, real output — reformatted in place
+              as it streams, with the <span className="font-mono text-foreground">▌</span>{" "}
+              header marking where each command begins.
+            </p>
+          </div>
+          <div className="mx-auto max-w-4xl">
+            <HeroVideoDialog
+              animationStyle="from-center"
+              videoSrc={DEMO_VIDEO_SRC}
+              thumbnailSrc={DEMO_POSTER}
+              thumbnailAlt="GLIMPS reformatting terminal output — click to play the demo"
+            />
+          </div>
+        </div>
+      </section>
 
       {/* PROBLEM */}
       <section className="relative z-[1] border-t" style={{ borderColor: "var(--color-border)" }}>
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-14 sm:py-20">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 py-14 sm:py-20">
           <div className="grid md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
             <div>
               <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
@@ -514,7 +709,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
 
       {/* TRANSFORM GALLERY */}
       <section id="transform" className="relative z-[1] border-t" style={{ borderColor: "var(--color-border)" }}>
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-14 sm:py-20">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 py-14 sm:py-20">
           <div className="max-w-2xl mb-12">
             <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
               <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> the transform
@@ -523,7 +718,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
               Same bytes. Now legible.
             </h2>
             <p className="mt-4 text-muted-foreground leading-relaxed">
-              GLIMPS recognizes what your commands emit and reformats it in place — with the
+              <Glimps /> recognizes what your commands emit and reformats it in place — with the
               command echoed above as a{" "}
               <span className="font-mono text-foreground">▌</span> header bar so you always
               know where output began.
@@ -543,14 +738,14 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
 
       {/* GETS OUT OF THE WAY */}
       <section className="relative z-[1] border-t" style={{ borderColor: "var(--color-border)" }}>
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-14 sm:py-20">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 py-14 sm:py-20">
           <div className="grid md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
             <div>
               <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
                 <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> it gets out of the way
               </div>
               <h2 className="font-mono text-2xl md:text-3xl font-semibold leading-tight">
-                When GLIMPS isn't confident, it does nothing.
+                When <Glimps /> isn't confident, it does nothing.
               </h2>
               <p className="mt-4 text-muted-foreground leading-relaxed">
                 Full-screen apps, binary streams, and output that's already colored pass
@@ -586,7 +781,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
 
       {/* TRUST */}
       <section id="trust" className="relative z-[1] border-t" style={{ borderColor: "var(--color-border)" }}>
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-14 sm:py-20">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 py-14 sm:py-20">
           <div className="max-w-2xl mb-10">
             <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
               <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> trust & safety
@@ -595,7 +790,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
               Four hard promises.
             </h2>
             <p className="mt-4 text-muted-foreground leading-relaxed">
-              GLIMPS sits in front of secrets, SSH sessions, and production output. It has
+              <Glimps /> sits in front of secrets, SSH sessions, and production output. It has
               to be honest about what it does and doesn't do.
             </p>
           </div>
@@ -621,7 +816,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
               {
                 k: "04",
                 t: "Instant off switch.",
-                d: "Set GLIMPS=0 and it disables completely for the current command or shell.",
+                d: "Start a shell with GLIMPS=0 (or export it) and formatting is disabled completely — pure pass-through.",
               },
             ].map((p) => (
               <div key={p.k} className="p-6 bg-background">
@@ -638,7 +833,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
 
       {/* INSTALL */}
       <section id="install" className="relative z-[1] border-t" style={{ borderColor: "var(--color-border)" }}>
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-14 sm:py-20">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 py-14 sm:py-20">
           <div className="grid md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
             <div>
               <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
@@ -648,7 +843,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
                 One install. One guarded line.
               </h2>
               <p className="mt-4 text-muted-foreground leading-relaxed">
-                No config file. No plugins. If GLIMPS ever misbehaves, remove the line — or
+                No config file. No plugins. If <Glimps /> ever misbehaves, remove the line — or
                 just{" "}
                 <code className="px-1 py-0.5 rounded bg-muted text-foreground text-xs">
                   export GLIMPS=0
@@ -693,9 +888,9 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
 
       {/* FOOTER */}
       <footer className="relative z-[1] border-t" style={{ borderColor: "var(--color-border)" }}>
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-8 sm:py-10 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 py-8 sm:py-10 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4">
           <div className="flex min-w-0 items-center gap-2 font-mono text-sm">
-            <span className="text-[var(--color-bar)] text-lg" aria-hidden="true">▌</span>
+            <GlimpsMark size={18} className="shrink-0" />
             <span className="text-foreground">glimps</span>
             <span className="text-muted-foreground truncate">
               — a terminal you already have, just legible.
