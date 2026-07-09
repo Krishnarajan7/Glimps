@@ -38,7 +38,8 @@ scripts/dogfood-macos.sh session
 This starts `target/debug/glimps` with a temporary `ZDOTDIR`, temporary
 `.glimpsrc`, and temporary zsh config. It does not append anything to
 `~/.zshrc`, does not call `cargo install`, and cleans up the temporary directory
-after the session exits.
+after the session exits. It preserves your real `HOME`, so Git credential
+helpers and desktop applications continue using their normal user configuration.
 
 Inside the session, check the normal happy path:
 

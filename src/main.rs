@@ -74,8 +74,8 @@ fn main() -> Result<()> {
     // The shell to wrap. Defaults to the user's $SHELL, falling back to zsh.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
 
-    let status = pty::run_shell(&shell, clock, config)?;
-    print_farewell(status);
+    let outcome = pty::run_shell(&shell, clock, config)?;
+    print_farewell(outcome.signaled);
 
     // Exit via `_exit`, not `std::process::exit`: the latter runs libc atexit /
     // teardown, which can race the detached stdin/stdout I/O threads as they wind
@@ -83,11 +83,11 @@ fn main() -> Result<()> {
     // The terminal was already restored when `run_shell` returned (RawGuard drop)
     // and all output is flushed, so an immediate exit is safe.
     // SAFETY: `_exit` simply terminates the process; it touches no Rust state.
-    unsafe { libc::_exit(status) }
+    unsafe { libc::_exit(outcome.code) }
 }
 
-fn print_farewell(status: i32) {
-    if status != 0 || !std::io::stderr().is_terminal() {
+fn print_farewell(signaled: bool) {
+    if signaled || !std::io::stderr().is_terminal() {
         return;
     }
     let mut stderr = std::io::stderr();

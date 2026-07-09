@@ -13,6 +13,7 @@ check     Build and run repo-local automated checks. Does not install anything.
 session   Start an interactive GLIMPS-wrapped zsh using a temporary ZDOTDIR.
 
 Neither mode edits ~/.zshrc, installs GLIMPS globally, or changes your login shell.
+The session preserves HOME so Git credentials and desktop tools keep working.
 EOF
 }
 
@@ -120,7 +121,7 @@ Try these commands:
 Exit with: exit
 EOF
 
-  ZDOTDIR="$DOGFOOD_TMP" HOME="$DOGFOOD_TMP" GLIMPSRC="$DOGFOOD_TMP/.glimpsrc" SHELL="$(command -v zsh)" "$BIN"
+  ZDOTDIR="$DOGFOOD_TMP" GLIMPSRC="$DOGFOOD_TMP/.glimpsrc" SHELL="$(command -v zsh)" "$BIN"
 }
 
 main() {

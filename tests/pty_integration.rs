@@ -255,6 +255,25 @@ fn exit_command_terminates() {
         s.wait_exit(EXIT_BUDGET),
         "glimps did not terminate after `exit` (the original hang bug)"
     );
+    assert!(
+        s.wait_for(b"glimps:", Duration::from_secs(1)),
+        "normal `exit` did not print the farewell"
+    );
+}
+
+#[test]
+fn exit_after_failed_command_still_prints_farewell() {
+    let mut s = spawn("/bin/sh", None);
+    thread::sleep(STARTUP);
+    s.write(b"false\nexit\n");
+    assert!(
+        s.wait_exit(EXIT_BUDGET),
+        "glimps did not terminate after a failed command followed by `exit`"
+    );
+    assert!(
+        s.wait_for(b"glimps:", Duration::from_secs(1)),
+        "a previous nonzero command incorrectly suppressed the farewell"
+    );
 }
 
 #[test]
@@ -265,6 +284,10 @@ fn ctrl_d_terminates() {
     assert!(
         s.wait_exit(EXIT_BUDGET),
         "glimps did not terminate after Ctrl-D"
+    );
+    assert!(
+        s.wait_for(b"glimps:", Duration::from_secs(1)),
+        "Ctrl-D did not print the farewell"
     );
 }
 
@@ -280,6 +303,10 @@ fn sigterm_terminates_and_reaps() {
     assert!(
         s.wait_exit(EXIT_BUDGET),
         "glimps did not terminate after SIGTERM (`kill`)"
+    );
+    assert!(
+        !contains(&s.snapshot(), b"glimps:"),
+        "forced termination should not print a conversational farewell"
     );
 }
 

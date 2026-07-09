@@ -24,11 +24,18 @@ use crate::config::Config;
 use crate::format::{Clock, Formatter};
 use crate::terminal::{term_size, RawGuard};
 
+/// How the wrapped shell session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellExit {
+    pub code: i32,
+    pub signaled: bool,
+}
+
 /// Wrap `shell` inside a PTY and run it transparently. Returns the shell's
-/// exit code once it terminates. `clock` sources the separator timestamp
-/// (captured by the caller while still single-threaded); `config` is the loaded
-/// `.glimpsrc`.
-pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<i32> {
+/// exit code and whether GLIMPS received a termination signal. `clock` sources
+/// the separator timestamp (captured by the caller while still single-threaded);
+/// `config` is the loaded `.glimpsrc`.
+pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit> {
     let (cols, rows) = term_size();
 
     let pty_system = native_pty_system();
@@ -196,5 +203,8 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<i32> {
         Duration::from_secs(2)
     };
     let _ = done_rx.recv_timeout(drain);
-    Ok(exit_code)
+    Ok(ShellExit {
+        code: exit_code,
+        signaled,
+    })
 }
