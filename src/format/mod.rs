@@ -480,7 +480,12 @@ impl Formatter {
         };
         self.emit_header(out);
         let color = if self.config.color {
-            self.theme.info
+            self.theme.action
+        } else {
+            ""
+        };
+        let path_color = if self.config.color {
+            self.theme.path
         } else {
             ""
         };
@@ -492,6 +497,7 @@ impl Formatter {
         let mut line = Vec::new();
         line.extend_from_slice(color.as_bytes());
         line.extend_from_slice(b"moved to ");
+        line.extend_from_slice(path_color.as_bytes());
         // Strip control bytes from the captured cwd before it enters this
         // GLIMPS-authored breadcrumb (BUG #2 — a maliciously named dir or a
         // forged `7338` could otherwise inject escapes into our chrome).
@@ -511,10 +517,19 @@ impl Formatter {
             return;
         };
         let failed = exit_code != 0;
+        if !failed
+            && !self.command_had_visible_output
+            && self.emit_silent_command_breadcrumb(out, &cmd)
+        {
+            return;
+        }
         if !failed && !self.command_had_visible_output {
             return;
         }
-        if !failed && is_command(&self.pending_command, b"cd") {
+        if !failed
+            && (is_command(&self.pending_command, b"cd")
+                || is_command(&self.pending_command, b"pwd"))
+        {
             return;
         }
 
@@ -561,6 +576,39 @@ impl Formatter {
         }
     }
 
+    fn emit_silent_command_breadcrumb(&mut self, out: &mut Vec<u8>, cmd: &[u8]) -> bool {
+        let Some(message) = silent_command_breadcrumb(cmd) else {
+            return false;
+        };
+        self.emit_header(out);
+        let color = if self.config.color {
+            self.theme.action
+        } else {
+            ""
+        };
+        let path_color = if self.config.color {
+            self.theme.path
+        } else {
+            ""
+        };
+        let reset = if self.config.color {
+            self.theme.reset
+        } else {
+            ""
+        };
+        let path_start = breadcrumb_path_start(&message).unwrap_or(message.len());
+        let mut line =
+            Vec::with_capacity(message.len() + color.len() + path_color.len() + reset.len() + 1);
+        line.extend_from_slice(color.as_bytes());
+        line.extend_from_slice(&message[..path_start]);
+        line.extend_from_slice(path_color.as_bytes());
+        line.extend_from_slice(&message[path_start..]);
+        line.extend_from_slice(reset.as_bytes());
+        line.push(b'\n');
+        push_crlf(out, &line);
+        true
+    }
+
     /// Stream plain-text output line-by-line, coloring each *complete* line (log
     /// severity / HTTP status) and carrying the trailing partial line across
     /// chunks. Returns the next state: `Stream` with the carried partial, or
@@ -603,6 +651,10 @@ impl Formatter {
 
     fn format_command_line(&mut self, line: &[u8]) -> Option<Vec<u8>> {
         match command_view(&self.pending_command)? {
+            CommandView::Pwd if self.command_output_line_count == 0 => {
+                format_pwd_line(line, &self.theme)
+            }
+            CommandView::Pwd => None,
             CommandView::Find => linefmt::colorize_find_line(line, &self.theme),
             CommandView::Ls => linefmt::colorize_ls_line(line, &self.theme),
             CommandView::Du => linefmt::colorize_du_line(line, &self.theme),
@@ -816,8 +868,191 @@ fn is_command(command: &Option<Vec<u8>>, expected: &[u8]) -> bool {
         .is_some_and(|name| name.as_bytes() == expected)
 }
 
+fn format_pwd_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    let (content, ending) = split_line_ending(line);
+    if content.is_empty() || !content.starts_with(b"/") || looks_binary(content) {
+        return None;
+    }
+    std::str::from_utf8(content).ok()?;
+
+    let color = theme.action;
+    let path_color = theme.path;
+    let reset = theme.reset;
+    let mut out = Vec::with_capacity(line.len() + "working directory ".len() + 24);
+    out.extend_from_slice(color.as_bytes());
+    out.extend_from_slice(b"working directory ");
+    out.extend_from_slice(path_color.as_bytes());
+    out.extend_from_slice(&cmdline::sanitize_display(content));
+    out.extend_from_slice(reset.as_bytes());
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+fn silent_command_breadcrumb(command: &[u8]) -> Option<Vec<u8>> {
+    let words = shell_words(command)?;
+    let (cmd_idx, name) = words.iter().enumerate().find_map(|(idx, word)| {
+        let text = std::str::from_utf8(word).ok()?;
+        if matches!(text, "touch" | "mkdir" | "rm") {
+            Some((idx, text))
+        } else {
+            None
+        }
+    })?;
+    let args = &words[cmd_idx + 1..];
+    let targets = match name {
+        "touch" => command_targets(args, &["-t", "-d", "-r", "--date", "--reference"]),
+        "mkdir" => command_targets(args, &["-m", "--mode", "-Z", "--context"]),
+        "rm" => command_targets(args, &[]),
+        _ => Vec::new(),
+    };
+    if targets.is_empty() {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    match (name, targets.len()) {
+        ("touch", 1) => {
+            out.extend_from_slice(b"touched file ");
+            out.extend_from_slice(&cmdline::sanitize_display(&targets[0]));
+        }
+        ("mkdir", 1) => {
+            out.extend_from_slice(b"created folder ");
+            out.extend_from_slice(&cmdline::sanitize_display(&targets[0]));
+        }
+        ("rm", 1) => {
+            out.extend_from_slice(b"removed target ");
+            out.extend_from_slice(&cmdline::sanitize_display(&targets[0]));
+        }
+        ("touch", n) => push_target_summary(&mut out, b"touched", n, b"files", &targets),
+        ("mkdir", n) => push_target_summary(&mut out, b"created", n, b"folders", &targets),
+        ("rm", n) => push_target_summary(&mut out, b"removed", n, b"targets", &targets),
+        _ => return None,
+    }
+    Some(out)
+}
+
+fn breadcrumb_path_start(message: &[u8]) -> Option<usize> {
+    const SINGULAR_PREFIXES: &[&[u8]] = &[b"touched file ", b"created folder ", b"removed target "];
+    SINGULAR_PREFIXES
+        .iter()
+        .find_map(|prefix| message.starts_with(prefix).then_some(prefix.len()))
+        .or_else(|| {
+            message
+                .windows(2)
+                .position(|window| window == b": ")
+                .map(|position| position + 2)
+        })
+}
+
+fn push_target_summary(
+    out: &mut Vec<u8>,
+    verb: &[u8],
+    count: usize,
+    noun: &[u8],
+    targets: &[Vec<u8>],
+) {
+    out.extend_from_slice(verb);
+    out.push(b' ');
+    out.extend_from_slice(count.to_string().as_bytes());
+    out.push(b' ');
+    out.extend_from_slice(noun);
+    out.extend_from_slice(b": ");
+    for (idx, target) in targets.iter().take(3).enumerate() {
+        if idx > 0 {
+            out.extend_from_slice(b", ");
+        }
+        out.extend_from_slice(&cmdline::sanitize_display(target));
+    }
+    if count > 3 {
+        out.extend_from_slice(b", +");
+        out.extend_from_slice((count - 3).to_string().as_bytes());
+        out.extend_from_slice(b" more");
+    }
+}
+
+fn command_targets(args: &[Vec<u8>], options_with_value: &[&str]) -> Vec<Vec<u8>> {
+    let mut targets = Vec::new();
+    let mut end_options = false;
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let text = std::str::from_utf8(arg).unwrap_or("");
+        if !end_options && text == "--" {
+            end_options = true;
+            continue;
+        }
+        if !end_options && text.starts_with('-') && text.len() > 1 {
+            if options_with_value
+                .iter()
+                .any(|opt| text == *opt || text.starts_with(&format!("{opt}=")))
+                && !text.contains('=')
+            {
+                skip_next = true;
+            }
+            continue;
+        }
+        targets.push(arg.clone());
+    }
+    targets
+}
+
+fn shell_words(command: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let mut words = Vec::new();
+    let mut word = Vec::new();
+    let mut quote = None;
+    let mut i = 0;
+    while i < command.len() {
+        let b = command[i];
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            } else if q == b'"' && b == b'\\' && i + 1 < command.len() {
+                i += 1;
+                word.push(command[i]);
+            } else {
+                word.push(b);
+            }
+        } else if b.is_ascii_whitespace() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        } else if matches!(b, b'\'' | b'"') {
+            quote = Some(b);
+        } else if matches!(b, b'|' | b'&' | b';' | b'<' | b'>' | b'(' | b')') {
+            return None;
+        } else if b == b'\\' && i + 1 < command.len() {
+            i += 1;
+            word.push(command[i]);
+        } else {
+            word.push(b);
+        }
+        i += 1;
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    Some(words)
+}
+
+fn split_line_ending(line: &[u8]) -> (&[u8], &[u8]) {
+    if let Some(content) = line.strip_suffix(b"\r\n") {
+        (content, &line[line.len() - 2..])
+    } else if let Some(content) = line.strip_suffix(b"\n") {
+        (content, &line[line.len() - 1..])
+    } else {
+        (line, b"")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandView {
+    Pwd,
     Find,
     Ls,
     Du,
@@ -842,6 +1077,7 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         return Some(view);
     }
     match name.as_str() {
+        "pwd" => Some(CommandView::Pwd),
         "find" => Some(CommandView::Find),
         "ls" => Some(CommandView::Ls),
         "du" => Some(CommandView::Du),

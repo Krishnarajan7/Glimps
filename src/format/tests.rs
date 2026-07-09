@@ -157,6 +157,7 @@ fn bypassed_command_output_is_not_formatted() {
     if !f.is_enabled() {
         return;
     }
+    f.theme = Theme::plain();
     let mut out = Vec::new();
     // `vim` is on the default bypass list -> its output streams untouched,
     // even output that looks like JSON.
@@ -286,7 +287,6 @@ fn run(chunks: &[&[u8]]) -> Vec<u8> {
 /// Drive chunks through one plain-theme Formatter, then flush (PTY EOF).
 fn run_flush(chunks: &[&[u8]]) -> Vec<u8> {
     let mut f = Formatter::new();
-    f.theme = Theme::plain();
     let mut out = Vec::new();
     for c in chunks {
         out.extend_from_slice(&f.process(c));
@@ -330,7 +330,7 @@ fn json_output_is_pretty_printed_with_separator_and_crlf() {
     out.extend_from_slice(&f.process(C));
     out.extend_from_slice(&f.process(br#"{"a":1,"b":[2,3]}"#));
     out.extend_from_slice(&f.process(D)); // command end -> flush + format
-    let pretty = crlf(b"{\n  \"a\": 1,\n  \"b\": [\n    2,\n    3\n  ]\n}");
+    let pretty = crlf(b"{\n  \"a\": 1,\n  \"b\": [2, 3]\n}");
     let expected = cat(&[C, &sep(), &badge("JSON"), &pretty, D]);
     assert_eq!(out, expected);
 }
@@ -438,7 +438,7 @@ fn log_and_http_lines_are_colored_streaming() {
     // plain line is untouched.
     assert!(s.contains("\x1b[32mINFO starting up\x1b[0m\n")); // green
     assert!(s.contains("\x1b[31mERROR boom\x1b[0m\n")); // red
-    assert!(s.contains("\x1b[33mHTTP/1.1 404 Not Found\x1b[0m\n")); // yellow
+    assert!(s.contains("\x1b[38;5;220mHTTP/1.1 404 Not Found\x1b[0m\n")); // yellow
     assert!(s.contains("just a plain line\n"));
     assert!(!s.contains("\x1b[31mjust a plain line")); // plain line not colored
 }
@@ -470,7 +470,7 @@ fn http_status_split_across_chunks_is_colored_whole() {
     out.extend_from_slice(&f.process(b"04 Not Found\n"));
     out.extend_from_slice(&f.process(D));
     let s = String::from_utf8(out).unwrap();
-    assert!(s.contains("\x1b[33mHTTP/1.1 404 Not Found\x1b[0m\n"));
+    assert!(s.contains("\x1b[38;5;220mHTTP/1.1 404 Not Found\x1b[0m\n"));
 }
 
 #[test]
@@ -575,7 +575,6 @@ fn successful_silent_cd_gets_a_moved_breadcrumb() {
     if !f.is_enabled() {
         return;
     }
-    f.theme = Theme::plain();
     let mut out = Vec::new();
     out.extend_from_slice(&f.process(&cmd_marker(b"cd docs")));
     out.extend_from_slice(&f.process(C));
@@ -585,7 +584,142 @@ fn successful_silent_cd_gets_a_moved_breadcrumb() {
     assert!(s.contains("cd docs"));
     assert!(!s.contains("[CD]"));
     assert!(!s.contains("\x1b[7m CD \x1b[0m"));
-    assert!(s.contains("moved to /Users/apple/Projects/Glimps/docs"));
+    assert!(s.contains("moved to "));
+    assert!(s.contains("/Users/apple/Projects/Glimps/docs"));
+    assert!(s.contains(
+        "\x1b[38;2;5;130;202mmoved to \x1b[38;2;142;202;230m/Users/apple/Projects/Glimps/docs\x1b[0m"
+    ));
+    assert!(!s.contains("done exit 0"));
+}
+
+#[test]
+fn successful_pwd_gets_working_directory_without_done_footer() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"pwd")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"/Users/apple/Projects/Glimps\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("pwd"));
+    assert!(s.contains("working directory "));
+    assert!(s.contains("/Users/apple/Projects/Glimps"));
+    assert!(
+        s.contains(
+            "\x1b[38;2;5;130;202mworking directory \x1b[38;2;142;202;230m/Users/apple/Projects/Glimps\x1b[0m"
+        )
+    );
+    assert!(!s.contains("done exit 0"));
+}
+
+#[test]
+fn failed_pwd_still_gets_failure_footer() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"pwd")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("failed exit 1"));
+    assert!(s.contains("command failed: pwd"));
+}
+
+#[test]
+fn successful_touch_gets_a_file_breadcrumb_without_done_footer() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"touch 'hello world.txt'")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("touch 'hello world.txt'"));
+    assert!(s.contains("touched file "));
+    assert!(s.contains("hello world.txt"));
+    assert!(
+        s.contains("\x1b[38;2;5;130;202mtouched file \x1b[38;2;142;202;230mhello world.txt\x1b[0m")
+    );
+    assert!(!s.contains("done exit 0"));
+}
+
+#[test]
+fn successful_mkdir_gets_a_folder_breadcrumb_without_done_footer() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"mkdir -p logs/cache tmp/out")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("created 2 folders: "));
+    assert!(s.contains("logs/cache, tmp/out"));
+    assert!(s.contains(
+        "\x1b[38;2;5;130;202mcreated 2 folders: \x1b[38;2;142;202;230mlogs/cache, tmp/out\x1b[0m"
+    ));
+    assert!(!s.contains("done exit 0"));
+}
+
+#[test]
+fn successful_rm_gets_a_conservative_target_breadcrumb_without_done_footer() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"rm -rf target/cache old.log")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("removed 2 targets: "));
+    assert!(s.contains("target/cache, old.log"));
+    assert!(s.contains(
+        "\x1b[38;2;5;130;202mremoved 2 targets: \x1b[38;2;142;202;230mtarget/cache, old.log\x1b[0m"
+    ));
+    assert!(!s.contains("done exit 0"));
+}
+
+#[test]
+fn failed_rm_keeps_failure_footer_and_no_success_breadcrumb() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"rm missing.txt")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(!s.contains("removed target missing.txt"));
+    assert!(s.contains("failed exit 1"));
+    assert!(s.contains("command failed: rm missing.txt"));
+}
+
+#[test]
+fn compound_file_commands_do_not_get_guessed_breadcrumbs() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"touch a && rm b")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(!s.contains("touched file"));
+    assert!(!s.contains("removed target"));
     assert!(!s.contains("done exit 0"));
 }
 
@@ -657,8 +791,8 @@ fn cat_markdown_gets_project_doc_coloring() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[36m# GLIMPS\x1b[0m"));
-    assert!(s.contains("\x1b[33m- \x1b[0muse \x1b[35m`cat README.md`\x1b[0m, \x1b[35m`git status`\x1b[0m, and \x1b[32m**safe pass-through**\x1b[0m."));
-    assert!(s.contains("\x1b[32m[`docs/SAFETY_INVARIANTS.md`]\x1b[0m\x1b[2m(./docs/SAFETY_INVARIANTS.md)\x1b[0m and \x1b[32m[`ROADMAP.md`]\x1b[0m\x1b[2m(./ROADMAP.md)\x1b[0m."));
+    assert!(s.contains("\x1b[38;5;220m- \x1b[0muse \x1b[35m`cat README.md`\x1b[0m, \x1b[35m`git status`\x1b[0m, and \x1b[38;5;117m**safe pass-through**\x1b[0m."));
+    assert!(s.contains("\x1b[38;5;117m[`docs/SAFETY_INVARIANTS.md`]\x1b[0m\x1b[2m(./docs/SAFETY_INVARIANTS.md)\x1b[0m and \x1b[38;5;117m[`ROADMAP.md`]\x1b[0m\x1b[2m(./ROADMAP.md)\x1b[0m."));
     assert!(s.contains("\x1b[35m```bash\x1b[0m"));
     assert!(s.contains("GLIMPS"));
     assert!(s.contains("zsh"));
@@ -678,8 +812,8 @@ fn cat_config_gets_key_value_coloring() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[35m[package]\x1b[0m"));
-    assert!(s.contains("\x1b[36mname\x1b[0m \x1b[2m=\x1b[0m\x1b[32m \"glimps\"\x1b[0m"));
-    assert!(s.contains("\x1b[36mversion\x1b[0m \x1b[2m=\x1b[0m\x1b[33m 1\x1b[0m"));
+    assert!(s.contains("\x1b[36mname\x1b[0m \x1b[2m=\x1b[0m\x1b[38;5;117m \"glimps\"\x1b[0m"));
+    assert!(s.contains("\x1b[36mversion\x1b[0m \x1b[2m=\x1b[0m\x1b[38;5;220m 1\x1b[0m"));
     assert!(s.contains("\x1b[2m# comment\x1b[0m"));
 }
 
@@ -698,9 +832,9 @@ fn cat_csv_gets_header_and_cell_coloring() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[36mname\x1b[0m\x1b[2m,\x1b[0m\x1b[36mage\x1b[0m"));
-    assert!(s.contains("\x1b[32mAda\x1b[0m\x1b[2m,\x1b[0m\x1b[33m37\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117mAda\x1b[0m\x1b[2m,\x1b[0m\x1b[38;5;220m37\x1b[0m"));
     assert!(s.contains("\x1b[35mtrue\x1b[0m"));
-    assert!(s.contains("\x1b[32m\"Lovelace, Ada\"\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117m\"Lovelace, Ada\"\x1b[0m"));
 }
 
 #[test]
@@ -716,7 +850,7 @@ fn cat_tsv_gets_tabular_coloring() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[36mservice\x1b[0m\x1b[2m\t\x1b[0m\x1b[36mlatency_ms\x1b[0m"));
-    assert!(s.contains("\x1b[32mapi\x1b[0m\x1b[2m\t\x1b[0m\x1b[33m42\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117mapi\x1b[0m\x1b[2m\t\x1b[0m\x1b[38;5;220m42\x1b[0m"));
 }
 
 #[test]
@@ -736,8 +870,8 @@ fn cat_sql_gets_query_coloring() {
     assert!(s.contains("\x1b[2m-- users table\x1b[0m"));
     assert!(s.contains("\x1b[35mCREATE\x1b[0m \x1b[35mTABLE\x1b[0m users"));
     assert!(s.contains("\x1b[35mselect\x1b[0m \x1b[2m*\x1b[0m \x1b[35mfrom\x1b[0m users"));
-    assert!(s.contains("\x1b[33m42\x1b[0m"));
-    assert!(s.contains("\x1b[32m'Ada''s'\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m42\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117m'Ada''s'\x1b[0m"));
 }
 
 #[test]
@@ -756,7 +890,7 @@ fn psql_result_table_gets_value_coloring() {
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[36m id \x1b[0m\x1b[2m|\x1b[0m\x1b[36m name \x1b[0m"));
     assert!(s.contains("\x1b[2m----+------+--------\x1b[0m"));
-    assert!(s.contains("\x1b[33m  1 \x1b[0m\x1b[2m|\x1b[0m\x1b[32m Ada  \x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m  1 \x1b[0m\x1b[2m|\x1b[0m\x1b[38;5;117m Ada  \x1b[0m"));
     assert!(s.contains("\x1b[2m(1 row)\x1b[0m"));
 }
 
@@ -776,7 +910,7 @@ fn mysql_boxed_result_table_gets_value_coloring() {
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[2m+----+--------+\x1b[0m"));
     assert!(s.contains("\x1b[2m|\x1b[0m\x1b[36m id \x1b[0m"));
-    assert!(s.contains("\x1b[33m  2 \x1b[0m\x1b[2m|\x1b[0m\x1b[32m Grace  \x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m  2 \x1b[0m\x1b[2m|\x1b[0m\x1b[38;5;117m Grace  \x1b[0m"));
 }
 
 #[test]
@@ -794,7 +928,7 @@ fn sqlite_pipe_result_table_gets_value_coloring() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[36mid\x1b[0m\x1b[2m|\x1b[0m\x1b[36mname\x1b[0m"));
-    assert!(s.contains("\x1b[33m1\x1b[0m\x1b[2m|\x1b[0m\x1b[32mAda\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m1\x1b[0m\x1b[2m|\x1b[0m\x1b[38;5;117mAda\x1b[0m"));
     assert!(s.contains("\x1b[35mtrue\x1b[0m"));
 }
 
@@ -813,9 +947,9 @@ fn git_short_status_gets_status_and_path_coloring() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[2m## \x1b[0m\x1b[36mmain\x1b[0m"));
-    assert!(s.contains("\x1b[33m M\x1b[0m\x1b[2m \x1b[0m\x1b[36mREADME.md\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m M\x1b[0m\x1b[2m \x1b[0m\x1b[36mREADME.md\x1b[0m"));
     assert!(s.contains("\x1b[32mA \x1b[0m\x1b[2m \x1b[0m\x1b[36msrc/new.rs\x1b[0m"));
-    assert!(s.contains("\x1b[32m??\x1b[0m\x1b[2m \x1b[0m\x1b[36mscratch.txt\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117m??\x1b[0m\x1b[2m \x1b[0m\x1b[36mscratch.txt\x1b[0m"));
     assert!(s.contains("\x1b[31mD \x1b[0m\x1b[2m \x1b[0m\x1b[36mold.rs\x1b[0m"));
     assert!(s.contains("\x1b[35mR \x1b[0m\x1b[2m \x1b[0m\x1b[36mold.rs\x1b[0m\x1b[2m -> \x1b[0m\x1b[36mnew.rs\x1b[0m"));
 }
@@ -839,7 +973,7 @@ fn git_status_long_gets_branch_headings_and_paths() {
     assert!(
         s.contains("\x1b[2m  (use \"git add <file>...\" to update what will be committed)\x1b[0m")
     );
-    assert!(s.contains("\x1b[33mmodified:\x1b[0m\x1b[2m   \x1b[0m\x1b[36mREADME.md\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220mmodified:\x1b[0m\x1b[2m   \x1b[0m\x1b[36mREADME.md\x1b[0m"));
     assert!(s.contains("\x1b[35mUntracked files:\x1b[0m"));
     assert!(s.contains("\x1b[32mnothing to commit, working tree clean\x1b[0m"));
 }
@@ -859,9 +993,9 @@ fn git_log_oneline_gets_hash_and_ref_coloring() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains(
-        "\x1b[33m1a2b3c4\x1b[0m \x1b[36m(HEAD -> main, origin/main)\x1b[0m Add git polish"
+        "\x1b[38;5;220m1a2b3c4\x1b[0m \x1b[36m(HEAD -> main, origin/main)\x1b[0m Add git polish"
     ));
-    assert!(s.contains("\x1b[33m5d6e7f8\x1b[0m Previous work"));
+    assert!(s.contains("\x1b[38;5;220m5d6e7f8\x1b[0m Previous work"));
 }
 
 #[test]
@@ -896,9 +1030,9 @@ fn git_diff_stat_gets_file_count_and_change_coloring() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[36m README.md       \x1b[0m\x1b[2m|\x1b[0m"));
-    assert!(s.contains("\x1b[33m10\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m10\x1b[0m"));
     assert!(s.contains("\x1b[32m+++++\x1b[0m\x1b[31m-----\x1b[0m"));
-    assert!(s.contains("\x1b[33m2\x1b[0m files changed"));
+    assert!(s.contains("\x1b[38;5;220m2\x1b[0m files changed"));
     assert!(s.contains("\x1b[32minsertions(+)\x1b[0m"));
     assert!(s.contains("\x1b[31mdeletions(-)\x1b[0m"));
 }
@@ -921,7 +1055,7 @@ fn git_numstat_and_name_status_get_value_coloring() {
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[32m7\x1b[0m\x1b[2m\t\x1b[0m\x1b[31m5\x1b[0m"));
     assert!(s.contains("\x1b[36mREADME.md\x1b[0m"));
-    assert!(s.contains("\x1b[33mM\x1b[0m\x1b[2m\t\x1b[0m\x1b[36mREADME.md\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220mM\x1b[0m\x1b[2m\t\x1b[0m\x1b[36mREADME.md\x1b[0m"));
     assert!(s.contains("\x1b[35mR100\x1b[0m\x1b[2m\t\x1b[0m\x1b[36mold.rs\tnew.rs\x1b[0m"));
 }
 
@@ -939,9 +1073,9 @@ fn git_show_stat_keeps_commit_header_and_colors_stats() {
     ));
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
-    assert!(s.contains("\x1b[35mcommit\x1b[0m \x1b[33m1a2b3c4d5e6f7890\x1b[0m"));
+    assert!(s.contains("\x1b[35mcommit\x1b[0m \x1b[38;5;220m1a2b3c4d5e6f7890\x1b[0m"));
     assert!(s.contains("\x1b[36m README.md \x1b[0m\x1b[2m|\x1b[0m"));
-    assert!(s.contains("\x1b[33m1\x1b[0m file changed"));
+    assert!(s.contains("\x1b[38;5;220m1\x1b[0m file changed"));
     assert!(s.contains("\x1b[31mdeletion(-)\x1b[0m"));
 }
 
@@ -966,8 +1100,8 @@ fn cat_jsonl_gets_streaming_json_line_coloring() {
         "JSONL should not get a buffered JSON badge"
     );
     assert!(s.contains("\x1b[36m\"level\"\x1b[0m"));
-    assert!(s.contains("\x1b[32m\"info\"\x1b[0m"));
-    assert!(s.contains("\x1b[33m2\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117m\"info\"\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m2\x1b[0m"));
     assert!(s.contains("\x1b[35mfalse\x1b[0m"));
 }
 
@@ -987,8 +1121,8 @@ fn cat_rust_source_gets_syntax_coloring() {
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[2m// boot path\x1b[0m"));
     assert!(s.contains("\x1b[35mpub\x1b[0m \x1b[35mfn\x1b[0m \x1b[36mmain\x1b[0m"));
-    assert!(s.contains("\x1b[35mlet\x1b[0m answer \x1b[2m=\x1b[0m \x1b[33m42\x1b[0m"));
-    assert!(s.contains("\x1b[32m\"ok\"\x1b[0m"));
+    assert!(s.contains("\x1b[35mlet\x1b[0m answer \x1b[2m=\x1b[0m \x1b[38;5;220m42\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117m\"ok\"\x1b[0m"));
 }
 
 #[test]
@@ -1007,7 +1141,7 @@ fn head_python_source_gets_syntax_coloring() {
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[2m# deploy helper\x1b[0m"));
     assert!(s.contains("\x1b[35mdef\x1b[0m \x1b[36mgreet\x1b[0m"));
-    assert!(s.contains("\x1b[35mreturn\x1b[0m f\x1b[32m\"hi {name}\"\x1b[0m"));
+    assert!(s.contains("\x1b[35mreturn\x1b[0m f\x1b[38;5;117m\"hi {name}\"\x1b[0m"));
 }
 
 #[test]
@@ -1031,7 +1165,7 @@ fn generic_json_lines_stream_instead_of_buffering_whole_output() {
         "JSON-lines must not be buffered as one document"
     );
     assert!(s.contains("\x1b[36m\"a\"\x1b[0m"));
-    assert!(s.contains("\x1b[33m1\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m1\x1b[0m"));
     assert!(s.contains("\x1b[36m\"b\"\x1b[0m"));
 }
 
@@ -1045,11 +1179,37 @@ fn ls_output_gets_command_aware_columns() {
     out.extend_from_slice(&f.process(&cmd_marker(b"ls -la")));
     out.extend_from_slice(&f.process(C));
     out.extend_from_slice(&f.process(b"drwxr-xr-x   8 krishv  staff   256 Jun 28 09:10 src\n"));
+    out.extend_from_slice(&f.process(b"-rw-r--r--   1 krishv  staff   312 Jun 28 09:10 .env\n"));
+    out.extend_from_slice(&f.process(b"drwxr-xr-x   3 krishv  staff    96 Jun 28 09:10 .vscode\n"));
+    out.extend_from_slice(&f.process(b"drwxr-xr-x  18 krishv  staff   576 Jun 28 09:10 .\n"));
+    out.extend_from_slice(&f.process(b"drwxr-xr-x  30 krishv  staff   960 Jun 28 09:10 ..\n"));
     out.extend_from_slice(&f.process(D));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[2mdrwxr-xr-x\x1b[0m"));
-    assert!(s.contains("\x1b[33m256\x1b[0m"));
-    assert!(s.contains("\x1b[36msrc\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m256\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;122;162;247msrc\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;69;73;85m.env\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;69;73;85m.vscode\x1b[0m"));
+    assert!(!s.contains("\x1b[38;2;69;73;85m.\x1b[0m"));
+    assert!(!s.contains("\x1b[38;2;69;73;85m..\x1b[0m"));
+}
+
+#[test]
+fn ls_simple_output_distinguishes_hidden_names() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"ls -a")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b".  ..  .git  README.md\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[38;2;69;73;85m.git\x1b[0m"));
+    assert!(s.contains("\x1b[36mREADME.md\x1b[0m"));
+    assert!(!s.contains("\x1b[38;2;69;73;85m.\x1b[0m"));
+    assert!(!s.contains("\x1b[38;2;69;73;85m..\x1b[0m"));
 }
 
 #[test]
@@ -1068,10 +1228,10 @@ fn du_and_df_outputs_highlight_sizes_and_capacity() {
     out.extend_from_slice(&f.process(b"devfs 203Ki 203Ki 0Bi 100% /dev\n"));
     out.extend_from_slice(&f.process(D));
     let s = String::from_utf8_lossy(&out);
-    assert!(s.contains("\x1b[33m12K\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m12K\x1b[0m"));
     assert!(s.contains("\x1b[36m./src\x1b[0m"));
-    assert!(s.contains("\x1b[33m203Ki\x1b[0m"));
-    assert!(s.contains("\x1b[33m100%\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m203Ki\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m100%\x1b[0m"));
 }
 
 #[test]
@@ -1089,9 +1249,11 @@ fn ps_output_highlights_process_columns() {
     out.extend_from_slice(&f.process(D));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[36mkrishv\x1b[0m"));
-    assert!(s.contains("\x1b[33m42311\x1b[0m"));
-    assert!(s.contains("\x1b[33m0.4\x1b[0m"));
-    assert!(s.contains("\x1b[32mzsh\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m42311\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m0.4\x1b[0m"));
+    assert!(s.contains("zsh"));
+    assert!(s.contains("\x1b[38;5;153mzsh\x1b[0m"));
+    assert!(!s.contains("\x1b[32mzsh\x1b[0m"));
 }
 
 #[test]
@@ -1111,7 +1273,7 @@ fn dig_output_highlights_dns_sections_and_records() {
     assert!(s.contains("\x1b[35m;; ANSWER SECTION:\x1b[0m"));
     assert!(s.contains("\x1b[36m360astra.io.\x1b[0m"));
     assert!(s.contains("\x1b[35mA\x1b[0m"));
-    assert!(s.contains("\x1b[32m82.180.142.20\x1b[0m"));
+    assert!(s.contains("\x1b[36m82.180.142.20\x1b[0m"));
 }
 
 #[test]
@@ -1421,7 +1583,7 @@ fn two_consecutive_json_outputs_each_framed_and_formatted() {
         out.extend_from_slice(&f.process(part));
     }
     let one = crlf(b"{\n  \"a\": 1\n}");
-    let two = crlf(b"[\n  1,\n  2\n]");
+    let two = crlf(b"[1, 2]");
     let expected = cat(&[
         C,
         &sep(),

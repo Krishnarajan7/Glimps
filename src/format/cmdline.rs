@@ -1,11 +1,11 @@
-//! Command-line colorizer — turns a captured command into a syntax-colored
-//! header, and extracts the command name for name-based bypass.
+//! Command-line helpers for the ▌ header: neutralize control bytes so a captured
+//! command is safe inside GLIMPS's own chrome, and extract the command name for
+//! name-based bypass.
 //!
-//! This is a *best-effort visual* tokenizer, not a shell parser: it colors the
-//! command name, quoted strings, flags, and operators, and leaves anything it's
-//! unsure about in the default color. It is **byte-safe** — [`render`] only
-//! inserts color escapes around the original bytes, never drops or reorders them,
-//! so with the plain theme the output is byte-identical to the input.
+//! Both operate on the raw captured command bytes and are **byte-safe**. The
+//! header renderer only inserts SGR color escapes around safe display bytes, and
+//! the sanitizer only drops or replaces control bytes (all single-byte ASCII),
+//! never splitting a multibyte UTF-8 sequence.
 
 use super::theme::Theme;
 
@@ -20,14 +20,12 @@ fn is_operator(b: u8) -> bool {
     matches!(b, b'|' | b'&' | b';' | b'<' | b'>' | b'(' | b')')
 }
 
-/// Render `cmd` as a syntax-colored line: command name, `"quoted strings"`,
-/// `-flags`, and operators get colors; everything else stays default. Preserves
-/// every input byte (only color escapes are inserted).
+/// Render `cmd` as a syntax-colored line: command names, quoted strings, flags,
+/// and operators get colors; everything else stays default. Preserves every
+/// input byte, only inserting color escapes.
 pub fn render(cmd: &[u8], theme: &Theme) -> Vec<u8> {
     let mut out = Vec::with_capacity(cmd.len() * 2);
     let mut i = 0;
-    // Whether the next bare word is a command name (true at start and right after
-    // a command separator like `|`/`;`/`&`).
     let mut expect_command = true;
 
     while i < cmd.len() {
@@ -37,12 +35,11 @@ pub fn render(cmd: &[u8], theme: &Theme) -> Vec<u8> {
             while i < cmd.len() && cmd[i].is_ascii_whitespace() {
                 i += 1;
             }
-            out.extend_from_slice(&cmd[start..i]); // whitespace: verbatim
+            out.extend_from_slice(&cmd[start..i]);
         } else if b == b'"' || b == b'\'' {
             let start = i;
             i += 1;
             while i < cmd.len() && cmd[i] != b {
-                // In double quotes, a backslash escapes the next byte.
                 if b == b'"' && cmd[i] == b'\\' && i + 1 < cmd.len() {
                     i += 2;
                 } else {
@@ -50,7 +47,7 @@ pub fn render(cmd: &[u8], theme: &Theme) -> Vec<u8> {
                 }
             }
             if i < cmd.len() {
-                i += 1; // include the closing quote
+                i += 1;
             }
             paint(&mut out, theme.string, &cmd[start..i], theme.reset);
         } else if is_operator(b) {
@@ -60,8 +57,6 @@ pub fn render(cmd: &[u8], theme: &Theme) -> Vec<u8> {
             }
             let op = &cmd[start..i];
             paint(&mut out, theme.comment, op, theme.reset);
-            // A command separator starts a fresh command (so `ls | grep` colors
-            // both names); redirects (`>`/`<`) do not.
             if op.iter().any(|&c| matches!(c, b'|' | b';' | b'&')) {
                 expect_command = true;
             }
@@ -78,11 +73,11 @@ pub fn render(cmd: &[u8], theme: &Theme) -> Vec<u8> {
             let word = &cmd[start..i];
             let color = if expect_command {
                 expect_command = false;
-                theme.key // command name
+                theme.key
             } else if word.first() == Some(&b'-') {
-                theme.warn // flag
+                theme.warn
             } else {
-                "" // argument / path: default color
+                ""
             };
             paint(&mut out, color, word, theme.reset);
         }
@@ -171,16 +166,16 @@ mod tests {
     #[test]
     fn colors_command_string_and_flag() {
         let s = rendered(br#"curl -s "https://x.com""#);
-        assert!(s.contains("\x1b[36mcurl\x1b[0m")); // command -> cyan
-        assert!(s.contains("\x1b[33m-s\x1b[0m")); // flag -> yellow
-        assert!(s.contains("\x1b[32m\"https://x.com\"\x1b[0m")); // string -> green
+        assert!(s.contains("\x1b[36mcurl\x1b[0m"));
+        assert!(s.contains("\x1b[38;5;220m-s\x1b[0m"));
+        assert!(s.contains("\x1b[38;5;117m\"https://x.com\"\x1b[0m"));
     }
 
     #[test]
     fn colors_both_sides_of_a_pipe() {
         let s = rendered(b"ls | grep foo");
         assert!(s.contains("\x1b[36mls\x1b[0m"));
-        assert!(s.contains("\x1b[36mgrep\x1b[0m")); // grep is a command name too
+        assert!(s.contains("\x1b[36mgrep\x1b[0m"));
     }
 
     #[test]
@@ -228,17 +223,16 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// Byte-safety: with the plain theme, coloring is the identity — no input
-        /// byte is ever dropped, reordered, or altered; and it never panics.
-        #[test]
-        fn prop_plain_render_is_identity(cmd: Vec<u8>) {
-            proptest::prop_assert_eq!(render(&cmd, &Theme::plain()), cmd);
-        }
-
         /// first_word never panics on arbitrary input.
         #[test]
         fn prop_first_word_never_panics(cmd: Vec<u8>) {
             let _ = first_word(&cmd);
+        }
+
+        /// Byte-safety: with the plain theme, coloring is the identity.
+        #[test]
+        fn prop_plain_render_is_identity(cmd: Vec<u8>) {
+            proptest::prop_assert_eq!(render(&cmd, &Theme::plain()), cmd);
         }
 
         /// sanitize_display never panics and never emits a control byte; on

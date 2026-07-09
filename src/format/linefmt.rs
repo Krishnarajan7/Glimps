@@ -286,10 +286,16 @@ pub fn colorize_ls_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     let first = &content[words[0].0..words[0].1];
     let long_listing = looks_like_mode(first) && words.len() >= 8;
     let name_start = if long_listing { 8 } else { 0 };
-    let name_color = match first.first().copied() {
-        Some(b'd') => theme.key,
-        Some(b'l') => theme.keyword,
-        _ => theme.string,
+    let long_name_is_hidden =
+        long_listing && is_hidden_ls_name(&content[words[name_start].0..words[name_start].1]);
+    let name_color = if long_name_is_hidden {
+        theme.hidden
+    } else {
+        match first.first().copied() {
+            Some(b'd') => theme.folder,
+            Some(b'l') => theme.keyword,
+            _ => theme.string,
+        }
     };
 
     Some(colorize_words(content, ending, theme, |idx, word| {
@@ -303,10 +309,16 @@ pub fn colorize_ls_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
             }
         } else if word == b"->" {
             Some(theme.comment)
+        } else if is_hidden_ls_name(word) {
+            Some(theme.hidden)
         } else {
             Some(theme.key)
         }
     }))
+}
+
+fn is_hidden_ls_name(name: &[u8]) -> bool {
+    name.starts_with(b".") && name != b"." && name != b".."
 }
 
 /// Color `du` output: size first, path after.
@@ -370,7 +382,7 @@ pub fn colorize_ps_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
             2 | 3 => Some(theme.number),
             4 | 5 => Some(theme.debug),
             6..=9 => Some(theme.comment),
-            _ => Some(theme.string),
+            _ => Some(theme.muted),
         },
     ))
 }
@@ -409,7 +421,7 @@ pub fn colorize_dns_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
             1 if word.iter().all(u8::is_ascii_digit) => Some(theme.number),
             2 => Some(theme.comment),
             3 => Some(theme.keyword),
-            _ => Some(theme.string),
+            _ => Some(theme.key),
         },
     ))
 }
@@ -3000,7 +3012,7 @@ mod tests {
         assert!(colored(b"ERROR: boom\n").unwrap().starts_with("\x1b[31m"));
         assert!(colored(b"[WARN] low disk\n")
             .unwrap()
-            .starts_with("\x1b[33m"));
+            .starts_with("\x1b[38;5;220m"));
         assert!(colored(b"2026-01-01 INFO started\n")
             .unwrap()
             .starts_with("\x1b[32m"));
@@ -3028,7 +3040,7 @@ mod tests {
             .starts_with("\x1b[2m"));
         assert!(colored(b"HTTP/1.1 404 Not Found\n")
             .unwrap()
-            .starts_with("\x1b[33m"));
+            .starts_with("\x1b[38;5;220m"));
         assert!(colored(b"HTTP/1.1 500 Boom\n")
             .unwrap()
             .starts_with("\x1b[31m"));
