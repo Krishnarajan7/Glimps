@@ -156,10 +156,17 @@ The pinned line is output that already scrolled past, re-quoted inside
 GLIMPS-authored chrome — so it goes through `sanitize_display` like the
 command does (same injection concern, same fix).
 
-Scope guard: pinning only runs on **bounded, fully-buffered** output
-(existing `buffer_cap` rules). Streaming/unbounded output gets F1's footer
-only. The PTY loop never blocks on a scan (charter: detection is O(n),
-heavier work only on bounded buffers).
+Scope guard (design corrected during implementation): pinning is a
+**read-only shadow line assembler** fed at the segment level. The original
+"buffered output only" idea was wrong — the flagship case (`cargo build`)
+emits *colored* error lines, which the OSC scanner routes to Pass segments,
+so they never reach the buffered or streaming paths as whole lines. The
+shadow assembler observes Output + in-zone Pass bytes, strips escapes with
+a small state machine, and matches on clean text. Strictly bounded: one
+line buffer capped at 1 KiB (longer lines are counted, never matched),
+three candidate slots, O(n) feed, and it cannot alter emitted bytes — the
+worst bug is a missed pin, never corrupted output. Disarmed for bypassed
+commands and binary output.
 
 ### F4 — Failure summary panel for known runners (M/L) — later, demand-driven
 

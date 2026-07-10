@@ -52,6 +52,12 @@ fn cwd_marker(cwd: &[u8]) -> Vec<u8> {
     v
 }
 
+/// A command-end marker carrying an arbitrary exit code (`D0`/`D1` cover the
+/// common cases; footer-decode tests need the full range).
+fn d_exit(code: i32) -> Vec<u8> {
+    format!("\x1b]133;D;{code}\x07").into_bytes()
+}
+
 #[test]
 fn header_shows_the_colored_command() {
     let mut f = Formatter::new(); // default colored theme
@@ -774,6 +780,329 @@ fn silent_nonzero_command_gets_failure_summary() {
     assert!(s.contains("false"));
     assert!(s.contains("failed exit 1 in "));
     assert!(s.contains("command failed: false"));
+}
+
+#[test]
+fn exit_137_footer_decodes_sigkill() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"docker build -t api .")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"Step 1/9 : FROM rust\n"));
+    out.extend_from_slice(&f.process(&d_exit(137)));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\u{2717} killed exit 137 in "));
+    assert!(s.contains("\u{2014} SIGKILL: force-killed, often out of memory"));
+    assert!(s.contains("command failed: docker build -t api ."));
+}
+
+#[test]
+fn exit_127_footer_explains_command_not_found() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"gti status")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"zsh: command not found: gti\n"));
+    out.extend_from_slice(&f.process(&d_exit(127)));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\u{2717} failed exit 127 in "));
+    assert!(s.contains("\u{2014} command not found on PATH"));
+}
+
+#[test]
+fn ctrl_c_footer_is_a_neutral_notice_never_red() {
+    // The alarm-fatigue rule: a deliberate Ctrl-C must not be styled like a
+    // failure, or the red footer stops meaning anything.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"sleep 100")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"^C\n"));
+    out.extend_from_slice(&f.process(&d_exit(130)));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\u{2298} interrupted exit 130 in "));
+    assert!(s.contains("Ctrl-C, not an error"));
+    // Dim (theme.debug), not red (theme.error), and no failure recap line.
+    assert!(s.contains("\x1b[2m\u{2298} interrupted"));
+    assert!(!s.contains("\x1b[31m"));
+    assert!(!s.contains("command failed"));
+}
+
+#[test]
+fn sigterm_footer_is_a_notice_without_failure_recap() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"npm run dev")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"listening on :3000\n"));
+    out.extend_from_slice(&f.process(&d_exit(143)));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\u{2298} terminated exit 143 in "));
+    assert!(s.contains("SIGTERM: asked to stop"));
+    assert!(!s.contains("command failed"));
+}
+
+#[test]
+fn config_explain_off_keeps_raw_exit_codes() {
+    let cfg = Config {
+        failures: crate::config::Failures {
+            explain: false,
+            ..crate::config::Failures::default()
+        },
+        ..Config::default()
+    };
+    let mut f = fmt_with(cfg);
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"docker build .")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"Step 1/9\n"));
+    out.extend_from_slice(&f.process(&d_exit(137)));
+    let s = String::from_utf8_lossy(&out);
+    // The class verb survives (it is styling, not a story) …
+    assert!(s.contains("\u{2717} killed exit 137 in "));
+    // … but the decode text is gone.
+    assert!(!s.contains("SIGKILL"));
+    assert!(!s.contains("out of memory"));
+}
+
+#[test]
+fn config_failures_disabled_suppresses_footer_but_not_breadcrumbs() {
+    let cfg = Config {
+        failures: crate::config::Failures {
+            enabled: false,
+            ..crate::config::Failures::default()
+        },
+        ..Config::default()
+    };
+    // No footer, even for a hard failure.
+    let mut f = fmt_with(cfg.clone());
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"false")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(&d_exit(1)));
+    let s = String::from_utf8_lossy(&out);
+    assert!(!s.contains("failed exit"));
+    assert!(!s.contains("command failed"));
+    // Silent-cd breadcrumbs are separator chrome, not failure intelligence —
+    // they survive the failures switch.
+    let mut f = fmt_with(cfg);
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cd docs")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(&cwd_marker(b"/Users/apple/Projects/Glimps/docs")));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("moved to "));
+}
+
+#[test]
+fn failed_colored_cargo_build_pins_the_error_line() {
+    // The flagship: rustc errors are COLORED under a PTY, so their bytes
+    // travel as Pass segments. The pin must still assemble, strip, and
+    // quote them — with the `-->` location attached and a distance hint.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cargo build")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"   Compiling glimps v0.0.1\n"));
+    out.extend_from_slice(
+        &f.process(b"\x1b[1m\x1b[31merror[E0308]\x1b[0m\x1b[1m: mismatched types\x1b[0m\n"),
+    );
+    out.extend_from_slice(&f.process(b"\x1b[1m\x1b[34m  --> \x1b[0msrc/pty.rs:214:18\n"));
+    out.extend_from_slice(&f.process(b"   |\n214 |     let n: usize = read_result;\n   |\n"));
+    out.extend_from_slice(&f.process(b"error: could not compile `glimps` due to 1 error\n"));
+    out.extend_from_slice(&f.process(&d_exit(101)));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\u{2717} failed exit 101 in "));
+    assert!(
+        s.contains("\u{21b3} error[E0308]: mismatched types \u{2192} src/pty.rs:214:18"),
+        "pin line missing or wrong: {s:?}"
+    );
+    assert!(s.contains("(\u{2191} 5 lines up)"));
+    assert!(s.contains("command failed: cargo build"));
+}
+
+#[test]
+fn failed_python_script_pins_the_final_exception() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"python app.py")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"Traceback (most recent call last):\n"));
+    out.extend_from_slice(&f.process(b"  File \"app.py\", line 7, in <module>\n"));
+    out.extend_from_slice(&f.process(b"ValueError: broken config\n"));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\u{21b3} ValueError: broken config \u{2192} app.py:7"));
+    // The exception was the last line: no distance hint.
+    assert!(!s.contains("lines up"));
+}
+
+#[test]
+fn pin_is_failure_only_never_success_or_notice() {
+    // The same ERROR line in the output; only a Failure exit quotes it.
+    for (marker, expect_pin) in [(d_exit(1), true), (d_exit(0), false), (d_exit(130), false)] {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(&cmd_marker(b"./job.sh")));
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"ERROR connection reset by peer\n"));
+        out.extend_from_slice(&f.process(&marker));
+        let s = String::from_utf8_lossy(&out);
+        assert_eq!(
+            s.contains('\u{21b3}'),
+            expect_pin,
+            "exit marker {marker:?}: {s:?}"
+        );
+    }
+}
+
+#[test]
+fn config_pin_errors_off_keeps_footer_but_drops_quote() {
+    let cfg = Config {
+        failures: crate::config::Failures {
+            pin_errors: false,
+            ..crate::config::Failures::default()
+        },
+        ..Config::default()
+    };
+    let mut f = fmt_with(cfg);
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"./job.sh")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"ERROR boom\n"));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("failed exit 1 in "));
+    assert!(!s.contains('\u{21b3}'));
+}
+
+#[test]
+fn bypassed_command_is_never_pinned() {
+    // ssh is on the default bypass list: minimal chrome, no quoting of
+    // remote output — even when it fails.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"ssh host")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"error: remote thing broke\n"));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(!s.contains('\u{21b3}'), "bypass must not pin: {s:?}");
+}
+
+#[test]
+fn binary_output_is_never_pinned() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat blob.bin")));
+    out.extend_from_slice(&f.process(C));
+    // Binary from the first bytes; an "error:" string embedded in it must
+    // not surface in the footer.
+    out.extend_from_slice(&f.process(b"\x00\x01\x02error: fake\n\x03\x04\n"));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(!s.contains('\u{21b3}'), "binary must not pin: {s:?}");
+}
+
+#[test]
+fn pinned_line_is_truncated_on_a_char_boundary() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    // A confidently-matched error line far longer than the display cap,
+    // ending in multibyte chars right around the cut.
+    let mut long = b"error: ".to_vec();
+    long.extend_from_slice("é".repeat(200).as_bytes());
+    long.push(b'\n');
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"make")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(&long));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    let pin_line = s
+        .lines()
+        .find(|l| l.contains('\u{21b3}'))
+        .expect("pin line present");
+    assert!(
+        pin_line.ends_with('\u{2026}'),
+        "truncated with …: {pin_line:?}"
+    );
+    assert!(
+        !pin_line.contains('\u{fffd}'),
+        "no split chars: {pin_line:?}"
+    );
+}
+
+#[test]
+fn config_on_success_off_silences_done_but_not_failures() {
+    let cfg = Config {
+        failures: crate::config::Failures {
+            on_success: crate::config::SuccessFooter::Off,
+            ..crate::config::Failures::default()
+        },
+        ..Config::default()
+    };
+    let mut f = fmt_with(cfg.clone());
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"echo hi")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"hi\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("hi\n"));
+    assert!(!s.contains("done exit 0"));
+    // Failures stay loud regardless.
+    let mut f = fmt_with(cfg);
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"false")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("failed exit 1 in "));
 }
 
 #[test]
@@ -1804,6 +2133,12 @@ proptest::proptest! {
         buffer_cap in 0usize..2048,
         line_cap in 0usize..2048,
         sniff_cap in 0usize..128,
+        failures_enabled: bool,
+        success_off: bool,
+        explain: bool,
+        pin_errors: bool,
+        exit_code in proptest::option::of(-300i32..400),
+        cmd in proptest::option::of(proptest::collection::vec(0u8..=255, 0..64)),
         body in proptest::collection::vec(0u8..=255, 0..256),
     ) {
         let cfg = Config {
@@ -1813,10 +2148,34 @@ proptest::proptest! {
             timestamp: false,
             bypass: Vec::new(),
             formatters: crate::config::Formatters { json, html, logs, http, diff, stacktrace },
+            failures: crate::config::Failures {
+                enabled: failures_enabled,
+                on_success: if success_off {
+                    crate::config::SuccessFooter::Off
+                } else {
+                    crate::config::SuccessFooter::Dim
+                },
+                explain,
+                pin_errors,
+            },
             limits: crate::config::Limits { buffer_cap, line_cap, sniff_cap },
         };
         let mut f = Formatter::build(Clock::Off, true, cfg);
-        let stream = [C, &body, D].concat();
+        // Half the runs end with a bare `D`, half with `D;<code>` across the
+        // full (incl. out-of-range/negative) exit-code space, so the footer
+        // path itself is fuzzed alongside the formatters.
+        let end = match exit_code {
+            Some(code) => d_exit(code),
+            None => D.to_vec(),
+        };
+        // An optional command capture (arbitrary bytes, incl. control chars)
+        // makes the footer actually fire — without a captured command the
+        // status path returns early — and fuzzes its sanitization (BUG #2).
+        let start = match &cmd {
+            Some(cmd) => cmd_marker(cmd),
+            None => Vec::new(),
+        };
+        let stream = [&start, C, &body, &end].concat();
         let mut out = f.process(&stream).into_owned();
         out.extend_from_slice(&f.flush()); // also exercises EOF flush; must not panic
         if !enabled {

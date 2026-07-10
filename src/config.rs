@@ -20,6 +20,12 @@
 //! diff = true        # unified-diff coloring
 //! stacktrace = true  # stack-trace / panic highlighting
 //!
+//! [failures]
+//! enabled = true      # the command status footer (exit code + duration)
+//! on_success = "dim"  # "dim" = quiet footer after success; "off" = none
+//! explain = true      # decode exit codes ("command not found", SIGKILL, …)
+//! pin_errors = true   # quote the first error line of failed output
+//!
 //! [limits]
 //! buffer_cap = 1048576   # max bytes buffered to detect JSON/HTML (1 MiB)
 //! line_cap   = 65536     # max bytes of one un-terminated streamed line (64 KiB)
@@ -51,7 +57,42 @@ pub struct Config {
     /// full-screen programs). Matched against the command's basename.
     pub bypass: Vec<String>,
     pub formatters: Formatters,
+    pub failures: Failures,
     pub limits: Limits,
+}
+
+/// Command status footer (exit code, duration, failure decode) switches.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Failures {
+    /// Master switch for the status footer. `false` = no footer, ever
+    /// (silent-command breadcrumbs like `moved to …` are separator chrome
+    /// and stay governed by `separator`, not this).
+    pub enabled: bool,
+    /// How loud the footer is after a *successful* command.
+    pub on_success: SuccessFooter,
+    /// Append the human decode of the exit code ("command not found on
+    /// PATH", "SIGKILL: force-killed, often out of memory"). `false` keeps
+    /// the raw `exit N` only.
+    pub explain: bool,
+    /// Quote the first high-confidence error line of a failed command's
+    /// output in the footer (`↳ error[E0308]: … (↑ 47 lines up)`), so the
+    /// cause is visible without scrolling. Detection is deliberately
+    /// conservative — no confident match, no quote.
+    pub pin_errors: bool,
+}
+
+/// Success-footer loudness. Only exit 0 is affected: failures stay loud, and
+/// notices (Ctrl-C, SIGTERM, SIGPIPE) still show their dim one-liner —
+/// acknowledging "you stopped this after 8.1s" is the point of the notice
+/// class. `enabled = false` is the switch that silences those too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SuccessFooter {
+    /// A dim `done exit 0 in 1.2s` line (the default).
+    Dim,
+    /// No footer after successful commands at all.
+    Off,
 }
 
 /// Per-content-type enable switches.
@@ -86,7 +127,19 @@ impl Default for Config {
             timestamp: true,
             bypass: default_bypass(),
             formatters: Formatters::default(),
+            failures: Failures::default(),
             limits: Limits::default(),
+        }
+    }
+}
+
+impl Default for Failures {
+    fn default() -> Self {
+        Failures {
+            enabled: true,
+            on_success: SuccessFooter::Dim,
+            explain: true,
+            pin_errors: true,
         }
     }
 }
@@ -203,6 +256,42 @@ mod tests {
         assert!(c.enabled);
         assert!(c.formatters.json);
         assert_eq!(c.limits.line_cap, DEFAULT_LINE_CAP);
+    }
+
+    #[test]
+    fn failures_default_to_on_dim_explained() {
+        let c = Config::default();
+        assert!(c.failures.enabled);
+        assert_eq!(c.failures.on_success, SuccessFooter::Dim);
+        assert!(c.failures.explain);
+        // An empty file keeps the same defaults.
+        let c = Config::parse("").unwrap();
+        assert!(c.failures.enabled && c.failures.explain);
+    }
+
+    #[test]
+    fn failures_section_overrides() {
+        let c = Config::parse(
+            "[failures]\non_success = \"off\"\nexplain = false\npin_errors = false\n",
+        )
+        .unwrap();
+        assert_eq!(c.failures.on_success, SuccessFooter::Off);
+        assert!(!c.failures.explain);
+        assert!(!c.failures.pin_errors);
+        // Untouched key keeps its default.
+        assert!(c.failures.enabled);
+        // And pinning defaults on.
+        assert!(Config::default().failures.pin_errors);
+    }
+
+    #[test]
+    fn failures_bad_values_are_errors() {
+        // Typos and invalid enum values surface as parse errors (-> warning +
+        // defaults at load), consistent with the rest of the config.
+        assert!(Config::parse("[failures]\non_success = \"loud\"\n").is_err());
+        assert!(Config::parse("[failures]\nexplian = false\n").is_err());
+        assert!(Config::parse("[failures]\npin_error = false\n").is_err());
+        assert!(Config::parse("[failure]\nenabled = false\n").is_err());
     }
 
     #[test]

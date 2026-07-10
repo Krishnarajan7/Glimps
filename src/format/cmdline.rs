@@ -129,7 +129,10 @@ fn is_env_assignment(word: &str) -> bool {
 ///
 /// Byte-safe on arbitrary input: control bytes are all single-byte ASCII, so
 /// dropping them can never split a multibyte UTF-8 sequence, and it never
-/// panics. This must ONLY be applied to GLIMPS-generated chrome — never to
+/// panics. The result is additionally guaranteed to be valid UTF-8: GLIMPS-
+/// authored chrome must never emit invalid sequences (invariant #4), and a
+/// forged marker or hostile filename can carry them — invalid bytes become
+/// U+FFFD. This must ONLY be applied to GLIMPS-generated chrome — never to
 /// pass-through output.
 pub(crate) fn sanitize_display(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
@@ -146,7 +149,12 @@ pub(crate) fn sanitize_display(bytes: &[u8]) -> Vec<u8> {
             in_control_run = false;
         }
     }
-    out
+    match String::from_utf8_lossy(&out) {
+        // Already valid — no copy was made, return the buffer as-is.
+        std::borrow::Cow::Borrowed(_) => out,
+        // Invalid sequences were replaced with U+FFFD.
+        std::borrow::Cow::Owned(fixed) => fixed.into_bytes(),
+    }
 }
 
 fn paint(out: &mut Vec<u8>, color: &str, text: &[u8], reset: &str) {
@@ -220,6 +228,12 @@ mod tests {
         // Normal printable text (incl. multibyte UTF-8) is untouched.
         assert_eq!(sanitize_display(b"echo hi"), b"echo hi".to_vec());
         assert_eq!("café ▌".as_bytes(), sanitize_display("café ▌".as_bytes()));
+        // Invalid UTF-8 (forged marker / hostile filename) becomes U+FFFD
+        // instead of leaking into GLIMPS-authored chrome.
+        assert_eq!(
+            sanitize_display(b"echo \xff\xfe hi"),
+            "echo \u{fffd}\u{fffd} hi".as_bytes().to_vec()
+        );
     }
 
     proptest::proptest! {
@@ -235,12 +249,14 @@ mod tests {
             proptest::prop_assert_eq!(render(&cmd, &Theme::plain()), cmd);
         }
 
-        /// sanitize_display never panics and never emits a control byte; on
-        /// arbitrary input the output holds no `0x00..=0x1F` or `0x7F`.
+        /// sanitize_display never panics, never emits a control byte, and its
+        /// output is always valid UTF-8 (invariant #4 — GLIMPS chrome must
+        /// never inject invalid sequences, whatever a forged marker carried).
         #[test]
         fn prop_sanitize_display_removes_all_controls(bytes: Vec<u8>) {
             let out = sanitize_display(&bytes);
             proptest::prop_assert!(out.iter().all(|&b| b > 0x1F && b != 0x7F));
+            proptest::prop_assert!(std::str::from_utf8(&out).is_ok());
         }
     }
 }

@@ -32,18 +32,21 @@
 
 mod cmdline;
 mod diff;
+mod exitcode;
 mod html;
 mod http;
 mod json;
 mod linefmt;
 mod osc133;
+mod pin;
 mod theme;
 
 use std::borrow::Cow;
 use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
-use crate::config::Config;
+use crate::config::{Config, SuccessFooter};
+use exitcode::ExitClass;
 use osc133::{Osc133Scanner, Seg};
 // `Zone` is the seam's vocabulary; only tests consume it directly today.
 #[cfg_attr(not(test), allow(unused_imports))]
@@ -190,6 +193,13 @@ pub struct Formatter {
     /// Complete output lines seen for this command. Used by command-aware
     /// project-file formatters that treat the first row as a header.
     command_output_line_count: usize,
+    /// Read-only error-line observer for the failure footer (F3). Fed the
+    /// output zone's bytes — including in-zone Pass escapes, which is where
+    /// colored compiler errors live — and never emits a byte itself.
+    pin: pin::ErrorPin,
+    /// Whether pinning observes the current command. Disarmed for bypassed
+    /// commands, on binary output, and when config turns pinning off.
+    pin_armed: bool,
     /// Fenced code language while streaming a Markdown file. This lets
     /// `cat README.md` color all lines inside ```bash / ```rust blocks
     /// consistently instead of treating each line as unrelated prose.
@@ -241,6 +251,8 @@ impl Formatter {
             command_started_at: None,
             command_had_visible_output: false,
             command_output_line_count: 0,
+            pin: pin::ErrorPin::new(),
+            pin_armed: false,
             markdown_fence: None,
             was_alt_screen: false,
             buffered,
@@ -323,12 +335,25 @@ impl Formatter {
         let mut out = Vec::with_capacity(chunk.len());
         for seg in &segments {
             match *seg {
-                Seg::Output(start, end) => self.push_output(&chunk[start..end], &mut out),
+                Seg::Output(start, end) => {
+                    self.push_output(&chunk[start..end], &mut out);
+                    // Observe after push_output so a binary disarm (in
+                    // `decide`) already covers this same segment.
+                    if self.pin_armed {
+                        self.pin.feed(&chunk[start..end]);
+                    }
+                }
                 Seg::Pass(start, end) => {
                     // Non-output bytes (markers, prompt, input, mid-output ANSI):
                     // finalize anything pending, then pass through untouched.
                     self.finalize(&mut out);
                     out.extend_from_slice(&chunk[start..end]);
+                    // Mid-zone Pass bytes are where colored error lines hide
+                    // (the scanner routes every ESC here); let the pin
+                    // observe them too. Its strip machine eats the escapes.
+                    if self.pin_armed && self.command_started_at.is_some() {
+                        self.pin.feed(&chunk[start..end]);
+                    }
                 }
                 // A command's output has begun: capture the command (for the
                 // header) and owe the header, emitted lazily before the first
@@ -349,6 +374,11 @@ impl Formatter {
                     if bypass {
                         self.collect = Collect::Passthrough;
                     }
+                    // Arm error-line pinning for this command's output zone.
+                    // Bypassed commands get minimal chrome — never a pin.
+                    self.pin.reset();
+                    self.pin_armed =
+                        !bypass && self.config.failures.enabled && self.config.failures.pin_errors;
                 }
                 // The output ended: flush, and drop an unfulfilled header/command.
                 Seg::OutputEnd => {
@@ -360,6 +390,8 @@ impl Formatter {
                     self.command_started_at = None;
                     self.command_had_visible_output = false;
                     self.command_output_line_count = 0;
+                    self.pin.reset();
+                    self.pin_armed = false;
                     self.markdown_fence = None;
                 }
             }
@@ -414,6 +446,13 @@ impl Formatter {
         // sound (no split character is misread as invalid UTF-8).
         if looks_binary(&acc) || looks_binary(seg) {
             self.pending_separator = false; // suppress: this is binary, never frame it
+                                            // Binary output is never worth quoting in a footer either. This
+                                            // catches binary detected before the text commit; a run that
+                                            // commits to text and turns binary LATER still feeds the pin —
+                                            // acceptable, because the pin is read-only, only fires on a
+                                            // confident error-shaped match, and any quote is sanitized.
+            self.pin.reset();
+            self.pin_armed = false;
             out.extend_from_slice(&acc);
             out.extend_from_slice(seg);
             return Collect::Passthrough;
@@ -516,54 +555,101 @@ impl Formatter {
         let Some(cmd) = self.pending_command.clone() else {
             return;
         };
-        let failed = exit_code != 0;
-        if !failed
+        let status = exitcode::describe(exit_code);
+        let success = status.class == ExitClass::Success;
+        if success
             && !self.command_had_visible_output
             && self.emit_silent_command_breadcrumb(out, &cmd)
         {
             return;
         }
-        if !failed && !self.command_had_visible_output {
+        if success && !self.command_had_visible_output {
             return;
         }
-        if !failed
+        if success
             && (is_command(&self.pending_command, b"cd")
                 || is_command(&self.pending_command, b"pwd"))
         {
             return;
         }
+        // `[failures]` gates. Checked after the breadcrumb path on purpose:
+        // breadcrumbs are separator chrome, not failure intelligence, so
+        // turning the footer off must not silence them (invariant #6 grants
+        // an off switch per feature, not one switch that eats two features).
+        if !self.config.failures.enabled {
+            return;
+        }
+        if success && self.config.failures.on_success == SuccessFooter::Off {
+            return;
+        }
 
         self.emit_header(out);
         let mut line = Vec::new();
-        let color = if failed {
-            self.theme.error
-        } else if self.config.color {
-            self.theme.debug
-        } else {
-            ""
+        // Notice is the "Ctrl-C is not red" class: a user action rendered as
+        // dim as success, so red stays reserved for real failures. The theme
+        // is already `plain()` when color is off, so these are "" then.
+        let color = match status.class {
+            ExitClass::Failure => self.theme.error,
+            ExitClass::Success | ExitClass::Notice => self.theme.debug,
         };
-        let reset = if self.config.color {
-            self.theme.reset
-        } else {
-            ""
-        };
+        let reset = self.theme.reset;
         line.extend_from_slice(color.as_bytes());
-        if failed {
-            line.extend_from_slice(b"failed");
-        } else {
-            line.extend_from_slice(b"done");
-        }
+        line.extend_from_slice(match status.class {
+            ExitClass::Success => "\u{2713} ".as_bytes(), // ✓
+            ExitClass::Notice => "\u{2298} ".as_bytes(),  // ⊘
+            ExitClass::Failure => "\u{2717} ".as_bytes(), // ✗
+        });
+        line.extend_from_slice(status.verb.as_bytes());
         line.extend_from_slice(b" exit ");
         line.extend_from_slice(exit_code.to_string().as_bytes());
         if let Some(duration) = elapsed {
             line.extend_from_slice(b" in ");
             line.extend_from_slice(format_duration(duration).as_bytes());
         }
+        if self.config.failures.explain {
+            if let Some(explain) = status.explain {
+                line.extend_from_slice(" \u{2014} ".as_bytes()); // —
+                line.extend_from_slice(explain.as_bytes());
+            }
+        }
         line.extend_from_slice(reset.as_bytes());
         line.push(b'\n');
         push_crlf(out, &line);
 
-        if failed {
+        // The pinned error line (F3): quote the most telling line of the
+        // failed output right here, with a how-far-up hint, so nobody has
+        // to scroll a wall to find it. Failure class only — a Ctrl-C's
+        // output is not an error to hunt for.
+        if status.class == ExitClass::Failure && self.config.failures.pin_errors {
+            if let Some(pinned) = self.pin.take() {
+                let mut quote = Vec::new();
+                quote.extend_from_slice(self.theme.error.as_bytes());
+                quote.extend_from_slice("\u{21b3} ".as_bytes()); // ↳
+                quote.extend_from_slice(reset.as_bytes());
+                quote.extend_from_slice(self.theme.muted.as_bytes());
+                // Sanitize (control bytes, invalid UTF-8) BEFORE truncation,
+                // so the cut lands on a char boundary of the final text.
+                let text = cmdline::sanitize_display(&pinned.text);
+                quote.extend_from_slice(&truncate_display(&text, PIN_DISPLAY_CAP));
+                quote.extend_from_slice(reset.as_bytes());
+                // The distance hint only earns its ink when the error is
+                // actually far away.
+                if pinned.lines_up >= 3 {
+                    quote.extend_from_slice(self.theme.debug.as_bytes());
+                    quote.extend_from_slice(
+                        format!("  (\u{2191} {} lines up)", pinned.lines_up).as_bytes(),
+                    );
+                    quote.extend_from_slice(reset.as_bytes());
+                }
+                quote.push(b'\n');
+                push_crlf(out, &quote);
+            }
+        }
+
+        // The command recap only accompanies real failures: repeating the
+        // command after a deliberate Ctrl-C would scold the user for an
+        // action they took on purpose.
+        if status.class == ExitClass::Failure {
             let mut summary = Vec::new();
             summary.extend_from_slice(self.theme.error.as_bytes());
             summary.extend_from_slice(b"command failed: ");
@@ -1303,6 +1389,33 @@ fn command_requests_help(command: &[u8]) -> bool {
         cmd.split_whitespace()
             .any(|word| matches!(word, "--help" | "-h" | "help"))
     })
+}
+
+/// Longest pinned-error quote in the failure footer. One readable line; the
+/// full text is still right there in the scrollback.
+const PIN_DISPLAY_CAP: usize = 160;
+
+/// Truncate sanitized (valid-UTF-8) display text to at most `cap` bytes on a
+/// char boundary, appending `…` when cut. Falls back to the raw prefix if the
+/// input somehow isn't UTF-8 — never panics, never splits a char it can see.
+fn truncate_display(text: &[u8], cap: usize) -> Vec<u8> {
+    if text.len() <= cap {
+        return text.to_vec();
+    }
+    let cut = match std::str::from_utf8(text) {
+        Ok(s) => {
+            let mut cut = cap;
+            while cut > 0 && !s.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            cut
+        }
+        // Unreachable after sanitize_display, but degrade instead of trusting.
+        Err(err) => err.valid_up_to().min(cap),
+    };
+    let mut out = text[..cut].to_vec();
+    out.extend_from_slice("\u{2026}".as_bytes()); // …
+    out
 }
 
 fn format_duration(duration: Duration) -> String {

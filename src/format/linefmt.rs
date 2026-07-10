@@ -2918,11 +2918,24 @@ fn stacktrace_color(content: &[u8], theme: &Theme) -> Option<&'static str> {
     None
 }
 
+/// Whether a line carries an ERROR-class severity token (`ERROR`/`FATAL`/
+/// `CRITICAL`, delimited) in its leading window. Shared with error-line
+/// pinning (`pin.rs`) so the pin and the streaming colorizer always agree on
+/// what an error log line is.
+pub(crate) fn is_error_log_line(content: &[u8]) -> bool {
+    let c = ltrim(content);
+    let window = &c[..c.len().min(SEVERITY_WINDOW)];
+    LEVELS
+        .iter()
+        .filter(|(_, severity)| matches!(severity, Severity::Error))
+        .any(|(token, _)| contains_delimited(window, token))
+}
+
 /// Whether `content` is a Python-style exception line: it begins at column 0 with
 /// a dotted identifier (`pkg.mod.Name`) whose last segment ends in a known
 /// exception suffix, immediately followed by `:`. Precise enough that prose like
-/// `Note: see above` or `http://x: y` does not match.
-fn is_exception_line(content: &[u8]) -> bool {
+/// `Note: see above` or `http://x: y` does not match. Shared with `pin.rs`.
+pub(crate) fn is_exception_line(content: &[u8]) -> bool {
     // Must start at column 0 with an uppercase-or-lowercase identifier char (a
     // dotted module path may be lowercase), but NOT whitespace.
     let Some(colon) = content.iter().position(|&b| b == b':') else {
@@ -2982,7 +2995,9 @@ fn is_word(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-fn ltrim(mut bytes: &[u8]) -> &[u8] {
+/// Left-trim ASCII whitespace. Shared with `pin.rs` so the pin and the line
+/// colorizers agree on what "the start of a line" means.
+pub(crate) fn ltrim(mut bytes: &[u8]) -> &[u8] {
     while let [first, rest @ ..] = bytes {
         if first.is_ascii_whitespace() {
             bytes = rest;

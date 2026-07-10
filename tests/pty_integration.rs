@@ -340,6 +340,68 @@ fn json_output_is_formatted_end_to_end() {
 }
 
 #[test]
+fn failed_command_footer_decodes_exit_127_end_to_end() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    s.wait_for(PROMPT_READY, READY_BUDGET);
+    // A command that cannot exist: the shell reports exit 127, and the footer
+    // must decode it. `on PATH` is GLIMPS's wording, distinct from the shell's
+    // own `command not found:` message — seeing it proves the D;127 marker
+    // reached the dictionary through the real supervisor.
+    s.write(b"glimps-integration-no-such-command\n");
+    assert!(
+        s.wait_for(b"failed exit 127", FORMAT_BUDGET),
+        "exit-127 footer missing. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        s.wait_for(b"command not found on PATH", FORMAT_BUDGET),
+        "exit-127 decode missing. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
+fn failed_command_footer_pins_the_error_line_end_to_end() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    s.wait_for(PROMPT_READY, READY_BUDGET);
+    // An ERROR-severity line followed by a failing exit: the footer must
+    // quote the line under the status (the `↳ ` prefix is GLIMPS's — it
+    // distinguishes the pin from the original output line above it).
+    s.write(b"printf 'ERROR connection reset by peer\\n'; false\n");
+    // Colored mode interleaves ANSI between the `↳ ` marker and the quoted
+    // text, so assert the two pieces separately: the pin marker, and the
+    // quote in the muted pin color (the original output line above it is
+    // painted log-error red instead, so this needle is unique to the pin).
+    assert!(
+        s.wait_for("\u{21b3} ".as_bytes(), FORMAT_BUDGET),
+        "pin marker missing. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        s.wait_for(
+            b"\x1b[38;5;153mERROR connection reset by peer",
+            FORMAT_BUDGET
+        ),
+        "pinned quote missing/miscolored. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
 fn bash_json_output_is_formatted_end_to_end() {
     // Same end-to-end contract as zsh, but through the bash DEBUG-trap /
     // PROMPT_COMMAND integration: markers must frame the output and the buffered
