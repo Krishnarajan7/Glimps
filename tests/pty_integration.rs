@@ -437,6 +437,34 @@ fn failed_command_footer_pins_the_error_line_end_to_end() {
 }
 
 #[test]
+fn pipeline_stage_failure_warns_even_when_shell_exit_is_zero() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    s.wait_for(PROMPT_READY, READY_BUDGET);
+
+    // Without pipefail, zsh reports this pipeline's final exit as 0 because
+    // `cat` succeeds. GLIMPS should still observe `$pipestatus` and call out the
+    // failed first stage without changing shell semantics.
+    s.write(b"sh -c 'printf \"ERROR pipe failed\\n\"; exit 7' | cat\n");
+    assert!(
+        s.wait_for(b"pipeline stage failed", FORMAT_BUDGET),
+        "pipeline warning missing. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        s.wait_for(b"stage 1 exit 7; final exit 0", FORMAT_BUDGET),
+        "pipeline stage detail missing. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
 fn bash_json_output_is_formatted_end_to_end() {
     // Same end-to-end contract as zsh, but through the bash DEBUG-trap /
     // PROMPT_COMMAND integration: markers must frame the output and the buffered
@@ -452,6 +480,31 @@ fn bash_json_output_is_formatted_end_to_end() {
     assert!(
         s.wait_for(b"JSON", FORMAT_BUDGET),
         "JSON output was not formatted under bash (no badge). Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
+fn bash_pipeline_stage_failure_warns_even_when_shell_exit_is_zero() {
+    let Some(bash) = bash_path() else {
+        eprintln!("skipping: bash not available");
+        return;
+    };
+    let home = BashHome::new();
+    let mut s = spawn(&bash, Some(home.path()));
+    s.wait_for(PROMPT_READY, READY_BUDGET);
+
+    s.write(b"sh -c 'printf \"ERROR bash pipe failed\\n\"; exit 7' | cat\n");
+    assert!(
+        s.wait_for(b"pipeline stage failed", FORMAT_BUDGET),
+        "bash pipeline warning missing. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        s.wait_for(b"stage 1 exit 7; final exit 0", FORMAT_BUDGET),
+        "bash pipeline stage detail missing. Captured: {:?}",
         String::from_utf8_lossy(&s.snapshot())
     );
     s.write(b"exit\n");

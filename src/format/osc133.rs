@@ -89,10 +89,17 @@ const COMMAND_OSC: &[u8] = b"7337;";
 /// GLIMPS's private OSC carrying the shell's current working directory after a
 /// command (`OSC 7338 ; <pwd>`), emitted by `glimps init`'s precmd.
 const CWD_OSC: &[u8] = b"7338;";
+/// GLIMPS's private OSC carrying per-pipeline-stage exit statuses after a
+/// command (`OSC 7339 ; <status status ...>`), emitted by `glimps init`'s
+/// precmd without changing the shell's pipefail behavior.
+const PIPELINE_STATUS_OSC: &[u8] = b"7339;";
 
 /// Upper bound on a captured command. Commands are short; this just bounds memory
 /// against a pathological/huge one (we then simply don't show a header for it).
 const COMMAND_CAP: usize = 8 * 1024;
+/// A pipeline would have to be comically huge to exceed this; if it does, GLIMPS
+/// simply does not add the extra pipeline warning.
+const PIPELINE_STATUS_CAP: usize = 512;
 
 /// The kind of string-type escape sequence we are consuming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +160,9 @@ pub struct Osc133Scanner {
     command: Option<Vec<u8>>,
     /// The most recent post-command cwd captured from the `CWD_OSC` marker.
     cwd: Option<Vec<u8>>,
+    /// The most recent per-pipeline-stage statuses captured from
+    /// `PIPELINE_STATUS_OSC`, awaiting consumption at command end.
+    pipeline_statuses: Option<Vec<i32>>,
     /// The most recent command exit code captured from `OSC 133;D;<code>`.
     exit_code: Option<i32>,
 }
@@ -167,6 +177,7 @@ impl Osc133Scanner {
             alt_screen: false,
             command: None,
             cwd: None,
+            pipeline_statuses: None,
             exit_code: None,
         }
     }
@@ -187,6 +198,11 @@ impl Osc133Scanner {
     /// Take the most recent post-command cwd captured from the shell.
     pub fn take_cwd(&mut self) -> Option<Vec<u8>> {
         self.cwd.take()
+    }
+
+    /// Take the most recent per-pipeline-stage statuses captured from the shell.
+    pub fn take_pipeline_statuses(&mut self) -> Option<Vec<i32>> {
+        self.pipeline_statuses.take()
     }
 
     /// Take the exit code captured from the most recent command-end marker.
@@ -342,6 +358,8 @@ impl Osc133Scanner {
                                     || self.osc_buf.starts_with(CWD_OSC)
                                 {
                                     COMMAND_CAP
+                                } else if self.osc_buf.starts_with(PIPELINE_STATUS_OSC) {
+                                    PIPELINE_STATUS_CAP
                                 } else {
                                     OSC_PREFIX_CAP
                                 };
@@ -407,6 +425,11 @@ impl Osc133Scanner {
                 // output), so it cannot be zone-guarded. Its injection risk is
                 // fully covered by the display sanitizer in `cmdline`/`mod`.
                 self.cwd = Some(cwd.to_vec());
+            } else if let Some(raw) = self.osc_buf.strip_prefix(PIPELINE_STATUS_OSC) {
+                // Same timing as cwd: the shell emits this from precmd while the
+                // stream is still in Output. The payload is parsed as integers
+                // only; malformed or overlong data quietly produces no warning.
+                self.pipeline_statuses = parse_pipeline_statuses(raw);
             } else if let Some(exit) = parse_osc133_exit_code(&self.osc_buf) {
                 self.exit_code = Some(exit);
                 self.zone = Zone::Unknown;
@@ -487,6 +510,35 @@ fn parse_osc133_exit_code(body: &[u8]) -> Option<i32> {
     std::str::from_utf8(&digits).ok()?.parse().ok()
 }
 
+fn parse_pipeline_statuses(body: &[u8]) -> Option<Vec<i32>> {
+    let trimmed = trim_ascii(body);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut statuses = Vec::new();
+    for part in trimmed.split(|&b| b == b' ') {
+        if part.is_empty() {
+            continue;
+        }
+        let text = std::str::from_utf8(part).ok()?;
+        let code = text.parse::<i32>().ok()?;
+        statuses.push(code);
+    }
+    (!statuses.is_empty()).then_some(statuses)
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map_or(start, |i| i + 1);
+    &bytes[start..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +613,25 @@ mod tests {
         assert_eq!(s.zone(), Zone::Unknown);
         assert_eq!(s.take_exit_code(), Some(0));
         assert_eq!(s.take_exit_code(), None);
+    }
+
+    #[test]
+    fn private_pipeline_status_marker_is_captured() {
+        let mut s = Osc133Scanner::new();
+        s.feed(&marker_bel('C'));
+        s.feed(b"\x1b]7339;1 0 2\x07");
+        assert_eq!(s.take_pipeline_statuses(), Some(vec![1, 0, 2]));
+        assert_eq!(s.take_pipeline_statuses(), None);
+        assert_eq!(s.zone(), Zone::Output);
+    }
+
+    #[test]
+    fn malformed_pipeline_status_marker_is_ignored() {
+        let mut s = Osc133Scanner::new();
+        s.feed(&marker_bel('C'));
+        s.feed(b"\x1b]7339;1 nope 0\x07");
+        assert_eq!(s.take_pipeline_statuses(), None);
+        assert_eq!(s.zone(), Zone::Output);
     }
 
     #[test]

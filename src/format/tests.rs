@@ -52,6 +52,19 @@ fn cwd_marker(cwd: &[u8]) -> Vec<u8> {
     v
 }
 
+/// The per-pipeline-stage status marker emitted by the shell integration.
+fn pipeline_marker(statuses: &[i32]) -> Vec<u8> {
+    let mut v = b"\x1b]7339;".to_vec();
+    for (idx, status) in statuses.iter().enumerate() {
+        if idx > 0 {
+            v.push(b' ');
+        }
+        v.extend_from_slice(status.to_string().as_bytes());
+    }
+    v.push(0x07);
+    v
+}
+
 /// A command-end marker carrying an arbitrary exit code (`D0`/`D1` cover the
 /// common cases; footer-decode tests need the full range).
 fn d_exit(code: i32) -> Vec<u8> {
@@ -766,6 +779,48 @@ fn command_diagnostics_override_find_path_coloring() {
     assert!(s.contains("\x1b[31mfind: illegal option -- m\x1b[0m\n"));
     assert!(s.contains("\x1b[38;5;220musage: find "));
     assert!(s.contains("\n\x1b[36m0\x1b[0m\n"));
+}
+
+#[test]
+fn pipeline_stage_failure_warns_even_when_final_exit_is_zero() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"find -maxdepth 1 -type f | wc -l")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"find: illegal option -- m\n"));
+    out.extend_from_slice(
+        &f.process(b"usage: find [-H | -L | -P] [-EXdsx] [-f path] path ... [expression]\n"),
+    );
+    out.extend_from_slice(&f.process(b"0\n"));
+    out.extend_from_slice(&f.process(&pipeline_marker(&[1, 0])));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("pipeline stage failed: stage 1 exit 1; final exit 0 in "));
+    assert!(s.contains("\u{21b3} find: illegal option -- m"));
+    assert!(!s.contains("done exit 0"));
+    assert!(!s.contains("command failed: find -maxdepth"));
+}
+
+#[test]
+fn pipeline_status_does_not_replace_real_nonzero_failure() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"printf ok | false")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(&pipeline_marker(&[0, 1])));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("failed exit 1 in "));
+    assert!(s.contains("command failed: printf ok | false"));
+    assert!(!s.contains("pipeline stage failed"));
 }
 
 #[test]

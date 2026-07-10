@@ -19,7 +19,7 @@ The pitch it unlocks:
 
 ## What we already have (do not re-plan solved work)
 
-Honest inventory, verified against the code on 2026-07-09:
+Honest inventory, verified against the code on 2026-07-10:
 
 | Piece | Status | Where |
 |---|---|---|
@@ -29,16 +29,18 @@ Honest inventory, verified against the code on 2026-07-09:
 | `command failed: <cmd>` summary line on failure | ✅ done | same function |
 | Quiet-on-success rules (silent cmds, `cd`/`pwd` suppression) | ✅ done | same function |
 | Control-byte sanitization of GLIMPS-authored chrome | ✅ done | `cmdline::sanitize_display` |
-| Exit-code **translation** (127/137/139…) | ❌ missing | — |
-| Signal vs. error distinction (Ctrl-C ≠ failure) | ❌ missing | — |
-| Error-line pinning (`first error → file:line, ↑ N lines up`) | ❌ missing | — |
+| Exit-code **translation** (127/137/139…) | ✅ done | `src/format/exitcode.rs` |
+| Signal vs. error distinction (Ctrl-C ≠ failure) | ✅ done | `ExitClass::Notice`, `src/format/exitcode.rs` |
+| Error-line pinning (`first error → file:line, ↑ N lines up`) | ✅ done | `src/format/pin.rs` |
+| Pipeline-stage warning (`cmd fails | wc succeeds`) | ✅ first pass | zsh/bash private `7339` marker + formatter warning |
 | Failure summary panel for long output (test runners) | ❌ missing | — |
-| Config surface (`[failures]` section) | ❌ missing | `src/config.rs` has no toggle for the footer |
+| Config surface (`[failures]` section) | ✅ done | `src/config.rs` |
 
-So this is not a greenfield feature. It is a v0 footer that needs to become
-the product's headline. That changes the risk profile: the plumbing (markers,
-timing, footer emission, sanitization) is proven; the remaining work is mostly
-**presentation and a lookup table**, not new PTY machinery.
+So this is not a greenfield feature anymore. The footer, exit-code dictionary,
+pinning, config, and first pipeline-status observation are real code now. The
+remaining headline work is **summary quality**: more precise attribution for
+long tool output and better per-runner failure summaries without changing shell
+semantics.
 
 ## Competitor gap analysis — who almost does this, and why they can't
 
@@ -167,6 +169,25 @@ line buffer capped at 1 KiB (longer lines are counted, never matched),
 three candidate slots, O(n) feed, and it cannot alter emitted bytes — the
 worst bug is a missed pin, never corrupted output. Disarmed for bypassed
 commands and binary output.
+
+### F3.5 — Pipeline-stage warning (M) — the honesty fix
+
+Shells normally report the exit status of the **last** command in a pipeline.
+That means `find bad-flag | wc -l` can print a real `find` error and still end
+as `exit 0` because `wc` succeeded. GLIMPS should not enable `pipefail` or alter
+the user's shell semantics. It should observe the shell's per-stage statuses and
+add a warning when an earlier stage failed:
+
+```
+⚠ pipeline stage failed: stage 1 exit 1; final exit 0
+↳ find: illegal option -- m
+```
+
+Implementation rule: zsh uses `$pipestatus`; bash uses `${PIPESTATUS[*]}`. Both
+are emitted through GLIMPS's private `7339` OSC marker from the prompt hook,
+right before the usual cwd and `D;<exit>` markers. If the final exit is already
+nonzero, keep the normal red failure footer. The pipeline warning is for the
+misleading-success case only.
 
 ### F4 — Failure summary panel for known runners (M/L) — later, demand-driven
 

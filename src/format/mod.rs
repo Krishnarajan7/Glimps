@@ -548,6 +548,7 @@ impl Formatter {
 
     fn emit_command_status(&mut self, out: &mut Vec<u8>) {
         let exit_code = self.scanner.take_exit_code();
+        let pipeline_statuses = self.scanner.take_pipeline_statuses();
         let elapsed = self.command_started_at.map(|started| started.elapsed());
         let Some(exit_code) = exit_code else {
             return;
@@ -557,16 +558,19 @@ impl Formatter {
         };
         let status = exitcode::describe(exit_code);
         let success = status.class == ExitClass::Success;
+        let pipeline_warning = pipeline_warning(&pipeline_statuses, exit_code);
         if success
+            && pipeline_warning.is_none()
             && !self.command_had_visible_output
             && self.emit_silent_command_breadcrumb(out, &cmd)
         {
             return;
         }
-        if success && !self.command_had_visible_output {
+        if success && pipeline_warning.is_none() && !self.command_had_visible_output {
             return;
         }
         if success
+            && pipeline_warning.is_none()
             && (is_command(&self.pending_command, b"cd")
                 || is_command(&self.pending_command, b"pwd"))
         {
@@ -579,7 +583,15 @@ impl Formatter {
         if !self.config.failures.enabled {
             return;
         }
-        if success && self.config.failures.on_success == SuccessFooter::Off {
+        if success
+            && pipeline_warning.is_none()
+            && self.config.failures.on_success == SuccessFooter::Off
+        {
+            return;
+        }
+
+        if let Some(warning) = pipeline_warning {
+            self.emit_pipeline_warning(out, &warning, elapsed);
             return;
         }
 
@@ -659,6 +671,51 @@ impl Formatter {
             summary.extend_from_slice(reset.as_bytes());
             summary.push(b'\n');
             push_crlf(out, &summary);
+        }
+    }
+
+    fn emit_pipeline_warning(
+        &mut self,
+        out: &mut Vec<u8>,
+        warning: &PipelineWarning,
+        elapsed: Option<Duration>,
+    ) {
+        self.emit_header(out);
+        let reset = self.theme.reset;
+        let mut line = Vec::new();
+        line.extend_from_slice(self.theme.warn.as_bytes());
+        line.extend_from_slice("\u{26a0} pipeline stage failed: ".as_bytes());
+        line.extend_from_slice(warning.stage_display().as_bytes());
+        line.extend_from_slice(b"; final exit ");
+        line.extend_from_slice(warning.final_exit.to_string().as_bytes());
+        if let Some(duration) = elapsed {
+            line.extend_from_slice(b" in ");
+            line.extend_from_slice(format_duration(duration).as_bytes());
+        }
+        line.extend_from_slice(reset.as_bytes());
+        line.push(b'\n');
+        push_crlf(out, &line);
+
+        if self.config.failures.pin_errors {
+            if let Some(pinned) = self.pin.take() {
+                let mut quote = Vec::new();
+                quote.extend_from_slice(self.theme.warn.as_bytes());
+                quote.extend_from_slice("\u{21b3} ".as_bytes()); // ↳
+                quote.extend_from_slice(reset.as_bytes());
+                quote.extend_from_slice(self.theme.muted.as_bytes());
+                let text = cmdline::sanitize_display(&pinned.text);
+                quote.extend_from_slice(&truncate_display(&text, PIN_DISPLAY_CAP));
+                quote.extend_from_slice(reset.as_bytes());
+                if pinned.lines_up >= 3 {
+                    quote.extend_from_slice(self.theme.debug.as_bytes());
+                    quote.extend_from_slice(
+                        format!("  (\u{2191} {} lines up)", pinned.lines_up).as_bytes(),
+                    );
+                    quote.extend_from_slice(reset.as_bytes());
+                }
+                quote.push(b'\n');
+                push_crlf(out, &quote);
+            }
         }
     }
 
@@ -1397,6 +1454,49 @@ fn command_requests_help(command: &[u8]) -> bool {
 /// Longest pinned-error quote in the failure footer. One readable line; the
 /// full text is still right there in the scrollback.
 const PIN_DISPLAY_CAP: usize = 160;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PipelineWarning {
+    final_exit: i32,
+    failed_stages: Vec<(usize, i32)>,
+}
+
+impl PipelineWarning {
+    fn stage_display(&self) -> String {
+        if self.failed_stages.len() == 1 {
+            let (stage, code) = self.failed_stages[0];
+            format!("stage {stage} exit {code}")
+        } else {
+            let stages = self
+                .failed_stages
+                .iter()
+                .map(|(stage, code)| format!("{stage}={code}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("stages {stages}")
+        }
+    }
+}
+
+fn pipeline_warning(statuses: &Option<Vec<i32>>, final_exit: i32) -> Option<PipelineWarning> {
+    if final_exit != 0 {
+        return None;
+    }
+    let statuses = statuses.as_ref()?;
+    if statuses.len() <= 1 {
+        return None;
+    }
+    let failed_stages = statuses
+        .iter()
+        .take(statuses.len().saturating_sub(1))
+        .enumerate()
+        .filter_map(|(idx, &code)| (code != 0).then_some((idx + 1, code)))
+        .collect::<Vec<_>>();
+    (!failed_stages.is_empty()).then_some(PipelineWarning {
+        final_exit,
+        failed_stages,
+    })
+}
 
 /// Truncate sanitized (valid-UTF-8) display text to at most `cap` bytes on a
 /// char boundary, appending `…` when cut. Falls back to the raw prefix if the

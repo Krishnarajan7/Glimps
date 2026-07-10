@@ -2826,7 +2826,7 @@ fn is_usage_line(trimmed: &[u8]) -> bool {
     starts_with_ascii_ci(trimmed, b"usage:")
 }
 
-fn is_cli_error_line(trimmed: &[u8]) -> bool {
+pub(crate) fn is_cli_error_line(trimmed: &[u8]) -> bool {
     let Some(colon) = trimmed.iter().position(|&b| b == b':') else {
         return false;
     };

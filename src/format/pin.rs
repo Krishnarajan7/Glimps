@@ -245,10 +245,13 @@ impl ErrorPin {
                 window_contains(infix, b": error: ") || window_contains(infix, b": fatal error: ");
             // git and friends.
             let fatal_style = trimmed.starts_with(b"fatal: ");
+            // POSIX-ish tool diagnostics: `find: illegal option -- m`,
+            // `cat: missing.txt: No such file or directory`, etc.
+            let cli_error = linefmt::is_cli_error_line(trimmed);
             // Rust panic (column 0; the message and location share the line).
             let panic_style =
                 line.starts_with(b"thread '") && window_contains(&line, b"panicked at");
-            if rustc_style || cc_style || fatal_style || panic_style {
+            if rustc_style || cc_style || fatal_style || cli_error || panic_style {
                 self.primary = Some(Candidate {
                     text: line.clone(),
                     line_no: self.lines_seen,
@@ -377,6 +380,12 @@ mod tests {
     fn git_fatal_pins() {
         let pin = pin_of(&[b"fatal: not a git repository\n"]).unwrap();
         assert_eq!(text(&pin), "fatal: not a git repository");
+    }
+
+    #[test]
+    fn cli_tool_diagnostic_pins() {
+        let pin = pin_of(&[b"find: illegal option -- m\n", b"usage: find path ...\n"]).unwrap();
+        assert_eq!(text(&pin), "find: illegal option -- m");
     }
 
     #[test]
