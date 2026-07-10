@@ -227,7 +227,19 @@ impl ZdotDir {
             .output()
             .expect("glimps init zsh");
         assert!(init.status.success(), "glimps init zsh failed");
-        std::fs::write(path.join(".zshrc"), init.stdout).expect("write .zshrc");
+        let mut zshrc = String::from(
+            "autoload -Uz compinit\n\
+             compinit -u -d \"$ZDOTDIR/.zcompdump\"\n\
+             setopt auto_menu complete_in_word\n\
+             zstyle ':completion:*' menu select\n",
+        );
+        zshrc.push_str(std::str::from_utf8(&init.stdout).expect("zsh init is utf8"));
+        std::fs::write(path.join(".zshrc"), zshrc).expect("write .zshrc");
+        std::fs::write(
+            path.join("Cargo.toml"),
+            b"[package]\nname = \"glimps-tab-fixture\"\n",
+        )
+        .expect("write completion fixture");
         ZdotDir { path }
     }
 
@@ -361,6 +373,29 @@ fn failed_command_footer_decodes_exit_127_end_to_end() {
     assert!(
         s.wait_for(b"command not found on PATH", FORMAT_BUDGET),
         "exit-127 decode missing. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
+fn zsh_tab_completion_still_reaches_the_inner_shell() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    s.wait_for(PROMPT_READY, READY_BUDGET);
+
+    // `Cargo.to<Tab>` should complete to the repo's `Cargo.toml`. If GLIMPS
+    // swallows Tab or the disposable zsh lacks completion setup, zsh runs
+    // `cat Cargo.to` instead and this package header never appears.
+    s.write(b"cat Cargo.to\t\n");
+    assert!(
+        s.wait_for(b"[package]", FORMAT_BUDGET),
+        "zsh Tab completion did not complete Cargo.to -> Cargo.toml. Captured: {:?}",
         String::from_utf8_lossy(&s.snapshot())
     );
     s.write(b"exit\n");

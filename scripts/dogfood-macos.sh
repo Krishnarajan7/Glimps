@@ -66,6 +66,10 @@ run_session() {
 
   cat >"$DOGFOOD_TMP/.zshrc" <<EOF
 export PROMPT='glimps-dogfood %~ %# '
+autoload -Uz compinit
+compinit -u -d "$DOGFOOD_TMP/.zcompdump"
+setopt auto_menu complete_in_word
+zstyle ':completion:*' menu select
 eval "\$("$BIN" init zsh)"
 EOF
 

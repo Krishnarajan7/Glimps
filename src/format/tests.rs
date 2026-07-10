@@ -748,6 +748,27 @@ fn find_output_gets_path_coloring_without_text_changes() {
 }
 
 #[test]
+fn command_diagnostics_override_find_path_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"find -maxdepth 1 -type f | wc -l")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"find: illegal option -- m\n"));
+    out.extend_from_slice(
+        &f.process(b"usage: find [-H | -L | -P] [-EXdsx] [-f path] path ... [expression]\n"),
+    );
+    out.extend_from_slice(&f.process(b"0\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[31mfind: illegal option -- m\x1b[0m\n"));
+    assert!(s.contains("\x1b[38;5;220musage: find "));
+    assert!(s.contains("\n\x1b[36m0\x1b[0m\n"));
+}
+
+#[test]
 fn command_status_footer_shows_exit_and_duration_after_output() {
     let mut f = Formatter::new();
     if !f.is_enabled() {

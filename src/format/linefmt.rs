@@ -107,6 +107,28 @@ pub fn colorize_line(
     Some(out)
 }
 
+/// Color common CLI diagnostic lines before command-specific formatters get a
+/// chance to make them look like normal output. PTYs merge stdout/stderr into one
+/// stream, so we infer conservatively from familiar tool wording.
+pub fn colorize_cli_diagnostic_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if is_usage_line(trimmed) {
+        return Some(paint_whole(content, ending, theme.warn, theme.reset));
+    }
+    if is_cli_error_line(trimmed) {
+        return Some(paint_whole(content, ending, theme.error, theme.reset));
+    }
+    None
+}
+
 /// Color common Git command output: status, short status, branches, and
 /// `log --oneline` style lines. This keeps Git's layout untouched and only wraps
 /// high-signal tokens such as branch names, hashes, status codes, and paths.
@@ -2800,6 +2822,44 @@ fn trim_ascii_start(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
+fn is_usage_line(trimmed: &[u8]) -> bool {
+    starts_with_ascii_ci(trimmed, b"usage:")
+}
+
+fn is_cli_error_line(trimmed: &[u8]) -> bool {
+    let Some(colon) = trimmed.iter().position(|&b| b == b':') else {
+        return false;
+    };
+    let tool = trim_ascii(&trimmed[..colon]);
+    if tool.is_empty()
+        || tool.len() > 64
+        || !tool
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/' | b'+'))
+    {
+        return false;
+    }
+    let message = trim_ascii_start(&trimmed[colon + 1..]);
+    contains_ascii_ci(message, b"illegal option")
+        || contains_ascii_ci(message, b"invalid option")
+        || contains_ascii_ci(message, b"unknown option")
+        || contains_ascii_ci(message, b"unrecognized option")
+        || contains_ascii_ci(message, b"no such file or directory")
+        || contains_ascii_ci(message, b"permission denied")
+}
+
+fn starts_with_ascii_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len() && haystack[..needle.len()].eq_ignore_ascii_case(needle)
+}
+
+fn contains_ascii_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 fn contains_ascii(haystack: &[u8], needle: &[u8]) -> bool {
     needle.len() <= haystack.len() && haystack.windows(needle.len()).any(|w| w == needle)
 }
@@ -3081,6 +3141,23 @@ mod tests {
         assert!(colored(b"HTTP/1.1 banana\n").is_none()); // no numeric code
         assert!(colored(b"HTTP/1.1 2000 weird\n").is_none()); // 4-digit
         assert!(colored(b"GET /api HTTP/1.1\n").is_none()); // doesn't start with HTTP/
+    }
+
+    #[test]
+    fn cli_diagnostics_color_errors_and_usage() {
+        let theme = Theme::default_colored();
+        assert_eq!(
+            colorize_cli_diagnostic_line(b"find: illegal option -- m\n", &theme).unwrap(),
+            b"\x1b[31mfind: illegal option -- m\x1b[0m\n"
+        );
+        assert_eq!(
+            colorize_cli_diagnostic_line(b"usage: find path ... [expression]\n", &theme).unwrap(),
+            b"\x1b[38;5;220musage: find path ... [expression]\x1b[0m\n"
+        );
+        assert!(colorize_cli_diagnostic_line(b"this usage is documented here\n", &theme).is_none());
+        assert!(
+            colorize_cli_diagnostic_line(b"http://example.com: no such page\n", &theme).is_none()
+        );
     }
 
     #[test]

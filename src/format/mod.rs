@@ -736,6 +736,9 @@ impl Formatter {
     }
 
     fn format_command_line(&mut self, line: &[u8]) -> Option<Vec<u8>> {
+        if let Some(formatted) = linefmt::colorize_cli_diagnostic_line(line, &self.theme) {
+            return Some(formatted);
+        }
         match command_view(&self.pending_command)? {
             CommandView::Pwd if self.command_output_line_count == 0 => {
                 format_pwd_line(line, &self.theme)
