@@ -1053,6 +1053,56 @@ fn ls_output_gets_command_aware_columns() {
 }
 
 #[test]
+fn kubectl_get_pods_colors_running_status() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"kubectl get pods")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"NAME READY STATUS RESTARTS AGE\nnginx 1/1 Running 0 2m\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[2mNAME READY STATUS RESTARTS AGE\x1b[0m"));
+    assert!(s.contains("\x1b[32mRunning\x1b[0m"));
+}
+
+#[test]
+fn kubectl_get_pods_colors_failing_status() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"kubectl get pods")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b"NAME READY STATUS RESTARTS AGE\napi 0/1 CrashLoopBackOff 5 10m\n"),
+    );
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[31mCrashLoopBackOff\x1b[0m"));
+}
+
+#[test]
+fn kubectl_non_pod_output_passes_through() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"kubectl config current-context")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"kind-dev\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("kind-dev\n"));
+    assert!(!s.contains("\x1b[36mkind-dev\x1b[0m"));
+    assert!(!s.contains("\x1b[32mkind-dev\x1b[0m"));
+}
+
+#[test]
 fn du_and_df_outputs_highlight_sizes_and_capacity() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -1909,6 +1959,7 @@ proptest::proptest! {
             b"cat schema.sql",
             b"cat notes.md",
             b"cat main.rs",
+            b"kubectl get pods",
         ] {
             let mut f = Formatter::build(Clock::Off, true, Config::default());
             if !f.is_enabled() {
