@@ -448,6 +448,103 @@ pub fn colorize_dns_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     ))
 }
 
+/// Color macOS `networksetup` inventory output. These commands are common when
+/// debugging Wi-Fi, but their output is a label/value report rather than logs or
+/// a table, so a small dedicated formatter keeps it readable without reflowing.
+pub fn colorize_networksetup_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.iter().all(|&b| b == b'=') {
+        return Some(paint_whole(content, ending, theme.debug, theme.reset));
+    }
+
+    if let Some(label_len) = networksetup_heading_label_len(trimmed) {
+        return Some(paint_networksetup_label_value(
+            content, ending, trimmed, label_len, theme,
+        ));
+    }
+
+    let offset = content.len() - trimmed.len();
+    if offset > 0 {
+        return Some(paint_networksetup_indented_value(
+            content, ending, offset, theme,
+        ));
+    }
+
+    None
+}
+
+fn networksetup_heading_label_len(trimmed: &[u8]) -> Option<usize> {
+    const LABELS: &[&[u8]] = &[
+        b"Preferred networks on ",
+        b"Hardware Port:",
+        b"Device:",
+        b"Ethernet Address:",
+        b"VLAN Configurations",
+    ];
+    LABELS
+        .iter()
+        .find_map(|label| trimmed.starts_with(label).then_some(label.len()))
+}
+
+fn paint_networksetup_label_value(
+    content: &[u8],
+    ending: &[u8],
+    trimmed: &[u8],
+    label_len: usize,
+    theme: &Theme,
+) -> Vec<u8> {
+    let offset = content.len() - trimmed.len();
+    let label_end = offset + label_len.min(trimmed.len());
+    let mut out = Vec::with_capacity(content.len() + ending.len() + 48);
+    out.extend_from_slice(&content[..offset]);
+    paint_bytes(
+        &mut out,
+        theme.key,
+        &content[offset..label_end],
+        theme.reset,
+    );
+    if label_end < content.len() {
+        let value = &content[label_end..];
+        let value_color = if trim_ascii_start(value).starts_with(b"Wi-Fi")
+            || looks_like_mac_address(trim_ascii(value))
+        {
+            theme.path
+        } else {
+            theme.string
+        };
+        paint_bytes(&mut out, value_color, value, theme.reset);
+    }
+    out.extend_from_slice(ending);
+    out
+}
+
+fn paint_networksetup_indented_value(
+    content: &[u8],
+    ending: &[u8],
+    offset: usize,
+    theme: &Theme,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(content.len() + ending.len() + 24);
+    out.extend_from_slice(&content[..offset]);
+    let value = &content[offset..];
+    let color = if value.starts_with(b".") && value != b"." && value != b".." {
+        theme.hidden
+    } else {
+        theme.string
+    };
+    paint_bytes(&mut out, color, value, theme.reset);
+    out.extend_from_slice(ending);
+    out
+}
+
 /// Clean and lightly format `man` / help output. This understands the classic
 /// overstrike form (`N\bN`, `_\bx`) emitted by man pages when no pager handles
 /// bold/underline.
@@ -2813,6 +2910,17 @@ fn percent_value(word: &[u8]) -> Option<u8> {
 
 fn float_value(word: &[u8]) -> Option<f32> {
     std::str::from_utf8(word).ok()?.parse().ok()
+}
+
+fn looks_like_mac_address(word: &[u8]) -> bool {
+    word.len() == 17
+        && word.iter().enumerate().all(|(idx, b)| {
+            if idx % 3 == 2 {
+                *b == b':'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
 }
 
 fn trim_ascii_start(mut bytes: &[u8]) -> &[u8] {

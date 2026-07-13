@@ -1682,6 +1682,62 @@ fn dig_output_highlights_dns_sections_and_records() {
 }
 
 #[test]
+fn networksetup_output_gets_label_and_value_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"networksetup -listallhardwareports")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b"Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: a0:9a:8e:8b:b1:26\n"),
+    );
+    out.extend_from_slice(&f.process(D));
+    out.extend_from_slice(&f.process(&cmd_marker(
+        b"networksetup -listpreferredwirelessnetworks en0",
+    )));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"Preferred networks on en0:\n\tHomeWiFi\n\t.Office\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36mHardware Port:\x1b[0m\x1b[38;2;142;202;230m Wi-Fi\x1b[0m"));
+    assert!(s.contains("\x1b[36mDevice:\x1b[0m\x1b[38;5;117m en0\x1b[0m"));
+    assert!(s.contains(
+        "\x1b[36mEthernet Address:\x1b[0m\x1b[38;2;142;202;230m a0:9a:8e:8b:b1:26\x1b[0m"
+    ));
+    assert!(s.contains("\x1b[36mPreferred networks on \x1b[0m\x1b[38;5;117men0:\x1b[0m"));
+    assert!(s.contains("\t\x1b[38;5;117mHomeWiFi\x1b[0m"));
+    assert!(s.contains("\t\x1b[38;2;69;73;85m.Office\x1b[0m"));
+}
+
+#[test]
+fn security_password_reveal_output_is_passthrough_and_never_pinned() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(
+        br#"security find-generic-password -D "AirPort network password" -a "HomeWiFi" -gw"#,
+    )));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(br#"{"secret":"do-not-format-this"}"#));
+    out.extend_from_slice(&f.process(b"\nERROR still just secret-shaped output\n"));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains(r#"{"secret":"do-not-format-this"}"#));
+    assert!(!s.contains(r#""secret": "do-not-format-this""#));
+    assert!(!s.contains("JSON\n"));
+    assert!(
+        !s.contains('\u{21b3}'),
+        "sensitive output must not be pinned: {s:?}"
+    );
+    assert!(s.contains("command failed: security find-generic-password"));
+}
+
+#[test]
 fn man_overstrike_output_is_cleaned_and_highlighted() {
     let mut f = Formatter::new();
     if !f.is_enabled() {

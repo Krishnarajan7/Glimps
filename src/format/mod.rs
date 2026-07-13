@@ -366,19 +366,25 @@ impl Formatter {
                     self.command_had_visible_output = false;
                     self.command_output_line_count = 0;
                     self.markdown_fence = None;
+                    let sensitive = self
+                        .pending_command
+                        .as_deref()
+                        .is_some_and(is_sensitive_command);
                     let bypass = self
                         .pending_command
                         .as_deref()
                         .and_then(cmdline::first_word)
                         .is_some_and(|name| self.config.bypass.iter().any(|b| b == &name));
-                    if bypass {
+                    if bypass || sensitive {
                         self.collect = Collect::Passthrough;
                     }
                     // Arm error-line pinning for this command's output zone.
-                    // Bypassed commands get minimal chrome — never a pin.
+                    // Bypassed and sensitive commands get minimal chrome — never a pin.
                     self.pin.reset();
-                    self.pin_armed =
-                        !bypass && self.config.failures.enabled && self.config.failures.pin_errors;
+                    self.pin_armed = !bypass
+                        && !sensitive
+                        && self.config.failures.enabled
+                        && self.config.failures.pin_errors;
                 }
                 // The output ended: flush, and drop an unfulfilled header/command.
                 Seg::OutputEnd => {
@@ -807,6 +813,7 @@ impl Formatter {
             CommandView::Df => linefmt::colorize_df_line(line, &self.theme),
             CommandView::Ps => linefmt::colorize_ps_line(line, &self.theme),
             CommandView::Dns => linefmt::colorize_dns_line(line, &self.theme),
+            CommandView::NetworkSetup => linefmt::colorize_networksetup_line(line, &self.theme),
             CommandView::Man => linefmt::format_man_line(line, &self.theme),
             CommandView::Markdown => self.format_markdown_line(line),
             CommandView::Config => linefmt::colorize_config_line(line, &self.theme),
@@ -858,6 +865,7 @@ impl Formatter {
                     | CommandView::JsonLines
                     | CommandView::Code(_)
                     | CommandView::Git(_)
+                    | CommandView::NetworkSetup
             )
         )
     }
@@ -1214,6 +1222,7 @@ enum CommandView {
     JsonLines,
     Code(linefmt::CodeLanguage),
     Git(linefmt::GitView),
+    NetworkSetup,
 }
 
 fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
@@ -1230,12 +1239,55 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "df" => Some(CommandView::Df),
         "ps" => Some(CommandView::Ps),
         "dig" | "nslookup" | "host" => Some(CommandView::Dns),
+        "networksetup" => networksetup_command_view(cmd),
         "man" | "apropos" => Some(CommandView::Man),
         "sqlite3" | "psql" | "mysql" | "mariadb" | "duckdb" => Some(CommandView::SqlResult),
         "git" => git_command_view(cmd),
         _ if command_requests_help(cmd) => Some(CommandView::Man),
         _ => None,
     }
+}
+
+fn is_sensitive_command(command: &[u8]) -> bool {
+    let Some(words) = shell_words(command) else {
+        return false;
+    };
+    let Some((idx, _)) = words
+        .iter()
+        .enumerate()
+        .find(|(_, word)| std::str::from_utf8(word).is_ok_and(|text| text == "security"))
+    else {
+        return false;
+    };
+    let args = &words[idx + 1..];
+    let finds_password = args.iter().any(|arg| {
+        matches!(
+            std::str::from_utf8(arg),
+            Ok("find-generic-password" | "find-internet-password")
+        )
+    });
+    let prints_password = args.iter().any(|arg| {
+        std::str::from_utf8(arg).is_ok_and(|text| {
+            text == "-w" || text.ends_with('w') && text.starts_with('-') && !text.starts_with("--")
+        })
+    });
+    finds_password && prints_password
+}
+
+fn networksetup_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    let networksetup_idx = words
+        .iter()
+        .position(|word| std::str::from_utf8(word).is_ok_and(|text| text == "networksetup"))?;
+    let args = &words[networksetup_idx + 1..];
+    args.iter()
+        .any(|arg| {
+            matches!(
+                std::str::from_utf8(arg),
+                Ok("-listpreferredwirelessnetworks" | "-listallhardwareports")
+            )
+        })
+        .then_some(CommandView::NetworkSetup)
 }
 
 fn git_command_view(command: &[u8]) -> Option<CommandView> {
