@@ -234,6 +234,10 @@ earn it. These are hard rules enforced in the code:
 - **Never touches** binary output, already-colored output, no-echo password
   prompts, full-screen apps (vim/less/htop/fzf), or output that isn't going to a
   terminal (piped/redirected).
+- **Secret-printing commands pass through raw.** Known credential readers such
+  as Keychain password reveal commands, `gh auth token`, password-manager CLIs,
+  cloud secret fetches, and direct reads of common secret files are not
+  formatted, pinned, or quoted in failure summaries.
 - **The terminal is always restored** on exit — including on crash.
 - **Simple off switch.** Start a shell with `GLIMPS=0` to skip wrapping, or set
   `enabled = false` in `~/.glimpsrc` to turn it off persistently for new
@@ -263,11 +267,14 @@ new raw shell with `GLIMPS=0 zsh`.
   is verified from a real version tag.
 - The current formatter handles whole JSON/HTML/diff/HTTP-response documents,
   streaming log/HTTP/stack-trace lines, and command-aware `cd`, `find`, `ls`,
-  `du`, `df`, `ps`, `dig`/`nslookup`, `man`/help output, Markdown project files,
-  YAML/TOML/INI/dotenv-style config files, CSV/TSV files, SQL query files,
-  JSON-lines streams/files, common source-code extensions shown through reader
-  commands, common database CLI result tables, and Git status/branch/log/stat
-  output. It also displays command exit code, duration, and failure summaries
+  `du`, `df`, `ps`, `dig`/`nslookup`, macOS networking output (`ifconfig`,
+  `scutil --dns`, `route get default`, `netstat -rn`, `lsof -i`,
+  `networksetup`), system status output (`launchctl list`, `pmset -g`),
+  `man`/help output, Markdown project files, YAML/TOML/INI/dotenv-style config
+  files, CSV/TSV files, SQL query files, JSON-lines streams/files, common
+  source-code extensions shown through reader commands, common database CLI
+  result tables, and Git status/branch/log/stat output. It also displays
+  command exit code, duration, and failure summaries
   when the shell integration provides the command-end marker.
   Mixed-content output, such as JSON embedded inside non-JSON log lines, is
   planned later.

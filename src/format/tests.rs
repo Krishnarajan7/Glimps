@@ -1682,6 +1682,81 @@ fn dig_output_highlights_dns_sections_and_records() {
 }
 
 #[test]
+fn mac_networking_commands_get_command_aware_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"ifconfig")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\tinet 192.168.1.9 netmask 0xffffff00 broadcast 192.168.1.255\n\tether a0:9a:8e:8b:b1:26\n\tstatus: active\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+
+    out.extend_from_slice(&f.process(&cmd_marker(b"scutil --dns")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"DNS configuration\n\nresolver #1\n  nameserver[0] : 192.168.1.1\n  if_index : 14 (en0)\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+
+    out.extend_from_slice(&f.process(&cmd_marker(b"route get default")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"   route to: default\ndestination: default\n    gateway: 192.168.1.1\n  interface: en0\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+
+    out.extend_from_slice(&f.process(&cmd_marker(b"netstat -rn")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"Routing tables\n\nInternet:\nDestination        Gateway            Flags        Netif Expire\ndefault            192.168.1.1        UGSc           en0\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+
+    out.extend_from_slice(&f.process(&cmd_marker(b"lsof -i")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"COMMAND   PID   USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\nCode     5146 krishv   42u  IPv4 0xabcd      0t0  TCP localhost:5173 (LISTEN)\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+
+    out.extend_from_slice(&f.process(&cmd_marker(b"launchctl list")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b"PID\tStatus\tLabel\n-\t0\tcom.apple.Finder\n513\t-9\tcom.example.crashed\n"),
+    );
+    out.extend_from_slice(&f.process(D));
+
+    out.extend_from_slice(&f.process(&cmd_marker(b"pmset -g")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"System-wide power settings:\nCurrently in use:\n sleep      10\n powernap   0\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36men0:\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230m192.168.1.9\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230ma0:9a:8e:8b:b1:26\x1b[0m"));
+    assert!(s.contains("\x1b[32mactive\x1b[0m"));
+    assert!(s.contains("\x1b[36mDNS configuration\x1b[0m"));
+    assert!(s.contains("\x1b[35m  nameserver[0] :\x1b[0m\x1b[38;2;142;202;230m 192.168.1.1\x1b[0m"));
+    assert!(s.contains("\x1b[35m    gateway:\x1b[0m\x1b[38;2;142;202;230m 192.168.1.1\x1b[0m"));
+    assert!(s.contains("\x1b[36mRouting tables\x1b[0m"));
+    assert!(s.contains("\x1b[36mdefault\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230m192.168.1.1\x1b[0m"));
+    assert!(s.contains("\x1b[36mCode\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230mlocalhost:5173\x1b[0m"));
+    assert!(s.contains("\x1b[2mPID\tStatus\tLabel\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m-9\x1b[0m"));
+    assert!(s.contains("\x1b[36mSystem-wide power settings:\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m10\x1b[0m"));
+}
+
+#[test]
 fn networksetup_output_gets_label_and_value_coloring() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -1735,6 +1810,88 @@ fn security_password_reveal_output_is_passthrough_and_never_pinned() {
         "sensitive output must not be pinned: {s:?}"
     );
     assert!(s.contains("command failed: security find-generic-password"));
+}
+
+#[test]
+fn sensitive_command_registry_catches_secret_printing_tools() {
+    let commands: &[&[u8]] = &[
+        br#"security find-generic-password -D "AirPort network password" -a "HomeWiFi" -gw"#,
+        b"gh auth token",
+        b"op read op://Private/GitHub/token",
+        b"op item get GitHub --fields password --reveal",
+        b"bw get password github",
+        b"pass show github/token",
+        b"aws configure get aws_secret_access_key",
+        b"aws secretsmanager get-secret-value --secret-id prod/db",
+        b"aws ssm get-parameter --name /prod/db/password --with-decryption",
+        b"gcloud auth print-access-token",
+        b"doppler secrets get DATABASE_URL",
+        b"cat .env.local",
+        b"head -20 ~/.aws/credentials",
+        b"tail ~/.kube/config",
+        b"sed -n 1,20p id_ed25519",
+    ];
+    for command in commands {
+        assert!(
+            is_sensitive_command(command),
+            "expected sensitive command: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn sensitive_command_registry_does_not_catch_neighbor_commands() {
+    let commands: &[&[u8]] = &[
+        b"gh issue list",
+        b"aws configure get region",
+        b"aws ssm get-parameter --name /prod/plain",
+        b"gcloud config list",
+        b"doppler run -- cargo test",
+        b"cat .env.example",
+        b"cat README.md",
+    ];
+    for command in commands {
+        assert!(
+            !is_sensitive_command(command),
+            "unexpected sensitive command: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn other_sensitive_commands_are_passthrough_and_never_pinned() {
+    for command in [
+        &b"gh auth token"[..],
+        &b"cat .env.local"[..],
+        &b"aws secretsmanager get-secret-value --secret-id prod/db"[..],
+    ] {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        f.theme = Theme::plain();
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(&cmd_marker(command)));
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(br#"{"token":"do-not-format-this"}"#));
+        out.extend_from_slice(&f.process(b"\nERROR secret-shaped output\n"));
+        out.extend_from_slice(&f.process(D1));
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains(r#"{"token":"do-not-format-this"}"#),
+            "raw output missing for {}: {s:?}",
+            String::from_utf8_lossy(command)
+        );
+        assert!(!s.contains(r#""token": "do-not-format-this""#));
+        assert!(!s.contains("JSON\n"));
+        assert!(
+            !s.contains('\u{21b3}'),
+            "sensitive output must not be pinned for {}: {s:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
 }
 
 #[test]

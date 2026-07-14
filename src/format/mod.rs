@@ -813,6 +813,13 @@ impl Formatter {
             CommandView::Df => linefmt::colorize_df_line(line, &self.theme),
             CommandView::Ps => linefmt::colorize_ps_line(line, &self.theme),
             CommandView::Dns => linefmt::colorize_dns_line(line, &self.theme),
+            CommandView::IfConfig => linefmt::colorize_ifconfig_line(line, &self.theme),
+            CommandView::ScutilDns => linefmt::colorize_scutil_dns_line(line, &self.theme),
+            CommandView::Route => linefmt::colorize_route_line(line, &self.theme),
+            CommandView::Netstat => linefmt::colorize_netstat_line(line, &self.theme),
+            CommandView::Lsof => linefmt::colorize_lsof_line(line, &self.theme),
+            CommandView::Launchctl => linefmt::colorize_launchctl_line(line, &self.theme),
+            CommandView::Pmset => linefmt::colorize_pmset_line(line, &self.theme),
             CommandView::NetworkSetup => linefmt::colorize_networksetup_line(line, &self.theme),
             CommandView::Man => linefmt::format_man_line(line, &self.theme),
             CommandView::Markdown => self.format_markdown_line(line),
@@ -865,6 +872,13 @@ impl Formatter {
                     | CommandView::JsonLines
                     | CommandView::Code(_)
                     | CommandView::Git(_)
+                    | CommandView::IfConfig
+                    | CommandView::ScutilDns
+                    | CommandView::Route
+                    | CommandView::Netstat
+                    | CommandView::Lsof
+                    | CommandView::Launchctl
+                    | CommandView::Pmset
                     | CommandView::NetworkSetup
             )
         )
@@ -1213,6 +1227,13 @@ enum CommandView {
     Df,
     Ps,
     Dns,
+    IfConfig,
+    ScutilDns,
+    Route,
+    Netstat,
+    Lsof,
+    Launchctl,
+    Pmset,
     Man,
     Markdown,
     Config,
@@ -1239,6 +1260,13 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "df" => Some(CommandView::Df),
         "ps" => Some(CommandView::Ps),
         "dig" | "nslookup" | "host" => Some(CommandView::Dns),
+        "ifconfig" => Some(CommandView::IfConfig),
+        "scutil" => scutil_command_view(cmd),
+        "route" => route_command_view(cmd),
+        "netstat" => netstat_command_view(cmd),
+        "lsof" => lsof_command_view(cmd),
+        "launchctl" => launchctl_command_view(cmd),
+        "pmset" => pmset_command_view(cmd),
         "networksetup" => networksetup_command_view(cmd),
         "man" | "apropos" => Some(CommandView::Man),
         "sqlite3" | "psql" | "mysql" | "mariadb" | "duckdb" => Some(CommandView::SqlResult),
@@ -1248,30 +1276,213 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
     }
 }
 
+fn scutil_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    words
+        .iter()
+        .skip(1)
+        .any(|arg| std::str::from_utf8(arg).is_ok_and(|text| text == "--dns"))
+        .then_some(CommandView::ScutilDns)
+}
+
+fn route_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    let args = words
+        .iter()
+        .skip(1)
+        .filter_map(|arg| std::str::from_utf8(arg).ok())
+        .collect::<Vec<_>>();
+    (args.windows(2).any(|pair| pair == ["get", "default"])
+        || args.windows(2).any(|pair| pair == ["get", "0.0.0.0"]))
+    .then_some(CommandView::Route)
+}
+
+fn netstat_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    words
+        .iter()
+        .skip(1)
+        .any(|arg| {
+            std::str::from_utf8(arg).is_ok_and(|text| {
+                text == "-rn" || text == "-nr" || text == "-r" || text == "--route"
+            })
+        })
+        .then_some(CommandView::Netstat)
+}
+
+fn lsof_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    words
+        .iter()
+        .skip(1)
+        .any(|arg| {
+            std::str::from_utf8(arg).is_ok_and(|text| text == "-i" || text.starts_with("-i"))
+        })
+        .then_some(CommandView::Lsof)
+}
+
+fn launchctl_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    (arg_text(&words[1..], 0) == Some("list")).then_some(CommandView::Launchctl)
+}
+
+fn pmset_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    words
+        .iter()
+        .skip(1)
+        .any(|arg| std::str::from_utf8(arg).is_ok_and(|text| text == "-g"))
+        .then_some(CommandView::Pmset)
+}
+
 fn is_sensitive_command(command: &[u8]) -> bool {
     let Some(words) = shell_words(command) else {
         return false;
     };
-    let Some((idx, _)) = words
-        .iter()
-        .enumerate()
-        .find(|(_, word)| std::str::from_utf8(word).is_ok_and(|text| text == "security"))
-    else {
-        return false;
-    };
-    let args = &words[idx + 1..];
+    words.iter().enumerate().any(|(idx, word)| {
+        let Ok(name) = std::str::from_utf8(word) else {
+            return false;
+        };
+        let args = &words[idx + 1..];
+        match name {
+            "security" => sensitive_security_args(args),
+            "gh" => sensitive_gh_args(args),
+            "op" => sensitive_1password_args(args),
+            "bw" => sensitive_bitwarden_args(args),
+            "pass" => sensitive_pass_args(args),
+            "aws" => sensitive_aws_args(args),
+            "gcloud" => sensitive_gcloud_args(args),
+            "doppler" => sensitive_doppler_args(args),
+            "cat" | "head" | "tail" | "sed" => args
+                .iter()
+                .any(|arg| std::str::from_utf8(arg).is_ok_and(secret_file_argument)),
+            _ => false,
+        }
+    })
+}
+
+fn sensitive_security_args(args: &[Vec<u8>]) -> bool {
     let finds_password = args.iter().any(|arg| {
         matches!(
             std::str::from_utf8(arg),
             Ok("find-generic-password" | "find-internet-password")
         )
     });
-    let prints_password = args.iter().any(|arg| {
-        std::str::from_utf8(arg).is_ok_and(|text| {
-            text == "-w" || text.ends_with('w') && text.starts_with('-') && !text.starts_with("--")
-        })
-    });
+    let prints_password = args
+        .iter()
+        .any(|arg| std::str::from_utf8(arg).is_ok_and(is_short_password_print_flag));
     finds_password && prints_password
+}
+
+fn sensitive_gh_args(args: &[Vec<u8>]) -> bool {
+    arg_text(args, 0) == Some("auth") && arg_text(args, 1) == Some("token")
+}
+
+fn sensitive_1password_args(args: &[Vec<u8>]) -> bool {
+    match (arg_text(args, 0), arg_text(args, 1)) {
+        (Some("read"), _) => true,
+        (Some("item"), Some("get")) => args.iter().any(|arg| {
+            std::str::from_utf8(arg).is_ok_and(|text| {
+                text == "--reveal"
+                    || text.contains("password")
+                    || text.contains("credential")
+                    || text.contains("secret")
+                    || text.contains("token")
+            })
+        }),
+        _ => false,
+    }
+}
+
+fn sensitive_bitwarden_args(args: &[Vec<u8>]) -> bool {
+    arg_text(args, 0) == Some("get")
+        && matches!(
+            arg_text(args, 1),
+            Some("password" | "item" | "notes" | "totp" | "attachment")
+        )
+}
+
+fn sensitive_pass_args(args: &[Vec<u8>]) -> bool {
+    matches!(arg_text(args, 0), Some("show") | Some("-c" | "--clip")) || !args.is_empty()
+}
+
+fn sensitive_aws_args(args: &[Vec<u8>]) -> bool {
+    match (arg_text(args, 0), arg_text(args, 1), arg_text(args, 2)) {
+        (Some("configure"), Some("get"), Some(key)) => contains_secret_word(key),
+        (Some("secretsmanager"), Some("get-secret-value"), _) => true,
+        (Some("ssm"), Some("get-parameter" | "get-parameters"), _) => args
+            .iter()
+            .any(|arg| std::str::from_utf8(arg).is_ok_and(|text| text == "--with-decryption")),
+        _ => false,
+    }
+}
+
+fn sensitive_gcloud_args(args: &[Vec<u8>]) -> bool {
+    arg_text(args, 0) == Some("auth")
+        && matches!(
+            arg_text(args, 1),
+            Some("print-access-token" | "print-identity-token")
+        )
+}
+
+fn sensitive_doppler_args(args: &[Vec<u8>]) -> bool {
+    arg_text(args, 0) == Some("secrets") && matches!(arg_text(args, 1), Some("get" | "download"))
+}
+
+fn arg_text(args: &[Vec<u8>], index: usize) -> Option<&str> {
+    std::str::from_utf8(args.get(index)?).ok()
+}
+
+fn is_short_password_print_flag(text: &str) -> bool {
+    text == "-w" || text.ends_with('w') && text.starts_with('-') && !text.starts_with("--")
+}
+
+fn secret_file_argument(text: &str) -> bool {
+    if text.starts_with('-') || shell_operator_word(text) {
+        return false;
+    }
+    let clean = text.trim_matches(|c| matches!(c, '"' | '\'' | '`' | ',' | ':' | ';' | ')' | '('));
+    let lower = clean.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if matches!(
+        name,
+        ".env"
+            | ".netrc"
+            | ".npmrc"
+            | ".pypirc"
+            | ".dockercfg"
+            | "id_rsa"
+            | "id_dsa"
+            | "id_ecdsa"
+            | "id_ed25519"
+    ) {
+        return true;
+    }
+    if name.starts_with(".env.") {
+        return !matches!(
+            name,
+            ".env.example" | ".env.sample" | ".env.template" | ".env.defaults"
+        );
+    }
+    if name.ends_with(".pem") || name.ends_with(".key") {
+        return true;
+    }
+    if lower.contains("/.aws/credentials")
+        || lower.contains("/.kube/config")
+        || lower.contains("/.config/gcloud/")
+    {
+        return true;
+    }
+    contains_secret_word(name)
+}
+
+fn contains_secret_word(text: &str) -> bool {
+    text.contains("secret")
+        || text.contains("password")
+        || text.contains("passwd")
+        || text.contains("token")
+        || text.contains("credential")
+        || text.contains("private_key")
 }
 
 fn networksetup_command_view(command: &[u8]) -> Option<CommandView> {
