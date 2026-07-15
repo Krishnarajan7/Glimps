@@ -53,6 +53,10 @@ if [[ "$GLIMPS" != "0" ]]; then
     # where command output begins (C) and ends (D), and never touches the prompt
     # or what you type.
     __glimps_integration_loaded=1
+    # Capture the private metadata capability in a non-exported variable, then
+    # remove it from the environment inherited by ordinary child commands.
+    typeset -g __glimps_meta_path="${GLIMPS_META_PATH-}"
+    unset GLIMPS_META_PATH
     # zsh's partial-line indicator (the inverse "%") is emitted INSIDE the command
     # output zone, so it would make even no-output commands (cd, export) look like
     # they produced output and get a separator. GLIMPS owns the command/output
@@ -61,6 +65,9 @@ if [[ "$GLIMPS" != "0" ]]; then
     autoload -Uz add-zsh-hook
     __glimps_precmd() {
       local __glimps_exit=$? __glimps_pipeline="${(j: :)pipestatus}"
+      if [[ -n "$__glimps_meta_path" ]]; then
+        print -rn -- $'R\0'"$__glimps_pipeline"$'\0'"$PWD"$'\0'"$__glimps_exit"$'\0' >> "$__glimps_meta_path" 2>/dev/null
+      fi
       # Private OSC 7339 carries per-pipeline-stage statuses. This does not
       # enable pipefail or change shell behavior; GLIMPS only observes it.
       print -nr -- $'\e]7339;'"$__glimps_pipeline"$'\a'
@@ -70,6 +77,9 @@ if [[ "$GLIMPS" != "0" ]]; then
       print -nr -- $'\e]7338;'"$PWD"$'\a\e]133;D;'"${__glimps_exit}"$'\a\e]133;A\a'
     }
     __glimps_preexec() {
+      if [[ -n "$__glimps_meta_path" ]]; then
+        print -rn -- $'C\0'"$1"$'\0' >> "$__glimps_meta_path" 2>/dev/null
+      fi
       # Send GLIMPS the command being run (private OSC 7337) so it can show a
       # colored command header and bypass interactive programs by name, then mark
       # the start of command output (OSC 133;C).
@@ -117,6 +127,10 @@ if [ "$GLIMPS" != "0" ]; then
     # or what you type. bash has no preexec/precmd, so we use a DEBUG trap (before
     # each command) + PROMPT_COMMAND (before each prompt).
     __glimps_integration_loaded=1
+    # Keep the channel capability private to this shell. Child commands must not
+    # inherit the path used to author trusted GLIMPS metadata.
+    __glimps_meta_path=${GLIMPS_META_PATH-}
+    unset GLIMPS_META_PATH
     __glimps_armed=""
     __glimps_debug_exit=0
     __glimps_debug_pipeline=0
@@ -154,6 +168,9 @@ if [ "$GLIMPS" != "0" ]; then
             __glimps_cmd=$(HISTTIMEFORMAT= builtin history 1 2>/dev/null)
             __glimps_cmd=${__glimps_cmd#*[0-9]  }
             [ -z "$__glimps_cmd" ] && __glimps_cmd=$BASH_COMMAND
+            if [ -n "$__glimps_meta_path" ]; then
+              printf 'C\0%s\0' "$__glimps_cmd" >> "$__glimps_meta_path" 2>/dev/null
+            fi
             # Private OSC 7337 carries the command (colored header + bypass by
             # name); OSC 133;C marks the start of command output.
             printf '\033]7337;%s\007\033]133;C\007' "$__glimps_cmd"
@@ -166,6 +183,9 @@ if [ "$GLIMPS" != "0" ]; then
       # Runs FIRST in PROMPT_COMMAND: capture the just-finished command's exit
       # status before anything else clobbers $?.
       local __glimps_exit=$__glimps_debug_exit __glimps_pipeline="$__glimps_debug_pipeline"
+      if [ -n "$__glimps_meta_path" ]; then
+        printf 'R\0%s\0%s\0%s\0' "$__glimps_pipeline" "$PWD" "$__glimps_exit" >> "$__glimps_meta_path" 2>/dev/null
+      fi
       # Private OSC 7339 carries per-pipeline-stage statuses. This observes the
       # shell's pipeline result without enabling pipefail or changing behavior.
       printf '\033]7339;%s\007' "$__glimps_pipeline"
@@ -239,6 +259,9 @@ mod tests {
             "missing D (output end + exit)"
         );
         assert!(ZSH_INIT.contains(r"\e]133;A\a"), "missing A (prompt start)");
+        assert!(ZSH_INIT.contains("unset GLIMPS_META_PATH"));
+        assert!(ZSH_INIT.contains("$'C\\0'"));
+        assert!(ZSH_INIT.contains("$'R\\0'"));
     }
 
     #[test]
@@ -308,6 +331,9 @@ mod tests {
             BASH_INIT.contains(r"\033]133;A\007"),
             "missing A (prompt start)"
         );
+        assert!(BASH_INIT.contains("unset GLIMPS_META_PATH"));
+        assert!(BASH_INIT.contains(r"printf 'C\0%s\0'"));
+        assert!(BASH_INIT.contains(r"printf 'R\0%s\0%s\0%s\0'"));
     }
 
     #[test]

@@ -11,6 +11,8 @@
 //! color = true       # false => no color codes anywhere (still indents/frames)
 //! separator = true   # the command/output divider line
 //! timestamp = true   # include HH:MM:SS in the separator
+//! farewell = true    # conversational message after a clean interactive exit
+//! sensitive_commands = ["vault kv get", "kubectl get secret"]
 //!
 //! [formatters]
 //! json = true
@@ -53,9 +55,14 @@ pub struct Config {
     pub separator: bool,
     /// Include a timestamp in the command header.
     pub timestamp: bool,
+    /// Print the conversational message after a clean interactive exit.
+    pub farewell: bool,
     /// Command names whose output is passed through untouched (interactive /
     /// full-screen programs). Matched against the command's basename.
     pub bypass: Vec<String>,
+    /// Additional command token-prefixes whose output must remain untouched and
+    /// must never be copied into a pinned failure line.
+    pub sensitive_commands: Vec<String>,
     pub formatters: Formatters,
     pub failures: Failures,
     pub limits: Limits,
@@ -125,7 +132,9 @@ impl Default for Config {
             color: true,
             separator: true,
             timestamp: true,
+            farewell: true,
             bypass: default_bypass(),
+            sensitive_commands: Vec::new(),
             formatters: Formatters::default(),
             failures: Failures::default(),
             limits: Limits::default(),
@@ -235,7 +244,8 @@ mod tests {
     #[test]
     fn default_is_everything_on() {
         let c = Config::default();
-        assert!(c.enabled && c.color && c.separator && c.timestamp);
+        assert!(c.enabled && c.color && c.separator && c.timestamp && c.farewell);
+        assert!(c.sensitive_commands.is_empty());
         assert!(c.formatters.json && c.formatters.html && c.formatters.logs && c.formatters.http);
         assert!(c.formatters.diff && c.formatters.stacktrace);
         assert_eq!(c.limits.buffer_cap, DEFAULT_BUFFER_CAP);
@@ -249,8 +259,13 @@ mod tests {
 
     #[test]
     fn partial_config_keeps_other_defaults() {
-        let c = Config::parse("color = false\n[formatters]\nhtml = false\n").unwrap();
+        let c = Config::parse(
+            "color = false\nfarewell = false\nsensitive_commands = [\"vault kv get\"]\n[formatters]\nhtml = false\n",
+        )
+        .unwrap();
         assert!(!c.color);
+        assert!(!c.farewell);
+        assert_eq!(c.sensitive_commands, ["vault kv get"]);
         assert!(!c.formatters.html);
         // Untouched keys keep their defaults.
         assert!(c.enabled);

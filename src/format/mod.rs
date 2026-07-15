@@ -31,6 +31,7 @@
 //! stays Unknown and GLIMPS is a pure pass-through.
 
 mod cmdline;
+mod command;
 mod diff;
 mod exitcode;
 mod html;
@@ -46,6 +47,13 @@ use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
 use crate::config::{Config, SuccessFooter};
+use crate::metadata::{MetadataEvent, MetadataReader};
+#[cfg(test)]
+use command::is_sensitive as is_sensitive_command;
+use command::{
+    breadcrumb_path_start, shell_words, silent_breadcrumb as silent_command_breadcrumb,
+    CommandTrust,
+};
 use exitcode::ExitClass;
 use osc133::{Osc133Scanner, Seg};
 // `Zone` is the seam's vocabulary; only tests consume it directly today.
@@ -184,6 +192,13 @@ pub struct Formatter {
     /// The command for the current output zone (captured at output start), shown
     /// in the header. `None` falls the header back to a plain divider.
     pending_command: Option<Vec<u8>>,
+    /// Private shell-to-supervisor metadata. When present, OSC still frames
+    /// output but cannot author command, cwd, pipeline, or exit-code chrome.
+    metadata: Option<MetadataReader>,
+    trusted_command: Option<Vec<u8>>,
+    trusted_cwd: Option<Vec<u8>>,
+    trusted_pipeline_statuses: Option<Vec<i32>>,
+    trusted_exit_code: Option<i32>,
     /// Monotonic start time for the running command, captured at output start.
     command_started_at: Option<Instant>,
     /// Whether this command produced a visible GLIMPS boundary/output. Used to
@@ -232,6 +247,16 @@ impl Formatter {
         Self::build(clock, std::io::stdout().is_terminal(), config)
     }
 
+    pub(crate) fn for_supervisor_with_metadata(
+        clock: Clock,
+        config: Config,
+        metadata: Option<MetadataReader>,
+    ) -> Self {
+        let mut formatter = Self::build(clock, std::io::stdout().is_terminal(), config);
+        formatter.metadata = metadata;
+        formatter
+    }
+
     fn build(clock: Clock, output_is_tty: bool, config: Config) -> Self {
         let buffered = enabled_buffered(&config.formatters);
         let streaming = enabled_streaming(&config.formatters);
@@ -248,6 +273,11 @@ impl Formatter {
             config,
             pending_separator: false,
             pending_command: None,
+            metadata: None,
+            trusted_command: None,
+            trusted_cwd: None,
+            trusted_pipeline_statuses: None,
+            trusted_exit_code: None,
             command_started_at: None,
             command_had_visible_output: false,
             command_output_line_count: 0,
@@ -361,34 +391,37 @@ impl Formatter {
                 // the bypass list, its output streams through untouched.
                 Seg::OutputStart => {
                     self.pending_separator = true;
-                    self.pending_command = self.scanner.take_command();
+                    self.pending_command = self.take_command_metadata();
                     self.command_started_at = Some(Instant::now());
                     self.command_had_visible_output = false;
                     self.command_output_line_count = 0;
                     self.markdown_fence = None;
-                    let sensitive = self
+                    let trust = self
                         .pending_command
                         .as_deref()
-                        .is_some_and(is_sensitive_command);
-                    let bypass = self
-                        .pending_command
-                        .as_deref()
-                        .and_then(cmdline::first_word)
-                        .is_some_and(|name| self.config.bypass.iter().any(|b| b == &name));
-                    if bypass || sensitive {
+                        .map(|command| {
+                            command::classify(
+                                command,
+                                &self.config.bypass,
+                                &self.config.sensitive_commands,
+                            )
+                            .trust
+                        })
+                        .unwrap_or(CommandTrust::Normal);
+                    if trust != CommandTrust::Normal {
                         self.collect = Collect::Passthrough;
                     }
                     // Arm error-line pinning for this command's output zone.
                     // Bypassed and sensitive commands get minimal chrome — never a pin.
                     self.pin.reset();
-                    self.pin_armed = !bypass
-                        && !sensitive
+                    self.pin_armed = trust == CommandTrust::Normal
                         && self.config.failures.enabled
                         && self.config.failures.pin_errors;
                 }
                 // The output ended: flush, and drop an unfulfilled header/command.
                 Seg::OutputEnd => {
                     self.finalize(&mut out);
+                    self.refresh_metadata();
                     self.emit_cd_breadcrumb(&mut out);
                     self.emit_command_status(&mut out);
                     self.pending_separator = false;
@@ -513,6 +546,40 @@ impl Formatter {
         }
     }
 
+    fn take_command_metadata(&mut self) -> Option<Vec<u8>> {
+        let osc_command = self.scanner.take_command();
+        if self.metadata.is_none() {
+            return osc_command;
+        }
+        self.refresh_metadata();
+        let command = self.trusted_command.take();
+        // Startup/previous-cycle result records must not bleed into this run.
+        self.trusted_cwd = None;
+        self.trusted_pipeline_statuses = None;
+        self.trusted_exit_code = None;
+        command
+    }
+
+    fn refresh_metadata(&mut self) {
+        let Some(metadata) = self.metadata.as_mut() else {
+            return;
+        };
+        for event in metadata.drain() {
+            match event {
+                MetadataEvent::Command(command) => self.trusted_command = Some(command),
+                MetadataEvent::Result {
+                    pipeline_statuses,
+                    cwd,
+                    exit_code,
+                } => {
+                    self.trusted_pipeline_statuses = Some(pipeline_statuses);
+                    self.trusted_cwd = Some(cwd);
+                    self.trusted_exit_code = Some(exit_code);
+                }
+            }
+        }
+    }
+
     /// `cd` usually succeeds silently, which means the normal lazy separator
     /// would not show anything. When zsh reports the post-command cwd, leave a
     /// small breadcrumb so directory changes are visible in scrollback.
@@ -520,7 +587,13 @@ impl Formatter {
         if !self.pending_separator || !is_command(&self.pending_command, b"cd") {
             return;
         }
-        let Some(cwd) = self.scanner.take_cwd() else {
+        let osc_cwd = self.scanner.take_cwd();
+        let cwd = if self.metadata.is_some() {
+            self.trusted_cwd.take()
+        } else {
+            osc_cwd
+        };
+        let Some(cwd) = cwd else {
             return;
         };
         self.emit_header(out);
@@ -553,8 +626,16 @@ impl Formatter {
     }
 
     fn emit_command_status(&mut self, out: &mut Vec<u8>) {
-        let exit_code = self.scanner.take_exit_code();
-        let pipeline_statuses = self.scanner.take_pipeline_statuses();
+        let osc_exit_code = self.scanner.take_exit_code();
+        let osc_pipeline_statuses = self.scanner.take_pipeline_statuses();
+        let (exit_code, pipeline_statuses) = if self.metadata.is_some() {
+            (
+                self.trusted_exit_code.take(),
+                self.trusted_pipeline_statuses.take(),
+            )
+        } else {
+            (osc_exit_code, osc_pipeline_statuses)
+        };
         let elapsed = self.command_started_at.map(|started| started.elapsed());
         let Some(exit_code) = exit_code else {
             return;
@@ -1056,158 +1137,6 @@ fn format_pwd_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn silent_command_breadcrumb(command: &[u8]) -> Option<Vec<u8>> {
-    let words = shell_words(command)?;
-    let (cmd_idx, name) = words.iter().enumerate().find_map(|(idx, word)| {
-        let text = std::str::from_utf8(word).ok()?;
-        if matches!(text, "touch" | "mkdir" | "rm") {
-            Some((idx, text))
-        } else {
-            None
-        }
-    })?;
-    let args = &words[cmd_idx + 1..];
-    let targets = match name {
-        "touch" => command_targets(args, &["-t", "-d", "-r", "--date", "--reference"]),
-        "mkdir" => command_targets(args, &["-m", "--mode", "-Z", "--context"]),
-        "rm" => command_targets(args, &[]),
-        _ => Vec::new(),
-    };
-    if targets.is_empty() {
-        return None;
-    }
-
-    let mut out = Vec::new();
-    match (name, targets.len()) {
-        ("touch", 1) => {
-            out.extend_from_slice(b"touched file ");
-            out.extend_from_slice(&cmdline::sanitize_display(&targets[0]));
-        }
-        ("mkdir", 1) => {
-            out.extend_from_slice(b"created folder ");
-            out.extend_from_slice(&cmdline::sanitize_display(&targets[0]));
-        }
-        ("rm", 1) => {
-            out.extend_from_slice(b"removed target ");
-            out.extend_from_slice(&cmdline::sanitize_display(&targets[0]));
-        }
-        ("touch", n) => push_target_summary(&mut out, b"touched", n, b"files", &targets),
-        ("mkdir", n) => push_target_summary(&mut out, b"created", n, b"folders", &targets),
-        ("rm", n) => push_target_summary(&mut out, b"removed", n, b"targets", &targets),
-        _ => return None,
-    }
-    Some(out)
-}
-
-fn breadcrumb_path_start(message: &[u8]) -> Option<usize> {
-    const SINGULAR_PREFIXES: &[&[u8]] = &[b"touched file ", b"created folder ", b"removed target "];
-    SINGULAR_PREFIXES
-        .iter()
-        .find_map(|prefix| message.starts_with(prefix).then_some(prefix.len()))
-        .or_else(|| {
-            message
-                .windows(2)
-                .position(|window| window == b": ")
-                .map(|position| position + 2)
-        })
-}
-
-fn push_target_summary(
-    out: &mut Vec<u8>,
-    verb: &[u8],
-    count: usize,
-    noun: &[u8],
-    targets: &[Vec<u8>],
-) {
-    out.extend_from_slice(verb);
-    out.push(b' ');
-    out.extend_from_slice(count.to_string().as_bytes());
-    out.push(b' ');
-    out.extend_from_slice(noun);
-    out.extend_from_slice(b": ");
-    for (idx, target) in targets.iter().take(3).enumerate() {
-        if idx > 0 {
-            out.extend_from_slice(b", ");
-        }
-        out.extend_from_slice(&cmdline::sanitize_display(target));
-    }
-    if count > 3 {
-        out.extend_from_slice(b", +");
-        out.extend_from_slice((count - 3).to_string().as_bytes());
-        out.extend_from_slice(b" more");
-    }
-}
-
-fn command_targets(args: &[Vec<u8>], options_with_value: &[&str]) -> Vec<Vec<u8>> {
-    let mut targets = Vec::new();
-    let mut end_options = false;
-    let mut skip_next = false;
-    for arg in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        let text = std::str::from_utf8(arg).unwrap_or("");
-        if !end_options && text == "--" {
-            end_options = true;
-            continue;
-        }
-        if !end_options && text.starts_with('-') && text.len() > 1 {
-            if options_with_value
-                .iter()
-                .any(|opt| text == *opt || text.starts_with(&format!("{opt}=")))
-                && !text.contains('=')
-            {
-                skip_next = true;
-            }
-            continue;
-        }
-        targets.push(arg.clone());
-    }
-    targets
-}
-
-fn shell_words(command: &[u8]) -> Option<Vec<Vec<u8>>> {
-    let mut words = Vec::new();
-    let mut word = Vec::new();
-    let mut quote = None;
-    let mut i = 0;
-    while i < command.len() {
-        let b = command[i];
-        if let Some(q) = quote {
-            if b == q {
-                quote = None;
-            } else if q == b'"' && b == b'\\' && i + 1 < command.len() {
-                i += 1;
-                word.push(command[i]);
-            } else {
-                word.push(b);
-            }
-        } else if b.is_ascii_whitespace() {
-            if !word.is_empty() {
-                words.push(std::mem::take(&mut word));
-            }
-        } else if matches!(b, b'\'' | b'"') {
-            quote = Some(b);
-        } else if matches!(b, b'|' | b'&' | b';' | b'<' | b'>' | b'(' | b')') {
-            return None;
-        } else if b == b'\\' && i + 1 < command.len() {
-            i += 1;
-            word.push(command[i]);
-        } else {
-            word.push(b);
-        }
-        i += 1;
-    }
-    if quote.is_some() {
-        return None;
-    }
-    if !word.is_empty() {
-        words.push(word);
-    }
-    Some(words)
-}
-
 fn split_line_ending(line: &[u8]) -> (&[u8], &[u8]) {
     if let Some(content) = line.strip_suffix(b"\r\n") {
         (content, &line[line.len() - 2..])
@@ -1246,21 +1175,72 @@ enum CommandView {
     NetworkSetup,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CommandViewRegistration {
+    names: &'static [&'static str],
+    view: CommandView,
+}
+
+const COMMAND_VIEW_REGISTRY: &[CommandViewRegistration] = &[
+    CommandViewRegistration {
+        names: &["pwd"],
+        view: CommandView::Pwd,
+    },
+    CommandViewRegistration {
+        names: &["find"],
+        view: CommandView::Find,
+    },
+    CommandViewRegistration {
+        names: &["ls"],
+        view: CommandView::Ls,
+    },
+    CommandViewRegistration {
+        names: &["du"],
+        view: CommandView::Du,
+    },
+    CommandViewRegistration {
+        names: &["df"],
+        view: CommandView::Df,
+    },
+    CommandViewRegistration {
+        names: &["ps"],
+        view: CommandView::Ps,
+    },
+    CommandViewRegistration {
+        names: &["dig", "nslookup", "host"],
+        view: CommandView::Dns,
+    },
+    CommandViewRegistration {
+        names: &["ifconfig"],
+        view: CommandView::IfConfig,
+    },
+    CommandViewRegistration {
+        names: &["man", "apropos"],
+        view: CommandView::Man,
+    },
+    CommandViewRegistration {
+        names: &["sqlite3", "psql", "mysql", "mariadb", "duckdb"],
+        view: CommandView::SqlResult,
+    },
+];
+
+fn registered_command_view(name: &str) -> Option<CommandView> {
+    COMMAND_VIEW_REGISTRY
+        .iter()
+        .find(|registration| registration.names.contains(&name))
+        .map(|registration| registration.view)
+}
+
 fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
     let cmd = command.as_deref()?;
     let name = cmdline::first_word(cmd)?;
     if let Some(view) = file_content_view(&name, cmd) {
         return Some(view);
     }
+    if let Some(view) = registered_command_view(&name) {
+        return Some(view);
+    }
     match name.as_str() {
-        "pwd" => Some(CommandView::Pwd),
-        "find" => Some(CommandView::Find),
-        "ls" => Some(CommandView::Ls),
-        "du" => Some(CommandView::Du),
-        "df" => Some(CommandView::Df),
-        "ps" => Some(CommandView::Ps),
-        "dig" | "nslookup" | "host" => Some(CommandView::Dns),
-        "ifconfig" => Some(CommandView::IfConfig),
         "scutil" => scutil_command_view(cmd),
         "route" => route_command_view(cmd),
         "netstat" => netstat_command_view(cmd),
@@ -1268,8 +1248,6 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "launchctl" => launchctl_command_view(cmd),
         "pmset" => pmset_command_view(cmd),
         "networksetup" => networksetup_command_view(cmd),
-        "man" | "apropos" => Some(CommandView::Man),
-        "sqlite3" | "psql" | "mysql" | "mariadb" | "duckdb" => Some(CommandView::SqlResult),
         "git" => git_command_view(cmd),
         _ if command_requests_help(cmd) => Some(CommandView::Man),
         _ => None,
@@ -1323,7 +1301,8 @@ fn lsof_command_view(command: &[u8]) -> Option<CommandView> {
 
 fn launchctl_command_view(command: &[u8]) -> Option<CommandView> {
     let words = shell_words(command)?;
-    (arg_text(&words[1..], 0) == Some("list")).then_some(CommandView::Launchctl)
+    (words.get(1).and_then(|arg| std::str::from_utf8(arg).ok()) == Some("list"))
+        .then_some(CommandView::Launchctl)
 }
 
 fn pmset_command_view(command: &[u8]) -> Option<CommandView> {
@@ -1333,156 +1312,6 @@ fn pmset_command_view(command: &[u8]) -> Option<CommandView> {
         .skip(1)
         .any(|arg| std::str::from_utf8(arg).is_ok_and(|text| text == "-g"))
         .then_some(CommandView::Pmset)
-}
-
-fn is_sensitive_command(command: &[u8]) -> bool {
-    let Some(words) = shell_words(command) else {
-        return false;
-    };
-    words.iter().enumerate().any(|(idx, word)| {
-        let Ok(name) = std::str::from_utf8(word) else {
-            return false;
-        };
-        let args = &words[idx + 1..];
-        match name {
-            "security" => sensitive_security_args(args),
-            "gh" => sensitive_gh_args(args),
-            "op" => sensitive_1password_args(args),
-            "bw" => sensitive_bitwarden_args(args),
-            "pass" => sensitive_pass_args(args),
-            "aws" => sensitive_aws_args(args),
-            "gcloud" => sensitive_gcloud_args(args),
-            "doppler" => sensitive_doppler_args(args),
-            "cat" | "head" | "tail" | "sed" => args
-                .iter()
-                .any(|arg| std::str::from_utf8(arg).is_ok_and(secret_file_argument)),
-            _ => false,
-        }
-    })
-}
-
-fn sensitive_security_args(args: &[Vec<u8>]) -> bool {
-    let finds_password = args.iter().any(|arg| {
-        matches!(
-            std::str::from_utf8(arg),
-            Ok("find-generic-password" | "find-internet-password")
-        )
-    });
-    let prints_password = args
-        .iter()
-        .any(|arg| std::str::from_utf8(arg).is_ok_and(is_short_password_print_flag));
-    finds_password && prints_password
-}
-
-fn sensitive_gh_args(args: &[Vec<u8>]) -> bool {
-    arg_text(args, 0) == Some("auth") && arg_text(args, 1) == Some("token")
-}
-
-fn sensitive_1password_args(args: &[Vec<u8>]) -> bool {
-    match (arg_text(args, 0), arg_text(args, 1)) {
-        (Some("read"), _) => true,
-        (Some("item"), Some("get")) => args.iter().any(|arg| {
-            std::str::from_utf8(arg).is_ok_and(|text| {
-                text == "--reveal"
-                    || text.contains("password")
-                    || text.contains("credential")
-                    || text.contains("secret")
-                    || text.contains("token")
-            })
-        }),
-        _ => false,
-    }
-}
-
-fn sensitive_bitwarden_args(args: &[Vec<u8>]) -> bool {
-    arg_text(args, 0) == Some("get")
-        && matches!(
-            arg_text(args, 1),
-            Some("password" | "item" | "notes" | "totp" | "attachment")
-        )
-}
-
-fn sensitive_pass_args(args: &[Vec<u8>]) -> bool {
-    matches!(arg_text(args, 0), Some("show") | Some("-c" | "--clip")) || !args.is_empty()
-}
-
-fn sensitive_aws_args(args: &[Vec<u8>]) -> bool {
-    match (arg_text(args, 0), arg_text(args, 1), arg_text(args, 2)) {
-        (Some("configure"), Some("get"), Some(key)) => contains_secret_word(key),
-        (Some("secretsmanager"), Some("get-secret-value"), _) => true,
-        (Some("ssm"), Some("get-parameter" | "get-parameters"), _) => args
-            .iter()
-            .any(|arg| std::str::from_utf8(arg).is_ok_and(|text| text == "--with-decryption")),
-        _ => false,
-    }
-}
-
-fn sensitive_gcloud_args(args: &[Vec<u8>]) -> bool {
-    arg_text(args, 0) == Some("auth")
-        && matches!(
-            arg_text(args, 1),
-            Some("print-access-token" | "print-identity-token")
-        )
-}
-
-fn sensitive_doppler_args(args: &[Vec<u8>]) -> bool {
-    arg_text(args, 0) == Some("secrets") && matches!(arg_text(args, 1), Some("get" | "download"))
-}
-
-fn arg_text(args: &[Vec<u8>], index: usize) -> Option<&str> {
-    std::str::from_utf8(args.get(index)?).ok()
-}
-
-fn is_short_password_print_flag(text: &str) -> bool {
-    text == "-w" || text.ends_with('w') && text.starts_with('-') && !text.starts_with("--")
-}
-
-fn secret_file_argument(text: &str) -> bool {
-    if text.starts_with('-') || shell_operator_word(text) {
-        return false;
-    }
-    let clean = text.trim_matches(|c| matches!(c, '"' | '\'' | '`' | ',' | ':' | ';' | ')' | '('));
-    let lower = clean.to_ascii_lowercase();
-    let name = lower.rsplit('/').next().unwrap_or(lower.as_str());
-    if matches!(
-        name,
-        ".env"
-            | ".netrc"
-            | ".npmrc"
-            | ".pypirc"
-            | ".dockercfg"
-            | "id_rsa"
-            | "id_dsa"
-            | "id_ecdsa"
-            | "id_ed25519"
-    ) {
-        return true;
-    }
-    if name.starts_with(".env.") {
-        return !matches!(
-            name,
-            ".env.example" | ".env.sample" | ".env.template" | ".env.defaults"
-        );
-    }
-    if name.ends_with(".pem") || name.ends_with(".key") {
-        return true;
-    }
-    if lower.contains("/.aws/credentials")
-        || lower.contains("/.kube/config")
-        || lower.contains("/.config/gcloud/")
-    {
-        return true;
-    }
-    contains_secret_word(name)
-}
-
-fn contains_secret_word(text: &str) -> bool {
-    text.contains("secret")
-        || text.contains("password")
-        || text.contains("passwd")
-        || text.contains("token")
-        || text.contains("credential")
-        || text.contains("private_key")
 }
 
 fn networksetup_command_view(command: &[u8]) -> Option<CommandView> {

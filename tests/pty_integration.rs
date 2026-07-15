@@ -83,6 +83,10 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// exported as `ZDOTDIR`/`HOME` so the inner shell sources our integration —
 /// zsh reads `$ZDOTDIR/.zshrc`, bash reads `$HOME/.bashrc`.
 fn spawn(shell: &str, zdot: Option<&Path>) -> Session {
+    spawn_with_config(shell, zdot, None)
+}
+
+fn spawn_with_config(shell: &str, zdot: Option<&Path>, config: Option<&Path>) -> Session {
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 24,
@@ -98,7 +102,10 @@ fn spawn(shell: &str, zdot: Option<&Path>) -> Session {
     // guard if the test runner is itself inside a glimps session) and GLIMPSRC
     // (a stray config would make formatting non-deterministic).
     cmd.env_remove("GLIMPS_ACTIVE");
-    cmd.env_remove("GLIMPSRC");
+    match config {
+        Some(path) => cmd.env("GLIMPSRC", path),
+        None => cmd.env_remove("GLIMPSRC"),
+    }
     cmd.env("SHELL", shell);
     cmd.env("GLIMPS", "1");
     cmd.env("TERM", "xterm-256color");
@@ -227,10 +234,14 @@ impl ZdotDir {
             .output()
             .expect("glimps init zsh");
         assert!(init.status.success(), "glimps init zsh failed");
+        // Keep the test shell hermetic. Hosted runners may install global zsh
+        // startup files or completion directories with permissions that make
+        // `compinit` stop for an interactive security prompt before our hooks
+        // load. `GLOBAL_RCS` skips those runner-owned files while still loading
+        // this ZDOTDIR's `.zshrc`.
+        std::fs::write(path.join(".zshenv"), b"unsetopt GLOBAL_RCS\n").expect("write .zshenv");
         let mut zshrc = String::from(
-            "autoload -Uz compinit\n\
-             compinit -u -d \"$ZDOTDIR/.zcompdump\"\n\
-             setopt auto_menu complete_in_word\n\
+            "setopt auto_menu complete_in_word\n\
              zstyle ':completion:*' menu select\n",
         );
         zshrc.push_str(std::str::from_utf8(&init.stdout).expect("zsh init is utf8"));
@@ -271,6 +282,33 @@ fn exit_command_terminates() {
         s.wait_for(b"glimps:", Duration::from_secs(1)),
         "normal `exit` did not print the farewell"
     );
+    assert!(
+        contains(&s.snapshot(), b"GLIMPS warning: shell '/bin/sh'"),
+        "unsupported shell fallback was silent"
+    );
+}
+
+#[test]
+fn farewell_config_switch_silences_clean_exit_message() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let config_path = std::env::temp_dir().join(format!(
+        "glimps-no-farewell-{}-{n}.toml",
+        std::process::id()
+    ));
+    std::fs::write(&config_path, b"farewell = false\n").expect("write test config");
+    let mut s = spawn_with_config("/bin/sh", None, Some(&config_path));
+    thread::sleep(STARTUP);
+    s.write(b"exit\n");
+    assert!(s.wait_exit(EXIT_BUDGET), "glimps did not exit");
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        !contains(&s.snapshot(), "✨ glimps:".as_bytes()),
+        "farewell=false still printed the farewell"
+    );
+    let _ = std::fs::remove_file(config_path);
 }
 
 #[test]
@@ -322,11 +360,79 @@ fn sigterm_terminates_and_reaps() {
     );
 }
 
+#[test]
+fn sigterm_kills_a_hup_ignoring_foreground_process() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid_path =
+        std::env::temp_dir().join(format!("glimps-foreground-pid-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_file(&pid_path);
+
+    let mut s = spawn("/bin/sh", None);
+    thread::sleep(STARTUP);
+    let command = format!(
+        "sh -c 'trap \"\" HUP TERM; echo $$ > {}; exec sleep 30'\n",
+        pid_path.display()
+    );
+    s.write(command.as_bytes());
+
+    let pid_deadline = Instant::now() + Duration::from_secs(3);
+    let foreground_pid = loop {
+        if let Ok(text) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = text.trim().parse::<libc::pid_t>() {
+                break pid;
+            }
+        }
+        assert!(
+            Instant::now() < pid_deadline,
+            "foreground command did not publish its pid; captured: {:?}",
+            String::from_utf8_lossy(&s.snapshot())
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let glimps_pid =
+        libc::pid_t::try_from(s.child.process_id().expect("child pid")).expect("pid fits pid_t");
+    // SAFETY: valid process id owned by this test and a standard signal.
+    assert_eq!(unsafe { libc::kill(glimps_pid, libc::SIGTERM) }, 0);
+    assert!(
+        s.wait_exit(EXIT_BUDGET),
+        "glimps did not exit after SIGTERM"
+    );
+
+    let gone_deadline = Instant::now() + Duration::from_secs(3);
+    while process_exists(foreground_pid) && Instant::now() < gone_deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    if process_exists(foreground_pid) {
+        // SAFETY: best-effort cleanup of the test-owned process before failing.
+        let _ = unsafe { libc::kill(foreground_pid, libc::SIGKILL) };
+        panic!("foreground process {foreground_pid} survived GLIMPS shutdown");
+    }
+    let _ = std::fs::remove_file(pid_path);
+}
+
+fn process_exists(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 performs existence/permission checking only.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
 /// OSC-133 prompt-start marker, emitted by the integration's `precmd` before each
 /// prompt (including the first). Seeing it means the shell has sourced `.zshrc`
 /// and the hooks are installed — a deterministic readiness signal.
 const PROMPT_READY: &[u8] = b"\x1b]133;A\x07";
 const READY_BUDGET: Duration = Duration::from_secs(3);
+
+fn assert_prompt_ready(session: &Session) {
+    assert!(
+        session.wait_for(PROMPT_READY, READY_BUDGET),
+        "shell integration did not reach its first prompt. Captured: {:?}",
+        String::from_utf8_lossy(&session.snapshot())
+    );
+}
 
 #[test]
 fn json_output_is_formatted_end_to_end() {
@@ -338,13 +444,32 @@ fn json_output_is_formatted_end_to_end() {
     let mut s = spawn(&zsh, Some(zdot.path()));
     // Wait for the hooks to be installed before issuing the command (removes the
     // startup timing race; input is buffered anyway, so this is belt-and-braces).
-    s.wait_for(PROMPT_READY, READY_BUDGET);
+    assert_prompt_ready(&s);
     s.write(b"echo '{\"alpha\":1}'\n");
     // The JSON badge proves: markers framed the output AND the buffered JSON
     // formatter ran end-to-end through the real supervisor.
     assert!(
         s.wait_for(b"JSON", FORMAT_BUDGET),
         "JSON output was not formatted (no badge). Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
+fn private_metadata_path_is_not_inherited_by_commands() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+    s.write(b"printf 'META_ENV=%s\\n' \"${GLIMPS_META_PATH-unset}\"\n");
+    assert!(
+        s.wait_for(b"META_ENV=unset", FORMAT_BUDGET),
+        "metadata capability leaked to child environment: {:?}",
         String::from_utf8_lossy(&s.snapshot())
     );
     s.write(b"exit\n");
@@ -359,7 +484,7 @@ fn failed_command_footer_decodes_exit_127_end_to_end() {
     };
     let zdot = ZdotDir::new();
     let mut s = spawn(&zsh, Some(zdot.path()));
-    s.wait_for(PROMPT_READY, READY_BUDGET);
+    assert_prompt_ready(&s);
     // A command that cannot exist: the shell reports exit 127, and the footer
     // must decode it. `on PATH` is GLIMPS's wording, distinct from the shell's
     // own `command not found:` message — seeing it proves the D;127 marker
@@ -387,7 +512,7 @@ fn zsh_tab_completion_still_reaches_the_inner_shell() {
     };
     let zdot = ZdotDir::new();
     let mut s = spawn(&zsh, Some(zdot.path()));
-    s.wait_for(PROMPT_READY, READY_BUDGET);
+    assert_prompt_ready(&s);
 
     // `Cargo.to<Tab>` should complete to the repo's `Cargo.toml`. If GLIMPS
     // swallows Tab or the disposable zsh lacks completion setup, zsh runs
@@ -410,7 +535,7 @@ fn failed_command_footer_pins_the_error_line_end_to_end() {
     };
     let zdot = ZdotDir::new();
     let mut s = spawn(&zsh, Some(zdot.path()));
-    s.wait_for(PROMPT_READY, READY_BUDGET);
+    assert_prompt_ready(&s);
     // An ERROR-severity line followed by a failing exit: the footer must
     // quote the line under the status (the `↳ ` prefix is GLIMPS's — it
     // distinguishes the pin from the original output line above it).
@@ -444,7 +569,7 @@ fn pipeline_stage_failure_warns_even_when_shell_exit_is_zero() {
     };
     let zdot = ZdotDir::new();
     let mut s = spawn(&zsh, Some(zdot.path()));
-    s.wait_for(PROMPT_READY, READY_BUDGET);
+    assert_prompt_ready(&s);
 
     // Without pipefail, zsh reports this pipeline's final exit as 0 because
     // `cat` succeeds. GLIMPS should still observe `$pipestatus` and call out the
@@ -475,7 +600,7 @@ fn bash_json_output_is_formatted_end_to_end() {
     };
     let home = BashHome::new();
     let mut s = spawn(&bash, Some(home.path()));
-    s.wait_for(PROMPT_READY, READY_BUDGET);
+    assert_prompt_ready(&s);
     s.write(b"echo '{\"alpha\":1}'\n");
     assert!(
         s.wait_for(b"JSON", FORMAT_BUDGET),
@@ -494,7 +619,7 @@ fn bash_pipeline_stage_failure_warns_even_when_shell_exit_is_zero() {
     };
     let home = BashHome::new();
     let mut s = spawn(&bash, Some(home.path()));
-    s.wait_for(PROMPT_READY, READY_BUDGET);
+    assert_prompt_ready(&s);
 
     s.write(b"sh -c 'printf \"ERROR bash pipe failed\\n\"; exit 7' | cat\n");
     assert!(
@@ -519,7 +644,7 @@ fn binary_output_is_not_framed() {
     };
     let zdot = ZdotDir::new();
     let mut s = spawn(&zsh, Some(zdot.path()));
-    s.wait_for(PROMPT_READY, READY_BUDGET);
+    assert_prompt_ready(&s);
     // Emit raw binary; assert the verbatim bytes appear and NO command header bar
     // (▌, U+258C = E2 96 8C) was injected around them.
     let baseline = s.snapshot().len();

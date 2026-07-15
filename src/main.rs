@@ -9,6 +9,7 @@ use glimps::config::Config;
 use glimps::format::Clock;
 use glimps::{init, pty};
 use std::io::{IsTerminal, Write};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const FAREWELLS: &[&str] = &[
@@ -28,7 +29,7 @@ const FAREWELLS: &[&str] = &[
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
+    let shell_override = match args.first().map(String::as_str) {
         Some("init") => {
             // `glimps init <shell>` prints integration to stdout for `eval`.
             return init::print_init(args.get(1).map(String::as_str));
@@ -41,12 +42,19 @@ fn main() -> Result<()> {
             println!("glimps {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
+        Some("--shell") => match args.as_slice() {
+            [_, shell] => Some(shell.clone()),
+            _ => {
+                eprintln!("glimps: --shell requires exactly one executable path.");
+                std::process::exit(2);
+            }
+        },
         Some(other) => {
             eprintln!("glimps: unknown argument '{other}'. Try `glimps --help`.");
             std::process::exit(2);
         }
-        None => {}
-    }
+        None => None,
+    };
 
     // Default action: wrap the shell. Guard against re-exec loops — if we're
     // already inside a GLIMPS PTY, launching another would nest forever.
@@ -71,11 +79,22 @@ fn main() -> Result<()> {
         Clock::Off
     };
 
-    // The shell to wrap. Defaults to the user's $SHELL, falling back to zsh.
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    // The shell to wrap. An explicit CLI choice wins over $SHELL. Unsupported
+    // shells still get a transparent PTY session, but no formatting is promised
+    // because GLIMPS cannot install command boundaries for them.
+    let shell = shell_override
+        .or_else(|| std::env::var("SHELL").ok())
+        .unwrap_or_else(|| "/bin/zsh".to_string());
+    if !is_supported_shell(&shell) {
+        eprintln!(
+            "GLIMPS warning: shell '{}' has no GLIMPS integration; running transparent pass-through. Supported: zsh, bash.",
+            shell
+        );
+    }
 
+    let farewell = config.farewell;
     let outcome = pty::run_shell(&shell, clock, config)?;
-    print_farewell(outcome.signaled);
+    print_farewell(outcome.signaled, farewell);
 
     // Exit via `_exit`, not `std::process::exit`: the latter runs libc atexit /
     // teardown, which can race the detached stdin/stdout I/O threads as they wind
@@ -86,8 +105,8 @@ fn main() -> Result<()> {
     unsafe { libc::_exit(outcome.code) }
 }
 
-fn print_farewell(signaled: bool) {
-    if signaled || !std::io::stderr().is_terminal() {
+fn print_farewell(signaled: bool, enabled: bool) {
+    if signaled || !enabled || !std::io::stderr().is_terminal() {
         return;
     }
     let mut stderr = std::io::stderr();
@@ -97,6 +116,13 @@ fn print_farewell(signaled: bool) {
         choose_farewell(SystemTime::now())
     );
     let _ = stderr.flush();
+}
+
+fn is_supported_shell(shell: &str) -> bool {
+    Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "zsh" | "bash"))
 }
 
 fn choose_farewell(now: SystemTime) -> &'static str {
@@ -115,6 +141,7 @@ fn print_help() {
          \n\
          USAGE:\n\
          \x20   glimps              Wrap your shell inside GLIMPS (formats output).\n\
+         \x20   glimps --shell PATH Wrap PATH instead of $SHELL.\n\
          \x20   glimps init zsh     Print zsh shell integration (for ~/.zshrc).\n\
          \x20   glimps init bash    Print bash shell integration (for ~/.bashrc).\n\
          \x20   glimps --help       Show this help.\n\
@@ -131,7 +158,7 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_farewell, FAREWELLS};
+    use super::{choose_farewell, is_supported_shell, FAREWELLS};
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
@@ -147,5 +174,13 @@ mod tests {
             assert!(!message.contains("AI"));
             assert!(!message.trim().is_empty());
         }
+    }
+
+    #[test]
+    fn supported_shell_check_uses_the_executable_basename() {
+        assert!(is_supported_shell("/bin/zsh"));
+        assert!(is_supported_shell("bash"));
+        assert!(!is_supported_shell("/usr/local/bin/fish"));
+        assert!(!is_supported_shell(""));
     }
 }

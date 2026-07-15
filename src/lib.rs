@@ -11,5 +11,6 @@
 pub mod config;
 pub mod format;
 pub mod init;
+mod metadata;
 pub mod pty;
 pub mod terminal;

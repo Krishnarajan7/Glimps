@@ -5,8 +5,10 @@
 
 use super::*;
 use proptest::prelude::*;
+use std::io::Write;
 
 const C: &[u8] = b"\x1b]133;C\x07"; // command output start
+const A: &[u8] = b"\x1b]133;A\x07"; // prompt start / next command cycle
 const D: &[u8] = b"\x1b]133;D\x07"; // command output end
 const D0: &[u8] = b"\x1b]133;D;0\x07"; // command output end, success
 const D1: &[u8] = b"\x1b]133;D;1\x07"; // command output end, failure
@@ -38,7 +40,9 @@ fn badge(label: &str) -> Vec<u8> {
 
 /// The command-capture marker GLIMPS's init emits before the C marker.
 fn cmd_marker(cmd: &[u8]) -> Vec<u8> {
-    let mut v = b"\x1b]7337;".to_vec();
+    // A real command cycle is armed by the preceding prompt marker. Include it
+    // so formatter tests model the shell integration's actual ordering.
+    let mut v = b"\x1b]133;A\x07\x1b]7337;".to_vec();
     v.extend_from_slice(cmd);
     v.push(0x07);
     v
@@ -105,7 +109,7 @@ fn forged_output_markers_do_not_inject_a_command_header() {
     out.extend_from_slice(&f.process(C));
     out.extend_from_slice(&f.process(b"reading...\n")); // real header emitted here
                                                         // Attacker-controlled output forges markers mid-output:
-    let mut forged = cmd_marker(b"git push --force");
+    let mut forged = b"\x1b]7337;git push --force\x07".to_vec();
     forged.extend_from_slice(C);
     out.extend_from_slice(&f.process(&forged));
     out.extend_from_slice(&f.process(b"pwned\n"));
@@ -128,6 +132,55 @@ fn forged_output_markers_do_not_inject_a_command_header() {
         1,
         "exactly one real header expected"
     );
+}
+
+#[test]
+fn forged_end_command_and_reopen_do_not_inject_a_command_header() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat notes.txt")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"before\n"));
+    out.extend_from_slice(
+        &f.process(b"\x1b]133;D;0\x07\x1b]7337;git push --force\x07\x1b]133;C\x07after\n"),
+    );
+    let s = String::from_utf8(out).unwrap();
+
+    assert!(s.contains("\x1b[36mcat\x1b[0m"));
+    assert!(!s.contains("\x1b[36mgit\x1b[0m"));
+    assert_eq!(s.matches('▌').count(), 1);
+}
+
+#[test]
+fn private_metadata_overrides_forged_in_band_command_and_status() {
+    let mut channel = crate::metadata::MetadataChannel::create().unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(channel.path())
+        .unwrap();
+    writer.write_all(b"C\0echo trusted\0").unwrap();
+    writer.flush().unwrap();
+
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.metadata = channel.take_reader();
+    let mut out = Vec::new();
+    // The PTY stream claims a different command. With a private channel active,
+    // it is boundary compatibility data only and cannot author GLIMPS chrome.
+    out.extend_from_slice(&f.process(&cmd_marker(b"git push --force")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"ERROR trusted failure\n"));
+    writer.write_all(b"R\0\x37\0/tmp/trusted\0\x37\0").unwrap();
+    writer.flush().unwrap();
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8(out).unwrap();
+
+    assert!(s.contains("echo trusted"));
+    assert!(!s.contains("\x1b[36mgit\x1b[0m"));
+    assert!(s.contains("failed exit 7"));
+    assert!(!s.contains("done exit 0"));
 }
 
 #[test]
@@ -662,11 +715,11 @@ fn successful_touch_gets_a_file_breadcrumb_without_done_footer() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("touch 'hello world.txt'"));
-    assert!(s.contains("touched file "));
+    assert!(s.contains("touch completed for "));
     assert!(s.contains("hello world.txt"));
-    assert!(
-        s.contains("\x1b[38;2;5;130;202mtouched file \x1b[38;2;142;202;230mhello world.txt\x1b[0m")
-    );
+    assert!(s.contains(
+        "\x1b[38;2;5;130;202mtouch completed for \x1b[38;2;142;202;230mhello world.txt\x1b[0m"
+    ));
     assert!(!s.contains("done exit 0"));
 }
 
@@ -681,10 +734,13 @@ fn successful_mkdir_gets_a_folder_breadcrumb_without_done_footer() {
     out.extend_from_slice(&f.process(C));
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
-    assert!(s.contains("created 2 folders: "));
+    assert!(
+        s.contains("mkdir completed for 2 targets: "),
+        "captured: {s:?}"
+    );
     assert!(s.contains("logs/cache, tmp/out"));
     assert!(s.contains(
-        "\x1b[38;2;5;130;202mcreated 2 folders: \x1b[38;2;142;202;230mlogs/cache, tmp/out\x1b[0m"
+        "\x1b[38;2;5;130;202mmkdir completed for 2 targets: \x1b[38;2;142;202;230mlogs/cache, tmp/out\x1b[0m"
     ));
     assert!(!s.contains("done exit 0"));
 }
@@ -700,10 +756,13 @@ fn successful_rm_gets_a_conservative_target_breadcrumb_without_done_footer() {
     out.extend_from_slice(&f.process(C));
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
-    assert!(s.contains("removed 2 targets: "));
+    assert!(
+        s.contains("rm completed for 2 targets: "),
+        "captured: {s:?}"
+    );
     assert!(s.contains("target/cache, old.log"));
     assert!(s.contains(
-        "\x1b[38;2;5;130;202mremoved 2 targets: \x1b[38;2;142;202;230mtarget/cache, old.log\x1b[0m"
+        "\x1b[38;2;5;130;202mrm completed for 2 targets: \x1b[38;2;142;202;230mtarget/cache, old.log\x1b[0m"
     ));
     assert!(!s.contains("done exit 0"));
 }
@@ -720,7 +779,7 @@ fn failed_rm_keeps_failure_footer_and_no_success_breadcrumb() {
     out.extend_from_slice(&f.process(C));
     out.extend_from_slice(&f.process(D1));
     let s = String::from_utf8_lossy(&out);
-    assert!(!s.contains("removed target missing.txt"));
+    assert!(!s.contains("rm completed for missing.txt"));
     assert!(s.contains("failed exit 1"));
     assert!(s.contains("command failed: rm missing.txt"));
 }
@@ -737,9 +796,48 @@ fn compound_file_commands_do_not_get_guessed_breadcrumbs() {
     out.extend_from_slice(&f.process(C));
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
-    assert!(!s.contains("touched file"));
-    assert!(!s.contains("removed target"));
+    assert!(!s.contains("touch completed for"));
+    assert!(!s.contains("rm completed for"));
     assert!(!s.contains("done exit 0"));
+}
+
+#[test]
+fn successful_noop_prone_file_commands_make_no_state_change_claim() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"rm -f missing.txt")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D0));
+    out.extend_from_slice(&f.process(&cmd_marker(b"mkdir -p existing-dir")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("rm completed for missing.txt"));
+    assert!(s.contains("mkdir completed for existing-dir"));
+    assert!(!s.contains("removed target"));
+    assert!(!s.contains("created folder"));
+}
+
+#[test]
+fn file_command_name_used_as_an_argument_gets_no_breadcrumb() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"printf rm target.txt")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(!s.contains("rm completed for"));
 }
 
 #[test]
@@ -1833,7 +1931,7 @@ fn sensitive_command_registry_catches_secret_printing_tools() {
     ];
     for command in commands {
         assert!(
-            is_sensitive_command(command),
+            is_sensitive_command(command, &[]),
             "expected sensitive command: {}",
             String::from_utf8_lossy(command)
         );
@@ -1853,11 +1951,44 @@ fn sensitive_command_registry_does_not_catch_neighbor_commands() {
     ];
     for command in commands {
         assert!(
-            !is_sensitive_command(command),
+            !is_sensitive_command(command, &[]),
             "unexpected sensitive command: {}",
             String::from_utf8_lossy(command)
         );
     }
+}
+
+#[test]
+fn custom_sensitive_commands_are_token_aware_and_passthrough() {
+    let rules = vec!["vault kv get".to_string(), "kubectl get secret".to_string()];
+    assert!(is_sensitive_command(
+        b"sudo vault kv get secret/app",
+        &rules
+    ));
+    assert!(is_sensitive_command(
+        b"/usr/local/bin/kubectl get secret db -o yaml",
+        &rules
+    ));
+    assert!(!is_sensitive_command(b"vault status", &rules));
+    assert!(!is_sensitive_command(b"echo 'vault kv get'", &rules));
+
+    let cfg = Config {
+        sensitive_commands: rules,
+        ..Config::default()
+    };
+    let mut f = fmt_with(cfg);
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"vault kv get secret/app")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(br#"{"token":"do-not-format"}"#));
+    out.extend_from_slice(&f.process(b"\nERROR secret output\n"));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains(r#"{"token":"do-not-format"}"#));
+    assert!(!s.contains(r#""token": "do-not-format""#));
+    assert!(!s.contains('\u{21b3}'));
 }
 
 #[test]
@@ -2124,12 +2255,12 @@ fn formatting_resumes_after_alt_screen_exits() {
     }
     // The next command's JSON output is formatted normally again.
     let mut out = Vec::new();
-    for p in [C, br#"{"a":1}"#.as_slice(), D] {
+    for p in [A, C, br#"{"a":1}"#.as_slice(), D] {
         out.extend_from_slice(&f.process(p));
     }
     assert_eq!(
         out,
-        cat(&[C, &sep(), &badge("JSON"), &crlf(b"{\n  \"a\": 1\n}"), D])
+        cat(&[A, C, &sep(), &badge("JSON"), &crlf(b"{\n  \"a\": 1\n}"), D,])
     );
 }
 
@@ -2197,7 +2328,7 @@ fn two_consecutive_json_outputs_each_framed_and_formatted() {
     }
     f.theme = Theme::plain();
     let mut out = Vec::new();
-    for part in [C, br#"{"a":1}"#, D, C, b"[1,2]", D] {
+    for part in [C, br#"{"a":1}"#, D, A, C, b"[1,2]", D] {
         out.extend_from_slice(&f.process(part));
     }
     let one = crlf(b"{\n  \"a\": 1\n}");
@@ -2208,6 +2339,7 @@ fn two_consecutive_json_outputs_each_framed_and_formatted() {
         &badge("JSON"),
         &one,
         D,
+        A,
         C,
         &sep(),
         &badge("JSON"),
@@ -2435,7 +2567,9 @@ proptest::proptest! {
             color,
             separator,
             timestamp: false,
+            farewell: false,
             bypass: Vec::new(),
+            sensitive_commands: Vec::new(),
             formatters: crate::config::Formatters { json, html, logs, http, diff, stacktrace },
             failures: crate::config::Failures {
                 enabled: failures_enabled,
