@@ -230,7 +230,7 @@ impl Config {
 }
 
 /// `$GLIMPSRC` if set, else `~/.glimpsrc`. `None` if `HOME` is also unset.
-fn config_path() -> Option<PathBuf> {
+pub(crate) fn config_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("GLIMPSRC") {
         return Some(PathBuf::from(p));
     }

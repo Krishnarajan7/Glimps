@@ -9,6 +9,7 @@
 //! only formatting entry point is `format::Formatter::process`.
 
 pub mod config;
+pub mod doctor;
 pub mod format;
 pub mod init;
 mod metadata;

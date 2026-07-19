@@ -192,6 +192,20 @@ from command output. It never touches your prompt.
 Prefer not to touch your rc file? Just run `glimps` to start a wrapped shell, and
 `exit` to leave.
 
+## Diagnose Your Setup
+
+After installing or changing shell integration, run:
+
+```bash
+glimps doctor
+```
+
+The doctor checks the installed binary, supported shell, rc-file integration,
+configuration syntax, `PATH`, TTY/`TERM` state, active-session flags, and the
+private metadata channel. It is read-only: it does not edit shell files, install
+anything, or make network requests. Warnings describe non-fatal conditions;
+failed checks make the command exit with status 1 so it also works in scripts.
+
 ## Configuration
 
 GLIMPS works with no config. To customize, copy

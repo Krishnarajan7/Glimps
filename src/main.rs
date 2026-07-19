@@ -7,7 +7,7 @@
 use anyhow::Result;
 use glimps::config::Config;
 use glimps::format::Clock;
-use glimps::{init, pty};
+use glimps::{doctor, init, pty};
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,6 +33,17 @@ fn main() -> Result<()> {
         Some("init") => {
             // `glimps init <shell>` prints integration to stdout for `eval`.
             return init::print_init(args.get(1).map(String::as_str));
+        }
+        Some("doctor") if args.len() == 1 => {
+            let exit_code = doctor::run()?;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+            return Ok(());
+        }
+        Some("doctor") => {
+            eprintln!("glimps: doctor does not accept arguments.");
+            std::process::exit(2);
         }
         Some("-h") | Some("--help") => {
             print_help();
@@ -142,6 +153,7 @@ fn print_help() {
          USAGE:\n\
          \x20   glimps              Wrap your shell inside GLIMPS (formats output).\n\
          \x20   glimps --shell PATH Wrap PATH instead of $SHELL.\n\
+         \x20   glimps doctor       Diagnose your GLIMPS setup (read-only).\n\
          \x20   glimps init zsh     Print zsh shell integration (for ~/.zshrc).\n\
          \x20   glimps init bash    Print bash shell integration (for ~/.bashrc).\n\
          \x20   glimps --help       Show this help.\n\
