@@ -22,13 +22,21 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::format::{Clock, Formatter};
+use crate::metadata::MetadataChannel;
 use crate::terminal::{term_size, RawGuard};
 
+/// How the wrapped shell session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellExit {
+    pub code: i32,
+    pub signaled: bool,
+}
+
 /// Wrap `shell` inside a PTY and run it transparently. Returns the shell's
-/// exit code once it terminates. `clock` sources the separator timestamp
-/// (captured by the caller while still single-threaded); `config` is the loaded
-/// `.glimpsrc`.
-pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<i32> {
+/// exit code and whether GLIMPS received a termination signal. `clock` sources
+/// the separator timestamp (captured by the caller while still single-threaded);
+/// `config` is the loaded `.glimpsrc`.
+pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit> {
     let (cols, rows) = term_size();
 
     let pty_system = native_pty_system();
@@ -40,6 +48,9 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<i32> {
             pixel_height: 0,
         })
         .context("failed to open pty")?;
+    // Failure to create the private channel must never prevent a shell session;
+    // the formatter retains its conservative compatibility fallback.
+    let mut metadata_channel = MetadataChannel::create().ok();
 
     // Spawn the shell as an *interactive* (not login) shell on the slave side,
     // marking the environment so a nested GLIMPS won't re-wrap (see main.rs
@@ -57,6 +68,10 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<i32> {
     let mut cmd = CommandBuilder::new(shell);
     cmd.arg("-i");
     cmd.env("GLIMPS_ACTIVE", "1");
+    match metadata_channel.as_ref() {
+        Some(channel) => cmd.env("GLIMPS_META_PATH", channel.path()),
+        None => cmd.env_remove("GLIMPS_META_PATH"),
+    }
     if let Ok(cwd) = std::env::current_dir() {
         cmd.cwd(cwd);
     }
@@ -78,8 +93,11 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<i32> {
     // master read does not always return EOF promptly on shell exit).
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let mut reader = pair.master.try_clone_reader()?;
+    let metadata_reader = metadata_channel
+        .as_mut()
+        .and_then(MetadataChannel::take_reader);
     thread::spawn(move || {
-        let mut formatter = Formatter::for_supervisor(clock, config);
+        let mut formatter = Formatter::for_supervisor_with_metadata(clock, config, metadata_reader);
         let mut stdout = std::io::stdout();
         let mut buf = [0u8; 8192];
         loop {
@@ -148,17 +166,12 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<i32> {
             break (status.exit_code() & 0xff) as i32;
         }
         if terminate.load(Ordering::Acquire) {
-            // Asked to terminate (e.g. `kill`): exit cleanly so the terminal is
-            // restored. We deliberately do NOT kill/reap the shell here — when we
-            // exit, the kernel revokes our controlling terminal and SIGHUPs the
-            // shell's process group, tearing it down. Reaping it first can stall
-            // the session-leader exit path. (Same teardown as an outside SIGKILL.)
-            // Trade-off: because the shell keeps running, the reader stays blocked
-            // and any output still buffered inside the formatter is discarded by
-            // the `_exit` below. That is acceptable for a forced kill (and the
-            // buffer is empty at an idle prompt, the usual moment to `kill`); a
-            // clean `exit`/Ctrl-D always flushes via the EOF path in the reader.
+            // Asked to terminate (e.g. `kill`): tear down both the foreground
+            // job group and the shell's own group with bounded escalation. This
+            // closes the slave PTY, lets the reader flush formatter-held bytes,
+            // and prevents a foreground command from surviving as an orphan.
             signaled = true;
+            terminate_shell_session(child.as_mut(), pair.master.as_ref());
             break 130;
         }
         if resized.swap(false, Ordering::Acquire) {
@@ -174,8 +187,8 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<i32> {
     };
 
     // On a clean shell exit, reap it (no-op if `try_wait` already did) so its slave
-    // fd is fully closed — which lets the reader see EOF and finish. On the signal
-    // path the shell is still running; we leave it to the kernel and exit promptly.
+    // fd is fully closed — which lets the reader see EOF and finish. Signal-driven
+    // teardown is already bounded and reaped by `terminate_shell_session`.
     if !signaled {
         let _ = child.wait();
     }
@@ -187,14 +200,84 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<i32> {
     // from the slave closing once `child.wait()` reaps the shell; we then wait
     // generously so a large trailing burst is never truncated. The wait is always
     // BOUNDED (never an unbounded `join()`, which hung when the read never EOF'd):
-    // on the signal path the shell is still alive so the reader never EOFs and we
-    // just burn the short budget before exiting.
+    // signal path gets a shorter but still useful drain window after killing the
+    // child groups; it must never turn shutdown into an unbounded wait.
     drop(pair.master);
     let drain = if signaled {
-        Duration::from_millis(200)
+        Duration::from_secs(1)
     } else {
         Duration::from_secs(2)
     };
     let _ = done_rx.recv_timeout(drain);
-    Ok(exit_code)
+    Ok(ShellExit {
+        code: exit_code,
+        signaled,
+    })
+}
+
+/// Terminate the inner PTY session without leaving its foreground job behind.
+/// `portable-pty` makes the shell a session/process-group leader; interactive
+/// shells put a running pipeline in a separate foreground process group. Signal
+/// both, then escalate after a short grace period. Every wait is bounded.
+#[cfg(unix)]
+fn terminate_shell_session(
+    child: &mut dyn portable_pty::Child,
+    master: &dyn portable_pty::MasterPty,
+) {
+    let shell_group = child
+        .process_id()
+        .and_then(|pid| libc::pid_t::try_from(pid).ok());
+    let foreground_group = master.process_group_leader();
+
+    signal_distinct_groups(foreground_group, shell_group, shell_group, libc::SIGHUP);
+    let grace_end = std::time::Instant::now() + Duration::from_millis(200);
+    while std::time::Instant::now() < grace_end {
+        let _ = child.try_wait();
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // A command may deliberately ignore HUP/TERM. KILL is the bounded final
+    // fallback; signaling a group that already exited simply returns ESRCH.
+    signal_distinct_groups(foreground_group, shell_group, shell_group, libc::SIGKILL);
+    let reap_end = std::time::Instant::now() + Duration::from_millis(300);
+    while std::time::Instant::now() < reap_end {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn signal_distinct_groups(
+    first: Option<libc::pid_t>,
+    second: Option<libc::pid_t>,
+    session: Option<libc::pid_t>,
+    signal: i32,
+) {
+    let belongs_to_session = |group: libc::pid_t| {
+        session.is_some_and(|session_id| {
+            // SAFETY: getsid only queries kernel process metadata.
+            (unsafe { libc::getsid(group) }) == session_id
+        })
+    };
+    if let Some(group) = first.filter(|group| *group > 0 && belongs_to_session(*group)) {
+        // SAFETY: negative pid targets the process group reported by the PTY;
+        // signal is a standard Unix signal and no Rust memory is touched.
+        let _ = unsafe { libc::kill(-group, signal) };
+    }
+    if let Some(group) =
+        second.filter(|group| *group > 0 && Some(*group) != first && belongs_to_session(*group))
+    {
+        // SAFETY: same process-group signaling contract as above.
+        let _ = unsafe { libc::kill(-group, signal) };
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_shell_session(
+    child: &mut dyn portable_pty::Child,
+    _master: &dyn portable_pty::MasterPty,
+) {
+    let _ = child.kill();
 }

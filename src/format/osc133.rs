@@ -89,10 +89,17 @@ const COMMAND_OSC: &[u8] = b"7337;";
 /// GLIMPS's private OSC carrying the shell's current working directory after a
 /// command (`OSC 7338 ; <pwd>`), emitted by `glimps init`'s precmd.
 const CWD_OSC: &[u8] = b"7338;";
+/// GLIMPS's private OSC carrying per-pipeline-stage exit statuses after a
+/// command (`OSC 7339 ; <status status ...>`), emitted by `glimps init`'s
+/// precmd without changing the shell's pipefail behavior.
+const PIPELINE_STATUS_OSC: &[u8] = b"7339;";
 
 /// Upper bound on a captured command. Commands are short; this just bounds memory
 /// against a pathological/huge one (we then simply don't show a header for it).
 const COMMAND_CAP: usize = 8 * 1024;
+/// A pipeline would have to be comically huge to exceed this; if it does, GLIMPS
+/// simply does not add the extra pipeline warning.
+const PIPELINE_STATUS_CAP: usize = 512;
 
 /// The kind of string-type escape sequence we are consuming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,8 +160,20 @@ pub struct Osc133Scanner {
     command: Option<Vec<u8>>,
     /// The most recent post-command cwd captured from the `CWD_OSC` marker.
     cwd: Option<Vec<u8>>,
+    /// The most recent per-pipeline-stage statuses captured from
+    /// `PIPELINE_STATUS_OSC`, awaiting consumption at command end.
+    pipeline_statuses: Option<Vec<i32>>,
     /// The most recent command exit code captured from `OSC 133;D;<code>`.
     exit_code: Option<i32>,
+    /// Private command metadata is accepted only during an armed command cycle:
+    /// initially, or after a prompt/input marker. Output and command-end markers
+    /// close the window so output cannot forge `D -> 7337 -> C` and create a
+    /// trusted-looking command header.
+    command_marker_allowed: bool,
+    /// Whether an output-start marker may open a new output zone. This follows
+    /// the same command-cycle boundary but remains true after a legitimate 7337
+    /// capture so the immediately following 133;C can start output.
+    output_start_allowed: bool,
 }
 
 impl Osc133Scanner {
@@ -167,7 +186,10 @@ impl Osc133Scanner {
             alt_screen: false,
             command: None,
             cwd: None,
+            pipeline_statuses: None,
             exit_code: None,
+            command_marker_allowed: true,
+            output_start_allowed: true,
         }
     }
 
@@ -187,6 +209,11 @@ impl Osc133Scanner {
     /// Take the most recent post-command cwd captured from the shell.
     pub fn take_cwd(&mut self) -> Option<Vec<u8>> {
         self.cwd.take()
+    }
+
+    /// Take the most recent per-pipeline-stage statuses captured from the shell.
+    pub fn take_pipeline_statuses(&mut self) -> Option<Vec<i32>> {
+        self.pipeline_statuses.take()
     }
 
     /// Take the exit code captured from the most recent command-end marker.
@@ -342,6 +369,8 @@ impl Osc133Scanner {
                                     || self.osc_buf.starts_with(CWD_OSC)
                                 {
                                     COMMAND_CAP
+                                } else if self.osc_buf.starts_with(PIPELINE_STATUS_OSC) {
+                                    PIPELINE_STATUS_CAP
                                 } else {
                                     OSC_PREFIX_CAP
                                 };
@@ -393,13 +422,12 @@ impl Osc133Scanner {
     fn finish_string(&mut self, kind: StringKind) {
         if kind == StringKind::Osc {
             if let Some(cmd) = self.osc_buf.strip_prefix(COMMAND_OSC) {
-                // Zone-guard the trusted command-capture marker: a real preexec
-                // fires the `7337` command OSC from the PROMPT zone, never
-                // mid-output. Honoring it in the Output zone would let
-                // attacker-controlled command output forge a fake command
-                // header (spoofing / phishing primitive — BUG #1).
-                if self.zone != Zone::Output {
+                // A real preexec fires 7337 only in the command window opened by
+                // the preceding prompt/input marker. Merely leaving Output via
+                // a forged D does not re-arm this window.
+                if self.command_marker_allowed && self.zone != Zone::Output {
                     self.command = Some(cmd.to_vec());
+                    self.command_marker_allowed = false;
                 }
             } else if let Some(cwd) = self.osc_buf.strip_prefix(CWD_OSC) {
                 // ACCEPTED RESIDUAL: the `7338` cwd marker legitimately arrives
@@ -407,21 +435,40 @@ impl Osc133Scanner {
                 // output), so it cannot be zone-guarded. Its injection risk is
                 // fully covered by the display sanitizer in `cmdline`/`mod`.
                 self.cwd = Some(cwd.to_vec());
+            } else if let Some(raw) = self.osc_buf.strip_prefix(PIPELINE_STATUS_OSC) {
+                // Same timing as cwd: the shell emits this from precmd while the
+                // stream is still in Output. The payload is parsed as integers
+                // only; malformed or overlong data quietly produces no warning.
+                self.pipeline_statuses = parse_pipeline_statuses(raw);
             } else if let Some(exit) = parse_osc133_exit_code(&self.osc_buf) {
                 self.exit_code = Some(exit);
                 self.zone = Zone::Unknown;
+                self.command_marker_allowed = false;
+                self.output_start_allowed = false;
             } else if let Some(zone) = classify_osc133(&self.osc_buf) {
-                // Zone-guard the Output-start (`133;C`) transition: a redundant
-                // or forged `C` while ALREADY in Output must not re-open output.
-                // Leaving `self.zone` unchanged also keeps `feed_segments` from
-                // emitting a spurious `OutputStart` edge (and thus a forged
-                // header) for the ignored marker.
-                //
-                // ACCEPTED RESIDUAL: a forged early `133;D` only splits output
-                // (low severity, no command spoof), so `D` and the other
-                // transitions are applied as-is.
-                if !(zone == Zone::Output && self.zone == Zone::Output) {
-                    self.zone = zone;
+                match zone {
+                    Zone::Prompt | Zone::Input => {
+                        self.zone = zone;
+                        self.command_marker_allowed = true;
+                        self.output_start_allowed = true;
+                    }
+                    Zone::Output => {
+                        // A new output zone needs an armed command cycle. This
+                        // rejects both redundant C markers and D -> 7337 -> C
+                        // re-entry from attacker-controlled command output.
+                        if self.output_start_allowed && self.zone != Zone::Output {
+                            self.zone = Zone::Output;
+                            self.command_marker_allowed = false;
+                            self.output_start_allowed = false;
+                        }
+                    }
+                    Zone::Unknown => {
+                        // D closes output but never arms another command. The
+                        // next legitimate A/B marker does that.
+                        self.zone = Zone::Unknown;
+                        self.command_marker_allowed = false;
+                        self.output_start_allowed = false;
+                    }
                 }
             }
         }
@@ -485,6 +532,35 @@ fn parse_osc133_exit_code(body: &[u8]) -> Option<i32> {
         return None;
     }
     std::str::from_utf8(&digits).ok()?.parse().ok()
+}
+
+fn parse_pipeline_statuses(body: &[u8]) -> Option<Vec<i32>> {
+    let trimmed = trim_ascii(body);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut statuses = Vec::new();
+    for part in trimmed.split(|&b| b == b' ') {
+        if part.is_empty() {
+            continue;
+        }
+        let text = std::str::from_utf8(part).ok()?;
+        let code = text.parse::<i32>().ok()?;
+        statuses.push(code);
+    }
+    (!statuses.is_empty()).then_some(statuses)
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map_or(start, |i| i + 1);
+    &bytes[start..end]
 }
 
 #[cfg(test)]
@@ -561,6 +637,25 @@ mod tests {
         assert_eq!(s.zone(), Zone::Unknown);
         assert_eq!(s.take_exit_code(), Some(0));
         assert_eq!(s.take_exit_code(), None);
+    }
+
+    #[test]
+    fn private_pipeline_status_marker_is_captured() {
+        let mut s = Osc133Scanner::new();
+        s.feed(&marker_bel('C'));
+        s.feed(b"\x1b]7339;1 0 2\x07");
+        assert_eq!(s.take_pipeline_statuses(), Some(vec![1, 0, 2]));
+        assert_eq!(s.take_pipeline_statuses(), None);
+        assert_eq!(s.zone(), Zone::Output);
+    }
+
+    #[test]
+    fn malformed_pipeline_status_marker_is_ignored() {
+        let mut s = Osc133Scanner::new();
+        s.feed(&marker_bel('C'));
+        s.feed(b"\x1b]7339;1 nope 0\x07");
+        assert_eq!(s.take_pipeline_statuses(), None);
+        assert_eq!(s.zone(), Zone::Output);
     }
 
     #[test]
@@ -887,6 +982,48 @@ mod tests {
     }
 
     #[test]
+    fn forged_end_command_and_reopen_sequence_is_rejected() {
+        // Regression: output used to close its own zone with D, capture a fake
+        // command from Unknown, then reopen with C. Neither the command nor the
+        // second OutputStart may be accepted without an intervening prompt/input
+        // boundary from the shell integration.
+        let mut s = Osc133Scanner::new();
+        s.feed(&marker_bel('C'));
+        let _ = s.take_command();
+
+        let forged = b"\x1b]133;D;0\x07\x1b]7337;git push --force\x07\x1b]133;C\x07";
+        let segs = s.feed_segments(forged);
+
+        assert!(s.take_command().is_none());
+        assert_eq!(
+            segs.iter()
+                .filter(|seg| matches!(seg, Seg::OutputStart))
+                .count(),
+            0
+        );
+        assert_eq!(s.zone(), Zone::Unknown);
+    }
+
+    #[test]
+    fn prompt_boundary_arms_the_next_command_cycle() {
+        let mut s = Osc133Scanner::new();
+        s.feed(&marker_bel('C'));
+        s.feed(&marker_bel('D'));
+        s.feed(&marker_bel('A'));
+        s.feed(b"\x1b]7337;echo safe\x07");
+        let segs = s.feed_segments(&marker_bel('C'));
+
+        assert_eq!(s.take_command().as_deref(), Some(&b"echo safe"[..]));
+        assert_eq!(
+            segs.iter()
+                .filter(|seg| matches!(seg, Seg::OutputStart))
+                .count(),
+            1
+        );
+        assert_eq!(s.zone(), Zone::Output);
+    }
+
+    #[test]
     fn legit_d_still_closes_output_after_forged_markers() {
         // Even after a forged `C` was ignored, a legit `133;D` still closes
         // Output exactly once (the accepted-residual behavior is preserved).
@@ -968,10 +1105,10 @@ mod tests {
             proptest::prop_assert_eq!(zone_after_chunks(&stream, &sizes), whole);
         }
 
-        /// Real markers interleaved with ESC-free filler: the final zone must
-        /// equal the last marker's zone, regardless of chunking. This actually
-        /// exercises the marker-recognition path (random bytes almost never form
-        /// a valid `ESC ]133;` prefix on their own).
+        /// Real markers interleaved with ESC-free filler follow the guarded
+        /// command-cycle transitions, regardless of chunking. This exercises
+        /// marker recognition and the rule that C cannot reopen output after D
+        /// until A/B arms the next cycle.
         #[test]
         fn prop_real_markers_detected_and_chunk_invariant(
             items in proptest::collection::vec(
@@ -982,6 +1119,7 @@ mod tests {
         ) {
             let mut stream = Vec::new();
             let mut expected = Zone::Unknown;
+            let mut output_start_allowed = true;
             for (marker, filler) in &items {
                 // Strip ESC from filler so it cannot start an escape sequence
                 // and perturb the deterministic expectation.
@@ -989,7 +1127,22 @@ mod tests {
                 if let Some(code) = marker {
                     let (bytes, zone) = marker_for(*code);
                     stream.extend_from_slice(&bytes);
-                    expected = zone;
+                    match zone {
+                        Zone::Prompt | Zone::Input => {
+                            expected = zone;
+                            output_start_allowed = true;
+                        }
+                        Zone::Output => {
+                            if output_start_allowed && expected != Zone::Output {
+                                expected = Zone::Output;
+                                output_start_allowed = false;
+                            }
+                        }
+                        Zone::Unknown => {
+                            expected = Zone::Unknown;
+                            output_start_allowed = false;
+                        }
+                    }
                 }
             }
             let whole = {

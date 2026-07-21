@@ -32,6 +32,19 @@ http = true        # color HTTP status lines by class (2xx/3xx/4xx/5xx)
 diff = true        # colorize unified diffs (added/removed/hunk lines)
 stacktrace = true  # highlight stack traces / panics (Rust, Python)
 
+# Command status footer — the line under a command's output when it ends.
+# Failures are loud (red, with a human decode of the exit code: "command not
+# found on PATH", "SIGKILL: force-killed, often out of memory"); success is a
+# dim one-liner; Ctrl-C / SIGTERM render neutral, never red.
+[failures]
+enabled = true      # false = no status footer at all
+on_success = "dim"  # "dim" = quiet footer after successful commands; "off" = none
+                    # (only affects exit 0 — failures and Ctrl-C/SIGTERM notices
+                    # still show; use enabled = false to silence everything)
+explain = true      # false = raw exit codes only, no decode text
+pin_errors = true   # quote the first error line of failed output in the
+                    # footer ("↳ error[E0308]: … (↑ 47 lines up)"); false = off
+
 # Size limits (bytes). These bound memory and latency; they are clamped to safe
 # ranges on load, so you can't accidentally make buffering unbounded.
 [limits]

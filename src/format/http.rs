@@ -223,7 +223,7 @@ mod tests {
         let input = b"HTTP/1.1 404 Not Found\nContent-Type: text/html\n\n<p>nope</p>";
         let out = try_format(input, &Theme::default_colored()).unwrap();
         let s = std::str::from_utf8(&out).unwrap();
-        assert!(s.contains("\x1b[33m404\x1b[0m"));
+        assert!(s.contains("\x1b[38;5;220m404\x1b[0m"));
         assert!(s.contains("\x1b[35mHTML body\x1b[0m"));
     }
 }

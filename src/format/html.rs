@@ -14,9 +14,10 @@
 //!   surrounding whitespace — and never panics.
 //! * Content inside raw-text elements (`script`, `style`, `pre`, `textarea`,
 //!   `title`) is preserved verbatim, so we don't mangle preformatted or
-//!   code/style content.
+//!   code/style content. The narrow exception is a valid JSON document inside
+//!   an `application/json` or `application/ld+json` script.
 
-use super::theme::Theme;
+use super::{json, theme::Theme};
 
 /// Elements that never have children and so never increase depth.
 const VOID_ELEMENTS: &[&str] = &[
@@ -270,8 +271,15 @@ fn render(tokens: &[Token], bytes: &[u8], theme: &Theme, out: &mut String) {
             Token::Raw { open, inner, close } => {
                 let depth = stack.len();
                 html_markup_line(out, depth, &slice(bytes, open.0, open.1), theme);
+                let open_tag = &bytes[open.0..open.1];
+                let inner_bytes = &bytes[inner.0..inner.1];
                 let inner_str = slice(bytes, inner.0, inner.1);
-                if inner_str.contains('\n') {
+                if is_json_script(open_tag)
+                    && render_embedded_json(out, depth + 1, inner_bytes, theme)
+                {
+                    // Valid JSON scripts get the same semantic palette as
+                    // standalone JSON without exposing a second badge.
+                } else if inner_str.contains('\n') {
                     // Multi-line (pre/script/style): preserve exactly.
                     out.push_str(&inner_str);
                     if !inner_str.ends_with('\n') {
@@ -287,6 +295,103 @@ fn render(tokens: &[Token], bytes: &[u8], theme: &Theme, out: &mut String) {
             }
         }
     }
+}
+
+fn render_embedded_json(out: &mut String, depth: usize, inner: &[u8], theme: &Theme) -> bool {
+    let Some(formatted) = json::try_format(trim_ascii_ws(inner), theme) else {
+        return false;
+    };
+    let Ok(formatted) = std::str::from_utf8(&formatted) else {
+        return false;
+    };
+
+    for json_line in formatted.split('\n') {
+        for _ in 0..depth {
+            out.push_str("  ");
+        }
+        out.push_str(json_line);
+        out.push('\n');
+    }
+    true
+}
+
+/// Match only a real `type` attribute. A substring check would also accept
+/// lookalikes such as `data-type="application/json"`.
+fn is_json_script(open_tag: &[u8]) -> bool {
+    let mut i = 1;
+    while i < open_tag.len()
+        && !open_tag[i].is_ascii_whitespace()
+        && !matches!(open_tag[i], b'/' | b'>')
+    {
+        i += 1;
+    }
+
+    while i < open_tag.len() {
+        while i < open_tag.len() && open_tag[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= open_tag.len() || matches!(open_tag[i], b'/' | b'>') {
+            break;
+        }
+
+        let name_start = i;
+        while i < open_tag.len()
+            && !open_tag[i].is_ascii_whitespace()
+            && !matches!(open_tag[i], b'=' | b'/' | b'>')
+        {
+            i += 1;
+        }
+        let name = &open_tag[name_start..i];
+
+        while i < open_tag.len() && open_tag[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if open_tag.get(i) != Some(&b'=') {
+            continue;
+        }
+        i += 1;
+        while i < open_tag.len() && open_tag[i].is_ascii_whitespace() {
+            i += 1;
+        }
+
+        let (value_start, value_end) = match open_tag.get(i).copied() {
+            Some(quote @ (b'"' | b'\'')) => {
+                i += 1;
+                let start = i;
+                while i < open_tag.len() && open_tag[i] != quote {
+                    i += 1;
+                }
+                let end = i;
+                if i < open_tag.len() {
+                    i += 1;
+                }
+                (start, end)
+            }
+            Some(_) => {
+                let start = i;
+                while i < open_tag.len()
+                    && !open_tag[i].is_ascii_whitespace()
+                    && !matches!(open_tag[i], b'/' | b'>')
+                {
+                    i += 1;
+                }
+                (start, i)
+            }
+            None => break,
+        };
+
+        if name.eq_ignore_ascii_case(b"type") {
+            let value = &open_tag[value_start..value_end];
+            let mime = value
+                .split(|byte| *byte == b';')
+                .next()
+                .map(trim_ascii_ws)
+                .unwrap_or_default();
+            return mime.eq_ignore_ascii_case(b"application/ld+json")
+                || mime.eq_ignore_ascii_case(b"application/json");
+        }
+    }
+    false
 }
 
 /// Emit one indented HTML markup line with semantic token coloring. The plain
@@ -594,9 +699,46 @@ mod tests {
         let out = try_format(br#"<p class="lead">hi</p>"#, &Theme::default_colored()).unwrap();
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("\x1b[2m<\x1b[0m")); // delimiter
-        assert!(s.contains("\x1b[36mp\x1b[0m")); // element name
-        assert!(s.contains("\x1b[33mclass\x1b[0m")); // attribute
-        assert!(s.contains("\x1b[32m\"lead\"\x1b[0m")); // value
+        assert!(s.contains("\x1b[38;2;224;82;125mp\x1b[0m")); // element name
+        assert!(s.contains("\x1b[38;5;220mclass\x1b[0m")); // attribute
+        assert!(s.contains("\x1b[38;5;117m\"lead\"\x1b[0m")); // value
+    }
+
+    #[test]
+    fn json_ld_script_is_indented_and_semantically_colored() {
+        let input = br#"<html><script defer type='APPLICATION/LD+JSON; charset=utf-8'>{"name":"Astra","active":true,"count":2}</script></html>"#;
+        let out = try_format(input, &Theme::default_colored()).unwrap();
+        let s = std::str::from_utf8(&out).unwrap();
+
+        assert!(s.contains("\x1b[36m\"name\"\x1b[0m"));
+        assert!(s.contains("\x1b[38;5;117m\"Astra\"\x1b[0m"));
+        assert!(s.contains("\x1b[35mtrue\x1b[0m"));
+        assert!(s.contains("\x1b[38;5;220m2\x1b[0m"));
+        assert!(s.contains("\n    {"));
+    }
+
+    #[test]
+    fn ordinary_javascript_and_json_lookalikes_remain_verbatim() {
+        let javascript = b"<html><script>\nconst value = {\"name\":\"Astra\"};\n</script></html>";
+        let out = try_format(javascript, &Theme::default_colored()).unwrap();
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("\nconst value = {\"name\":\"Astra\"};\n"));
+        assert!(!s.contains("\x1b[38;5;117m\"Astra\"\x1b[0m"));
+
+        let lookalike = b"<html><script data-type=\"application/json\">\n{\"name\":\"Astra\"}\n</script></html>";
+        let out = try_format(lookalike, &Theme::default_colored()).unwrap();
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("\n{\"name\":\"Astra\"}\n"));
+        assert!(!s.contains("\x1b[36m\"name\"\x1b[0m"));
+    }
+
+    #[test]
+    fn malformed_json_script_remains_verbatim() {
+        let input = b"<html><script type=\"application/ld+json\">\n{\"broken\":}\n</script></html>";
+        let out = try_format(input, &Theme::default_colored()).unwrap();
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("\n{\"broken\":}\n"));
+        assert!(!s.contains("\x1b[36m\"broken\"\x1b[0m"));
     }
 
     #[test]

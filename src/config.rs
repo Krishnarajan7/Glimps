@@ -11,6 +11,8 @@
 //! color = true       # false => no color codes anywhere (still indents/frames)
 //! separator = true   # the command/output divider line
 //! timestamp = true   # include HH:MM:SS in the separator
+//! farewell = true    # conversational message after a clean interactive exit
+//! sensitive_commands = ["vault kv get", "kubectl get secret"]
 //!
 //! [formatters]
 //! json = true
@@ -19,6 +21,12 @@
 //! http = true        # HTTP status line coloring
 //! diff = true        # unified-diff coloring
 //! stacktrace = true  # stack-trace / panic highlighting
+//!
+//! [failures]
+//! enabled = true      # the command status footer (exit code + duration)
+//! on_success = "dim"  # "dim" = quiet footer after success; "off" = none
+//! explain = true      # decode exit codes ("command not found", SIGKILL, …)
+//! pin_errors = true   # quote the first error line of failed output
 //!
 //! [limits]
 //! buffer_cap = 1048576   # max bytes buffered to detect JSON/HTML (1 MiB)
@@ -47,11 +55,51 @@ pub struct Config {
     pub separator: bool,
     /// Include a timestamp in the command header.
     pub timestamp: bool,
+    /// Print the conversational message after a clean interactive exit.
+    pub farewell: bool,
     /// Command names whose output is passed through untouched (interactive /
     /// full-screen programs). Matched against the command's basename.
     pub bypass: Vec<String>,
+    /// Additional command token-prefixes whose output must remain untouched and
+    /// must never be copied into a pinned failure line.
+    pub sensitive_commands: Vec<String>,
     pub formatters: Formatters,
+    pub failures: Failures,
     pub limits: Limits,
+}
+
+/// Command status footer (exit code, duration, failure decode) switches.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Failures {
+    /// Master switch for the status footer. `false` = no footer, ever
+    /// (silent-command breadcrumbs like `moved to …` are separator chrome
+    /// and stay governed by `separator`, not this).
+    pub enabled: bool,
+    /// How loud the footer is after a *successful* command.
+    pub on_success: SuccessFooter,
+    /// Append the human decode of the exit code ("command not found on
+    /// PATH", "SIGKILL: force-killed, often out of memory"). `false` keeps
+    /// the raw `exit N` only.
+    pub explain: bool,
+    /// Quote the first high-confidence error line of a failed command's
+    /// output in the footer (`↳ error[E0308]: … (↑ 47 lines up)`), so the
+    /// cause is visible without scrolling. Detection is deliberately
+    /// conservative — no confident match, no quote.
+    pub pin_errors: bool,
+}
+
+/// Success-footer loudness. Only exit 0 is affected: failures stay loud, and
+/// notices (Ctrl-C, SIGTERM, SIGPIPE) still show their dim one-liner —
+/// acknowledging "you stopped this after 8.1s" is the point of the notice
+/// class. `enabled = false` is the switch that silences those too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SuccessFooter {
+    /// A dim `done exit 0 in 1.2s` line (the default).
+    Dim,
+    /// No footer after successful commands at all.
+    Off,
 }
 
 /// Per-content-type enable switches.
@@ -84,9 +132,23 @@ impl Default for Config {
             color: true,
             separator: true,
             timestamp: true,
+            farewell: true,
             bypass: default_bypass(),
+            sensitive_commands: Vec::new(),
             formatters: Formatters::default(),
+            failures: Failures::default(),
             limits: Limits::default(),
+        }
+    }
+}
+
+impl Default for Failures {
+    fn default() -> Self {
+        Failures {
+            enabled: true,
+            on_success: SuccessFooter::Dim,
+            explain: true,
+            pin_errors: true,
         }
     }
 }
@@ -168,7 +230,7 @@ impl Config {
 }
 
 /// `$GLIMPSRC` if set, else `~/.glimpsrc`. `None` if `HOME` is also unset.
-fn config_path() -> Option<PathBuf> {
+pub(crate) fn config_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("GLIMPSRC") {
         return Some(PathBuf::from(p));
     }
@@ -182,7 +244,8 @@ mod tests {
     #[test]
     fn default_is_everything_on() {
         let c = Config::default();
-        assert!(c.enabled && c.color && c.separator && c.timestamp);
+        assert!(c.enabled && c.color && c.separator && c.timestamp && c.farewell);
+        assert!(c.sensitive_commands.is_empty());
         assert!(c.formatters.json && c.formatters.html && c.formatters.logs && c.formatters.http);
         assert!(c.formatters.diff && c.formatters.stacktrace);
         assert_eq!(c.limits.buffer_cap, DEFAULT_BUFFER_CAP);
@@ -196,13 +259,54 @@ mod tests {
 
     #[test]
     fn partial_config_keeps_other_defaults() {
-        let c = Config::parse("color = false\n[formatters]\nhtml = false\n").unwrap();
+        let c = Config::parse(
+            "color = false\nfarewell = false\nsensitive_commands = [\"vault kv get\"]\n[formatters]\nhtml = false\n",
+        )
+        .unwrap();
         assert!(!c.color);
+        assert!(!c.farewell);
+        assert_eq!(c.sensitive_commands, ["vault kv get"]);
         assert!(!c.formatters.html);
         // Untouched keys keep their defaults.
         assert!(c.enabled);
         assert!(c.formatters.json);
         assert_eq!(c.limits.line_cap, DEFAULT_LINE_CAP);
+    }
+
+    #[test]
+    fn failures_default_to_on_dim_explained() {
+        let c = Config::default();
+        assert!(c.failures.enabled);
+        assert_eq!(c.failures.on_success, SuccessFooter::Dim);
+        assert!(c.failures.explain);
+        // An empty file keeps the same defaults.
+        let c = Config::parse("").unwrap();
+        assert!(c.failures.enabled && c.failures.explain);
+    }
+
+    #[test]
+    fn failures_section_overrides() {
+        let c = Config::parse(
+            "[failures]\non_success = \"off\"\nexplain = false\npin_errors = false\n",
+        )
+        .unwrap();
+        assert_eq!(c.failures.on_success, SuccessFooter::Off);
+        assert!(!c.failures.explain);
+        assert!(!c.failures.pin_errors);
+        // Untouched key keeps its default.
+        assert!(c.failures.enabled);
+        // And pinning defaults on.
+        assert!(Config::default().failures.pin_errors);
+    }
+
+    #[test]
+    fn failures_bad_values_are_errors() {
+        // Typos and invalid enum values surface as parse errors (-> warning +
+        // defaults at load), consistent with the rest of the config.
+        assert!(Config::parse("[failures]\non_success = \"loud\"\n").is_err());
+        assert!(Config::parse("[failures]\nexplian = false\n").is_err());
+        assert!(Config::parse("[failures]\npin_error = false\n").is_err());
+        assert!(Config::parse("[failure]\nenabled = false\n").is_err());
     }
 
     #[test]

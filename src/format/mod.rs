@@ -31,19 +31,30 @@
 //! stays Unknown and GLIMPS is a pure pass-through.
 
 mod cmdline;
+mod command;
 mod diff;
+mod exitcode;
 mod html;
 mod http;
 mod json;
 mod linefmt;
 mod osc133;
+mod pin;
 mod theme;
 
 use std::borrow::Cow;
 use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
-use crate::config::Config;
+use crate::config::{Config, SuccessFooter};
+use crate::metadata::{MetadataEvent, MetadataReader};
+#[cfg(test)]
+use command::is_sensitive as is_sensitive_command;
+use command::{
+    breadcrumb_path_start, shell_words, silent_breadcrumb as silent_command_breadcrumb,
+    CommandTrust,
+};
+use exitcode::ExitClass;
 use osc133::{Osc133Scanner, Seg};
 // `Zone` is the seam's vocabulary; only tests consume it directly today.
 #[cfg_attr(not(test), allow(unused_imports))]
@@ -181,6 +192,13 @@ pub struct Formatter {
     /// The command for the current output zone (captured at output start), shown
     /// in the header. `None` falls the header back to a plain divider.
     pending_command: Option<Vec<u8>>,
+    /// Private shell-to-supervisor metadata. When present, OSC still frames
+    /// output but cannot author command, cwd, pipeline, or exit-code chrome.
+    metadata: Option<MetadataReader>,
+    trusted_command: Option<Vec<u8>>,
+    trusted_cwd: Option<Vec<u8>>,
+    trusted_pipeline_statuses: Option<Vec<i32>>,
+    trusted_exit_code: Option<i32>,
     /// Monotonic start time for the running command, captured at output start.
     command_started_at: Option<Instant>,
     /// Whether this command produced a visible GLIMPS boundary/output. Used to
@@ -190,6 +208,13 @@ pub struct Formatter {
     /// Complete output lines seen for this command. Used by command-aware
     /// project-file formatters that treat the first row as a header.
     command_output_line_count: usize,
+    /// Read-only error-line observer for the failure footer (F3). Fed the
+    /// output zone's bytes — including in-zone Pass escapes, which is where
+    /// colored compiler errors live — and never emits a byte itself.
+    pin: pin::ErrorPin,
+    /// Whether pinning observes the current command. Disarmed for bypassed
+    /// commands, on binary output, and when config turns pinning off.
+    pin_armed: bool,
     /// Fenced code language while streaming a Markdown file. This lets
     /// `cat README.md` color all lines inside ```bash / ```rust blocks
     /// consistently instead of treating each line as unrelated prose.
@@ -222,6 +247,16 @@ impl Formatter {
         Self::build(clock, std::io::stdout().is_terminal(), config)
     }
 
+    pub(crate) fn for_supervisor_with_metadata(
+        clock: Clock,
+        config: Config,
+        metadata: Option<MetadataReader>,
+    ) -> Self {
+        let mut formatter = Self::build(clock, std::io::stdout().is_terminal(), config);
+        formatter.metadata = metadata;
+        formatter
+    }
+
     fn build(clock: Clock, output_is_tty: bool, config: Config) -> Self {
         let buffered = enabled_buffered(&config.formatters);
         let streaming = enabled_streaming(&config.formatters);
@@ -238,9 +273,16 @@ impl Formatter {
             config,
             pending_separator: false,
             pending_command: None,
+            metadata: None,
+            trusted_command: None,
+            trusted_cwd: None,
+            trusted_pipeline_statuses: None,
+            trusted_exit_code: None,
             command_started_at: None,
             command_had_visible_output: false,
             command_output_line_count: 0,
+            pin: pin::ErrorPin::new(),
+            pin_armed: false,
             markdown_fence: None,
             was_alt_screen: false,
             buffered,
@@ -323,12 +365,25 @@ impl Formatter {
         let mut out = Vec::with_capacity(chunk.len());
         for seg in &segments {
             match *seg {
-                Seg::Output(start, end) => self.push_output(&chunk[start..end], &mut out),
+                Seg::Output(start, end) => {
+                    self.push_output(&chunk[start..end], &mut out);
+                    // Observe after push_output so a binary disarm (in
+                    // `decide`) already covers this same segment.
+                    if self.pin_armed {
+                        self.pin.feed(&chunk[start..end]);
+                    }
+                }
                 Seg::Pass(start, end) => {
                     // Non-output bytes (markers, prompt, input, mid-output ANSI):
                     // finalize anything pending, then pass through untouched.
                     self.finalize(&mut out);
                     out.extend_from_slice(&chunk[start..end]);
+                    // Mid-zone Pass bytes are where colored error lines hide
+                    // (the scanner routes every ESC here); let the pin
+                    // observe them too. Its strip machine eats the escapes.
+                    if self.pin_armed && self.command_started_at.is_some() {
+                        self.pin.feed(&chunk[start..end]);
+                    }
                 }
                 // A command's output has begun: capture the command (for the
                 // header) and owe the header, emitted lazily before the first
@@ -336,23 +391,37 @@ impl Formatter {
                 // the bypass list, its output streams through untouched.
                 Seg::OutputStart => {
                     self.pending_separator = true;
-                    self.pending_command = self.scanner.take_command();
+                    self.pending_command = self.take_command_metadata();
                     self.command_started_at = Some(Instant::now());
                     self.command_had_visible_output = false;
                     self.command_output_line_count = 0;
                     self.markdown_fence = None;
-                    let bypass = self
+                    let trust = self
                         .pending_command
                         .as_deref()
-                        .and_then(cmdline::first_word)
-                        .is_some_and(|name| self.config.bypass.iter().any(|b| b == &name));
-                    if bypass {
+                        .map(|command| {
+                            command::classify(
+                                command,
+                                &self.config.bypass,
+                                &self.config.sensitive_commands,
+                            )
+                            .trust
+                        })
+                        .unwrap_or(CommandTrust::Normal);
+                    if trust != CommandTrust::Normal {
                         self.collect = Collect::Passthrough;
                     }
+                    // Arm error-line pinning for this command's output zone.
+                    // Bypassed and sensitive commands get minimal chrome — never a pin.
+                    self.pin.reset();
+                    self.pin_armed = trust == CommandTrust::Normal
+                        && self.config.failures.enabled
+                        && self.config.failures.pin_errors;
                 }
                 // The output ended: flush, and drop an unfulfilled header/command.
                 Seg::OutputEnd => {
                     self.finalize(&mut out);
+                    self.refresh_metadata();
                     self.emit_cd_breadcrumb(&mut out);
                     self.emit_command_status(&mut out);
                     self.pending_separator = false;
@@ -360,6 +429,8 @@ impl Formatter {
                     self.command_started_at = None;
                     self.command_had_visible_output = false;
                     self.command_output_line_count = 0;
+                    self.pin.reset();
+                    self.pin_armed = false;
                     self.markdown_fence = None;
                 }
             }
@@ -414,6 +485,13 @@ impl Formatter {
         // sound (no split character is misread as invalid UTF-8).
         if looks_binary(&acc) || looks_binary(seg) {
             self.pending_separator = false; // suppress: this is binary, never frame it
+                                            // Binary output is never worth quoting in a footer either. This
+                                            // catches binary detected before the text commit; a run that
+                                            // commits to text and turns binary LATER still feeds the pin —
+                                            // acceptable, because the pin is read-only, only fires on a
+                                            // confident error-shaped match, and any quote is sanitized.
+            self.pin.reset();
+            self.pin_armed = false;
             out.extend_from_slice(&acc);
             out.extend_from_slice(seg);
             return Collect::Passthrough;
@@ -468,6 +546,40 @@ impl Formatter {
         }
     }
 
+    fn take_command_metadata(&mut self) -> Option<Vec<u8>> {
+        let osc_command = self.scanner.take_command();
+        if self.metadata.is_none() {
+            return osc_command;
+        }
+        self.refresh_metadata();
+        let command = self.trusted_command.take();
+        // Startup/previous-cycle result records must not bleed into this run.
+        self.trusted_cwd = None;
+        self.trusted_pipeline_statuses = None;
+        self.trusted_exit_code = None;
+        command
+    }
+
+    fn refresh_metadata(&mut self) {
+        let Some(metadata) = self.metadata.as_mut() else {
+            return;
+        };
+        for event in metadata.drain() {
+            match event {
+                MetadataEvent::Command(command) => self.trusted_command = Some(command),
+                MetadataEvent::Result {
+                    pipeline_statuses,
+                    cwd,
+                    exit_code,
+                } => {
+                    self.trusted_pipeline_statuses = Some(pipeline_statuses);
+                    self.trusted_cwd = Some(cwd);
+                    self.trusted_exit_code = Some(exit_code);
+                }
+            }
+        }
+    }
+
     /// `cd` usually succeeds silently, which means the normal lazy separator
     /// would not show anything. When zsh reports the post-command cwd, leave a
     /// small breadcrumb so directory changes are visible in scrollback.
@@ -475,12 +587,23 @@ impl Formatter {
         if !self.pending_separator || !is_command(&self.pending_command, b"cd") {
             return;
         }
-        let Some(cwd) = self.scanner.take_cwd() else {
+        let osc_cwd = self.scanner.take_cwd();
+        let cwd = if self.metadata.is_some() {
+            self.trusted_cwd.take()
+        } else {
+            osc_cwd
+        };
+        let Some(cwd) = cwd else {
             return;
         };
         self.emit_header(out);
         let color = if self.config.color {
-            self.theme.info
+            self.theme.action
+        } else {
+            ""
+        };
+        let path_color = if self.config.color {
+            self.theme.path
         } else {
             ""
         };
@@ -492,6 +615,7 @@ impl Formatter {
         let mut line = Vec::new();
         line.extend_from_slice(color.as_bytes());
         line.extend_from_slice(b"moved to ");
+        line.extend_from_slice(path_color.as_bytes());
         // Strip control bytes from the captured cwd before it enters this
         // GLIMPS-authored breadcrumb (BUG #2 — a maliciously named dir or a
         // forged `7338` could otherwise inject escapes into our chrome).
@@ -502,7 +626,16 @@ impl Formatter {
     }
 
     fn emit_command_status(&mut self, out: &mut Vec<u8>) {
-        let exit_code = self.scanner.take_exit_code();
+        let osc_exit_code = self.scanner.take_exit_code();
+        let osc_pipeline_statuses = self.scanner.take_pipeline_statuses();
+        let (exit_code, pipeline_statuses) = if self.metadata.is_some() {
+            (
+                self.trusted_exit_code.take(),
+                self.trusted_pipeline_statuses.take(),
+            )
+        } else {
+            (osc_exit_code, osc_pipeline_statuses)
+        };
         let elapsed = self.command_started_at.map(|started| started.elapsed());
         let Some(exit_code) = exit_code else {
             return;
@@ -510,45 +643,112 @@ impl Formatter {
         let Some(cmd) = self.pending_command.clone() else {
             return;
         };
-        let failed = exit_code != 0;
-        if !failed && !self.command_had_visible_output {
+        let status = exitcode::describe(exit_code);
+        let success = status.class == ExitClass::Success;
+        let pipeline_warning = pipeline_warning(&pipeline_statuses, exit_code);
+        if success
+            && pipeline_warning.is_none()
+            && !self.command_had_visible_output
+            && self.emit_silent_command_breadcrumb(out, &cmd)
+        {
             return;
         }
-        if !failed && is_command(&self.pending_command, b"cd") {
+        if success && pipeline_warning.is_none() && !self.command_had_visible_output {
+            return;
+        }
+        if success
+            && pipeline_warning.is_none()
+            && (is_command(&self.pending_command, b"cd")
+                || is_command(&self.pending_command, b"pwd"))
+        {
+            return;
+        }
+        // `[failures]` gates. Checked after the breadcrumb path on purpose:
+        // breadcrumbs are separator chrome, not failure intelligence, so
+        // turning the footer off must not silence them (invariant #6 grants
+        // an off switch per feature, not one switch that eats two features).
+        if !self.config.failures.enabled {
+            return;
+        }
+        if success
+            && pipeline_warning.is_none()
+            && self.config.failures.on_success == SuccessFooter::Off
+        {
+            return;
+        }
+
+        if let Some(warning) = pipeline_warning {
+            self.emit_pipeline_warning(out, &warning, elapsed);
             return;
         }
 
         self.emit_header(out);
         let mut line = Vec::new();
-        let color = if failed {
-            self.theme.error
-        } else if self.config.color {
-            self.theme.debug
-        } else {
-            ""
+        // Notice is the "Ctrl-C is not red" class: a user action rendered as
+        // dim as success, so red stays reserved for real failures. The theme
+        // is already `plain()` when color is off, so these are "" then.
+        let color = match status.class {
+            ExitClass::Failure => self.theme.error,
+            ExitClass::Success | ExitClass::Notice => self.theme.debug,
         };
-        let reset = if self.config.color {
-            self.theme.reset
-        } else {
-            ""
-        };
+        let reset = self.theme.reset;
         line.extend_from_slice(color.as_bytes());
-        if failed {
-            line.extend_from_slice(b"failed");
-        } else {
-            line.extend_from_slice(b"done");
-        }
+        line.extend_from_slice(match status.class {
+            ExitClass::Success => "\u{2713} ".as_bytes(), // ✓
+            ExitClass::Notice => "\u{2298} ".as_bytes(),  // ⊘
+            ExitClass::Failure => "\u{2717} ".as_bytes(), // ✗
+        });
+        line.extend_from_slice(status.verb.as_bytes());
         line.extend_from_slice(b" exit ");
         line.extend_from_slice(exit_code.to_string().as_bytes());
         if let Some(duration) = elapsed {
             line.extend_from_slice(b" in ");
             line.extend_from_slice(format_duration(duration).as_bytes());
         }
+        if self.config.failures.explain {
+            if let Some(explain) = status.explain {
+                line.extend_from_slice(" \u{2014} ".as_bytes()); // —
+                line.extend_from_slice(explain.as_bytes());
+            }
+        }
         line.extend_from_slice(reset.as_bytes());
         line.push(b'\n');
         push_crlf(out, &line);
 
-        if failed {
+        // The pinned error line (F3): quote the most telling line of the
+        // failed output right here, with a how-far-up hint, so nobody has
+        // to scroll a wall to find it. Failure class only — a Ctrl-C's
+        // output is not an error to hunt for.
+        if status.class == ExitClass::Failure && self.config.failures.pin_errors {
+            if let Some(pinned) = self.pin.take() {
+                let mut quote = Vec::new();
+                quote.extend_from_slice(self.theme.error.as_bytes());
+                quote.extend_from_slice("\u{21b3} ".as_bytes()); // ↳
+                quote.extend_from_slice(reset.as_bytes());
+                quote.extend_from_slice(self.theme.muted.as_bytes());
+                // Sanitize (control bytes, invalid UTF-8) BEFORE truncation,
+                // so the cut lands on a char boundary of the final text.
+                let text = cmdline::sanitize_display(&pinned.text);
+                quote.extend_from_slice(&truncate_display(&text, PIN_DISPLAY_CAP));
+                quote.extend_from_slice(reset.as_bytes());
+                // The distance hint only earns its ink when the error is
+                // actually far away.
+                if pinned.lines_up >= 3 {
+                    quote.extend_from_slice(self.theme.debug.as_bytes());
+                    quote.extend_from_slice(
+                        format!("  (\u{2191} {} lines up)", pinned.lines_up).as_bytes(),
+                    );
+                    quote.extend_from_slice(reset.as_bytes());
+                }
+                quote.push(b'\n');
+                push_crlf(out, &quote);
+            }
+        }
+
+        // The command recap only accompanies real failures: repeating the
+        // command after a deliberate Ctrl-C would scold the user for an
+        // action they took on purpose.
+        if status.class == ExitClass::Failure {
             let mut summary = Vec::new();
             summary.extend_from_slice(self.theme.error.as_bytes());
             summary.extend_from_slice(b"command failed: ");
@@ -559,6 +759,84 @@ impl Formatter {
             summary.push(b'\n');
             push_crlf(out, &summary);
         }
+    }
+
+    fn emit_pipeline_warning(
+        &mut self,
+        out: &mut Vec<u8>,
+        warning: &PipelineWarning,
+        elapsed: Option<Duration>,
+    ) {
+        self.emit_header(out);
+        let reset = self.theme.reset;
+        let mut line = Vec::new();
+        line.extend_from_slice(self.theme.warn.as_bytes());
+        line.extend_from_slice("\u{26a0} pipeline stage failed: ".as_bytes());
+        line.extend_from_slice(warning.stage_display().as_bytes());
+        line.extend_from_slice(b"; final exit ");
+        line.extend_from_slice(warning.final_exit.to_string().as_bytes());
+        if let Some(duration) = elapsed {
+            line.extend_from_slice(b" in ");
+            line.extend_from_slice(format_duration(duration).as_bytes());
+        }
+        line.extend_from_slice(reset.as_bytes());
+        line.push(b'\n');
+        push_crlf(out, &line);
+
+        if self.config.failures.pin_errors {
+            if let Some(pinned) = self.pin.take() {
+                let mut quote = Vec::new();
+                quote.extend_from_slice(self.theme.warn.as_bytes());
+                quote.extend_from_slice("\u{21b3} ".as_bytes()); // ↳
+                quote.extend_from_slice(reset.as_bytes());
+                quote.extend_from_slice(self.theme.muted.as_bytes());
+                let text = cmdline::sanitize_display(&pinned.text);
+                quote.extend_from_slice(&truncate_display(&text, PIN_DISPLAY_CAP));
+                quote.extend_from_slice(reset.as_bytes());
+                if pinned.lines_up >= 3 {
+                    quote.extend_from_slice(self.theme.debug.as_bytes());
+                    quote.extend_from_slice(
+                        format!("  (\u{2191} {} lines up)", pinned.lines_up).as_bytes(),
+                    );
+                    quote.extend_from_slice(reset.as_bytes());
+                }
+                quote.push(b'\n');
+                push_crlf(out, &quote);
+            }
+        }
+    }
+
+    fn emit_silent_command_breadcrumb(&mut self, out: &mut Vec<u8>, cmd: &[u8]) -> bool {
+        let Some(message) = silent_command_breadcrumb(cmd) else {
+            return false;
+        };
+        self.emit_header(out);
+        let color = if self.config.color {
+            self.theme.action
+        } else {
+            ""
+        };
+        let path_color = if self.config.color {
+            self.theme.path
+        } else {
+            ""
+        };
+        let reset = if self.config.color {
+            self.theme.reset
+        } else {
+            ""
+        };
+        let path_start = breadcrumb_path_start(&message).unwrap_or(message.len());
+        let mut line =
+            Vec::with_capacity(message.len() + color.len() + path_color.len() + reset.len() + 1);
+        line.extend_from_slice(color.as_bytes());
+        line.extend_from_slice(&message[..path_start]);
+        line.extend_from_slice(path_color.as_bytes());
+        line.extend_from_slice(&message[path_start..]);
+        line.extend_from_slice(reset.as_bytes());
+        line.push(b'\n');
+        push_crlf(out, &line);
+        true
     }
 
     /// Stream plain-text output line-by-line, coloring each *complete* line (log
@@ -602,7 +880,14 @@ impl Formatter {
     }
 
     fn format_command_line(&mut self, line: &[u8]) -> Option<Vec<u8>> {
+        if let Some(formatted) = linefmt::colorize_cli_diagnostic_line(line, &self.theme) {
+            return Some(formatted);
+        }
         match command_view(&self.pending_command)? {
+            CommandView::Pwd if self.command_output_line_count == 0 => {
+                format_pwd_line(line, &self.theme)
+            }
+            CommandView::Pwd => None,
             CommandView::Find => linefmt::colorize_find_line(line, &self.theme),
             CommandView::Ls => linefmt::colorize_ls_line(line, &self.theme),
             CommandView::Du => linefmt::colorize_du_line(line, &self.theme),
@@ -610,6 +895,14 @@ impl Formatter {
             CommandView::Ps => linefmt::colorize_ps_line(line, &self.theme),
             CommandView::Dns => linefmt::colorize_dns_line(line, &self.theme),
             CommandView::KubectlPods => linefmt::colorize_kubectl_pods_line(line, &self.theme),
+            CommandView::IfConfig => linefmt::colorize_ifconfig_line(line, &self.theme),
+            CommandView::ScutilDns => linefmt::colorize_scutil_dns_line(line, &self.theme),
+            CommandView::Route => linefmt::colorize_route_line(line, &self.theme),
+            CommandView::Netstat => linefmt::colorize_netstat_line(line, &self.theme),
+            CommandView::Lsof => linefmt::colorize_lsof_line(line, &self.theme),
+            CommandView::Launchctl => linefmt::colorize_launchctl_line(line, &self.theme),
+            CommandView::Pmset => linefmt::colorize_pmset_line(line, &self.theme),
+            CommandView::NetworkSetup => linefmt::colorize_networksetup_line(line, &self.theme),
             CommandView::Man => linefmt::format_man_line(line, &self.theme),
             CommandView::Markdown => self.format_markdown_line(line),
             CommandView::Config => linefmt::colorize_config_line(line, &self.theme),
@@ -661,6 +954,14 @@ impl Formatter {
                     | CommandView::JsonLines
                     | CommandView::Code(_)
                     | CommandView::Git(_)
+                    | CommandView::IfConfig
+                    | CommandView::ScutilDns
+                    | CommandView::Route
+                    | CommandView::Netstat
+                    | CommandView::Lsof
+                    | CommandView::Launchctl
+                    | CommandView::Pmset
+                    | CommandView::NetworkSetup
             )
         )
     }
@@ -817,8 +1118,39 @@ fn is_command(command: &Option<Vec<u8>>, expected: &[u8]) -> bool {
         .is_some_and(|name| name.as_bytes() == expected)
 }
 
+fn format_pwd_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    let (content, ending) = split_line_ending(line);
+    if content.is_empty() || !content.starts_with(b"/") || looks_binary(content) {
+        return None;
+    }
+    std::str::from_utf8(content).ok()?;
+
+    let color = theme.action;
+    let path_color = theme.path;
+    let reset = theme.reset;
+    let mut out = Vec::with_capacity(line.len() + "working directory ".len() + 24);
+    out.extend_from_slice(color.as_bytes());
+    out.extend_from_slice(b"working directory ");
+    out.extend_from_slice(path_color.as_bytes());
+    out.extend_from_slice(&cmdline::sanitize_display(content));
+    out.extend_from_slice(reset.as_bytes());
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+fn split_line_ending(line: &[u8]) -> (&[u8], &[u8]) {
+    if let Some(content) = line.strip_suffix(b"\r\n") {
+        (content, &line[line.len() - 2..])
+    } else if let Some(content) = line.strip_suffix(b"\n") {
+        (content, &line[line.len() - 1..])
+    } else {
+        (line, b"")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandView {
+    Pwd,
     Find,
     Ls,
     Du,
@@ -826,6 +1158,13 @@ enum CommandView {
     Ps,
     Dns,
     KubectlPods,
+    IfConfig,
+    ScutilDns,
+    Route,
+    Netstat,
+    Lsof,
+    Launchctl,
+    Pmset,
     Man,
     Markdown,
     Config,
@@ -835,6 +1174,63 @@ enum CommandView {
     JsonLines,
     Code(linefmt::CodeLanguage),
     Git(linefmt::GitView),
+    NetworkSetup,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommandViewRegistration {
+    names: &'static [&'static str],
+    view: CommandView,
+}
+
+const COMMAND_VIEW_REGISTRY: &[CommandViewRegistration] = &[
+    CommandViewRegistration {
+        names: &["pwd"],
+        view: CommandView::Pwd,
+    },
+    CommandViewRegistration {
+        names: &["find"],
+        view: CommandView::Find,
+    },
+    CommandViewRegistration {
+        names: &["ls"],
+        view: CommandView::Ls,
+    },
+    CommandViewRegistration {
+        names: &["du"],
+        view: CommandView::Du,
+    },
+    CommandViewRegistration {
+        names: &["df"],
+        view: CommandView::Df,
+    },
+    CommandViewRegistration {
+        names: &["ps"],
+        view: CommandView::Ps,
+    },
+    CommandViewRegistration {
+        names: &["dig", "nslookup", "host"],
+        view: CommandView::Dns,
+    },
+    CommandViewRegistration {
+        names: &["ifconfig"],
+        view: CommandView::IfConfig,
+    },
+    CommandViewRegistration {
+        names: &["man", "apropos"],
+        view: CommandView::Man,
+    },
+    CommandViewRegistration {
+        names: &["sqlite3", "psql", "mysql", "mariadb", "duckdb"],
+        view: CommandView::SqlResult,
+    },
+];
+
+fn registered_command_view(name: &str) -> Option<CommandView> {
+    COMMAND_VIEW_REGISTRY
+        .iter()
+        .find(|registration| registration.names.contains(&name))
+        .map(|registration| registration.view)
 }
 
 fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
@@ -843,20 +1239,98 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
     if let Some(view) = file_content_view(&name, cmd) {
         return Some(view);
     }
+    if let Some(view) = registered_command_view(&name) {
+        return Some(view);
+    }
     match name.as_str() {
-        "find" => Some(CommandView::Find),
-        "ls" => Some(CommandView::Ls),
-        "du" => Some(CommandView::Du),
-        "df" => Some(CommandView::Df),
-        "ps" => Some(CommandView::Ps),
         "kubectl" => kubectl_command_view(cmd),
-        "dig" | "nslookup" | "host" => Some(CommandView::Dns),
-        "man" | "apropos" => Some(CommandView::Man),
-        "sqlite3" | "psql" | "mysql" | "mariadb" | "duckdb" => Some(CommandView::SqlResult),
+        "scutil" => scutil_command_view(cmd),
+        "route" => route_command_view(cmd),
+        "netstat" => netstat_command_view(cmd),
+        "lsof" => lsof_command_view(cmd),
+        "launchctl" => launchctl_command_view(cmd),
+        "pmset" => pmset_command_view(cmd),
+        "networksetup" => networksetup_command_view(cmd),
         "git" => git_command_view(cmd),
         _ if command_requests_help(cmd) => Some(CommandView::Man),
         _ => None,
     }
+}
+
+fn scutil_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    words
+        .iter()
+        .skip(1)
+        .any(|arg| std::str::from_utf8(arg).is_ok_and(|text| text == "--dns"))
+        .then_some(CommandView::ScutilDns)
+}
+
+fn route_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    let args = words
+        .iter()
+        .skip(1)
+        .filter_map(|arg| std::str::from_utf8(arg).ok())
+        .collect::<Vec<_>>();
+    (args.windows(2).any(|pair| pair == ["get", "default"])
+        || args.windows(2).any(|pair| pair == ["get", "0.0.0.0"]))
+    .then_some(CommandView::Route)
+}
+
+fn netstat_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    words
+        .iter()
+        .skip(1)
+        .any(|arg| {
+            std::str::from_utf8(arg).is_ok_and(|text| {
+                text == "-rn" || text == "-nr" || text == "-r" || text == "--route"
+            })
+        })
+        .then_some(CommandView::Netstat)
+}
+
+fn lsof_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    words
+        .iter()
+        .skip(1)
+        .any(|arg| {
+            std::str::from_utf8(arg).is_ok_and(|text| text == "-i" || text.starts_with("-i"))
+        })
+        .then_some(CommandView::Lsof)
+}
+
+fn launchctl_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    (words.get(1).and_then(|arg| std::str::from_utf8(arg).ok()) == Some("list"))
+        .then_some(CommandView::Launchctl)
+}
+
+fn pmset_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    words
+        .iter()
+        .skip(1)
+        .any(|arg| std::str::from_utf8(arg).is_ok_and(|text| text == "-g"))
+        .then_some(CommandView::Pmset)
+}
+
+fn networksetup_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    let networksetup_idx = words
+        .iter()
+        .position(|word| std::str::from_utf8(word).is_ok_and(|text| text == "networksetup"))?;
+    let args = &words[networksetup_idx + 1..];
+    args.iter()
+        .any(|arg| {
+            matches!(
+                std::str::from_utf8(arg),
+                Ok("-listpreferredwirelessnetworks" | "-listallhardwareports")
+            )
+        })
+        .then_some(CommandView::NetworkSetup)
 }
 
 fn git_command_view(command: &[u8]) -> Option<CommandView> {
@@ -1084,6 +1558,76 @@ fn command_requests_help(command: &[u8]) -> bool {
         cmd.split_whitespace()
             .any(|word| matches!(word, "--help" | "-h" | "help"))
     })
+}
+
+/// Longest pinned-error quote in the failure footer. One readable line; the
+/// full text is still right there in the scrollback.
+const PIN_DISPLAY_CAP: usize = 160;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PipelineWarning {
+    final_exit: i32,
+    failed_stages: Vec<(usize, i32)>,
+}
+
+impl PipelineWarning {
+    fn stage_display(&self) -> String {
+        if self.failed_stages.len() == 1 {
+            let (stage, code) = self.failed_stages[0];
+            format!("stage {stage} exit {code}")
+        } else {
+            let stages = self
+                .failed_stages
+                .iter()
+                .map(|(stage, code)| format!("{stage}={code}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("stages {stages}")
+        }
+    }
+}
+
+fn pipeline_warning(statuses: &Option<Vec<i32>>, final_exit: i32) -> Option<PipelineWarning> {
+    if final_exit != 0 {
+        return None;
+    }
+    let statuses = statuses.as_ref()?;
+    if statuses.len() <= 1 {
+        return None;
+    }
+    let failed_stages = statuses
+        .iter()
+        .take(statuses.len().saturating_sub(1))
+        .enumerate()
+        .filter_map(|(idx, &code)| (code != 0).then_some((idx + 1, code)))
+        .collect::<Vec<_>>();
+    (!failed_stages.is_empty()).then_some(PipelineWarning {
+        final_exit,
+        failed_stages,
+    })
+}
+
+/// Truncate sanitized (valid-UTF-8) display text to at most `cap` bytes on a
+/// char boundary, appending `…` when cut. Falls back to the raw prefix if the
+/// input somehow isn't UTF-8 — never panics, never splits a char it can see.
+fn truncate_display(text: &[u8], cap: usize) -> Vec<u8> {
+    if text.len() <= cap {
+        return text.to_vec();
+    }
+    let cut = match std::str::from_utf8(text) {
+        Ok(s) => {
+            let mut cut = cap;
+            while cut > 0 && !s.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            cut
+        }
+        // Unreachable after sanitize_display, but degrade instead of trusting.
+        Err(err) => err.valid_up_to().min(cap),
+    };
+    let mut out = text[..cut].to_vec();
+    out.extend_from_slice("\u{2026}".as_bytes()); // …
+    out
 }
 
 fn format_duration(duration: Duration) -> String {
