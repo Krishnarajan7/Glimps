@@ -61,7 +61,7 @@ toml = "0.8"
 proptest = "1"
 
 # Latency-budget benchmarks for detectors/formatters (GLIMPS-PLAN §4 / DoD).
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "format"
