@@ -319,6 +319,10 @@ ends, and reformats only that — never your prompt or input. Full rationale in
 | [`GLIMPS-PLAN.md`](./GLIMPS-PLAN.md) | R&D findings, feasibility, tech-stack rationale |
 | [`ROADMAP.md`](./ROADMAP.md) | Versioned plan (v0.1 → v2.0) |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Contributor setup and review expectations |
+| [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) | Community participation and enforcement rules |
+| [`SECURITY.md`](./SECURITY.md) | Private vulnerability reporting and response policy |
+| [`docs/COMPATIBILITY.md`](./docs/COMPATIBILITY.md) | Verified platform matrix and known beta issues |
+| [`docs/REPOSITORY_SETTINGS.md`](./docs/REPOSITORY_SETTINGS.md) | Maintainer-only GitHub trust and ruleset setup |
 | [`docs/COMPETITIVE_PRODUCT_GAP_ANALYSIS.md`](./docs/COMPETITIVE_PRODUCT_GAP_ANALYSIS.md) | Competitor lessons and product gap roadmap |
 | [`docs/FORMATTER_DESIGN_GUIDE.md`](./docs/FORMATTER_DESIGN_GUIDE.md) | Rules for adding safe formatters |
 | [`docs/GOOD_FIRST_ISSUES.md`](./docs/GOOD_FIRST_ISSUES.md) | Copy-ready beginner issue specs |

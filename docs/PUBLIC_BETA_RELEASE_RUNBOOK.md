@@ -17,6 +17,9 @@ from a real release artifact on a clean machine.
 - `exit`, Ctrl-D, Ctrl-C, resize, and SIGTERM restore the terminal.
 - The demo GIF is generated from `demo/glimps.tape` and reviewed.
 - The Homebrew tap and release workflow are verified from a real tag.
+- GitHub private vulnerability reporting is enabled and the `main` ruleset
+  requires the repository's CI checks according to
+  `docs/REPOSITORY_SETTINGS.md`.
 
 ## 1. Repo Preflight
 
@@ -92,6 +95,8 @@ Before pushing a public release tag:
   - `x86_64-unknown-linux-gnu`
 - confirm the README still says Homebrew is unavailable until the tap has been
   tested end-to-end.
+- confirm the release environment/ruleset limits tag creation and publishing to
+  maintainers.
 
 ## 5. Bump the version to match the tag
 
@@ -118,7 +123,7 @@ scripts/release-readiness.sh --strict --tag v0.1.0-rc.1
 Use a release candidate first:
 
 ```bash
-git tag v0.1.0-rc.1
+git tag -s v0.1.0-rc.1 -m "GLIMPS v0.1.0-rc.1"
 git push origin v0.1.0-rc.1
 ```
 
@@ -127,6 +132,8 @@ Then verify:
 - the release workflow passes;
 - GitHub Release artifacts exist for all configured targets;
 - the shell installer installs into the expected location;
+- downloaded artifacts verify with
+  `gh attestation verify <artifact> --repo Krishnarajan7/Glimps`;
 - the Homebrew formula lands in the tap;
 - `brew install Krishnarajan7/homebrew-tap/glimps` works on a clean Mac;
 - uninstall instructions remove the binary and shell integration cleanly.
@@ -144,7 +151,7 @@ $EDITOR Cargo.toml         # [package] version = "0.1.0"
 cargo build
 git add Cargo.toml Cargo.lock && git commit -m "chore: release v0.1.0"
 scripts/release-readiness.sh --strict --tag v0.1.0
-git tag v0.1.0
+git tag -s v0.1.0 -m "GLIMPS v0.1.0"
 git push origin v0.1.0
 ```
 

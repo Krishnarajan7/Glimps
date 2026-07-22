@@ -1,0 +1,19 @@
+# Default review owner.
+* @Krishnarajan7
+
+# Trust-critical runtime and shell boundaries.
+/src/pty.rs @Krishnarajan7
+/src/terminal.rs @Krishnarajan7
+/src/init.rs @Krishnarajan7
+/src/metadata.rs @Krishnarajan7
+/src/doctor.rs @Krishnarajan7
+/src/format/command.rs @Krishnarajan7
+/src/format/osc133.rs @Krishnarajan7
+
+# Dependency and release supply chain.
+/Cargo.toml @Krishnarajan7
+/Cargo.lock @Krishnarajan7
+/dist-workspace.toml @Krishnarajan7
+/.github/workflows/ @Krishnarajan7
+/.github/workflows/release.yml @Krishnarajan7
+/.github/dependabot.yml @Krishnarajan7

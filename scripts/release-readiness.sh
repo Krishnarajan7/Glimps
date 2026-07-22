@@ -14,6 +14,7 @@ Runs the repo-local gates that should pass before cutting a public beta:
   - cargo clippy --all-targets --all-features -- -D warnings
   - cargo test --all --all-features
   - cargo bench --no-run
+  - website lint, typecheck, build, and production dependency audit
   - release config sanity checks
   - (with --tag) Cargo.toml version matches the release tag
 
@@ -93,6 +94,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_tool cargo
+require_tool npm
 
 cd "$ROOT"
 
@@ -122,6 +124,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all --all-features
 cargo bench --no-run
 
+(
+  cd site
+  npm ci --ignore-scripts
+  npm run lint
+  npm run typecheck
+  npm run build
+  npm audit --omit=dev --audit-level=high
+)
+
 if command -v cargo-audit >/dev/null 2>&1; then
   cargo audit
 else
@@ -134,6 +145,22 @@ check_contains dist-workspace.toml '"x86_64-apple-darwin"' "Intel Mac artifact t
 check_contains dist-workspace.toml '"aarch64-unknown-linux-gnu"' "Linux arm64 artifact target"
 check_contains dist-workspace.toml '"x86_64-unknown-linux-gnu"' "Linux x64 artifact target"
 check_contains .github/workflows/release.yml 'HOMEBREW_TAP_TOKEN' "Homebrew tap publishing secret"
+check_contains .github/workflows/release.yml 'contents: read' "read-only default release permissions"
+check_contains .github/workflows/release.yml 'attestations: write' "release attestation permission"
+check_contains .github/workflows/release.yml 'actions/attest@' "release artifact attestation"
+check_contains dist-workspace.toml 'allow-dirty = ["ci"]' "intentional hardened cargo-dist workflow override"
+check_contains SECURITY.md 'Report a Vulnerability Privately' "private security reporting policy"
+check_contains .github/CODEOWNERS '/src/pty.rs' "PTY code ownership"
+
+while IFS= read -r action; do
+  if [[ ! "$action" =~ @[0-9a-f]{40}$ ]]; then
+    echo "release config check failed: mutable or malformed action reference '$action'" >&2
+    exit 1
+  fi
+done < <(
+  grep -hE '^[[:space:]]*(-[[:space:]]+)?uses:' .github/workflows/*.yml \
+    | sed -E 's/.*uses:[[:space:]]*([^[:space:]#]+).*/\1/'
+)
 
 if command -v dist >/dev/null 2>&1; then
   dist plan

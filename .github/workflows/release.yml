@@ -14,8 +14,13 @@
 # title/body based on your changelogs.
 
 name: Release
+
 permissions:
-  "contents": "write"
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -48,6 +53,7 @@ jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 15
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
@@ -56,17 +62,15 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
           submodules: recursive
       - name: Install dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
-        shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh"
+        # Cargo verifies the crate checksum; --locked uses cargo-dist's lockfile.
+        run: cargo install cargo-dist --version 0.32.0 --locked
       - name: Cache dist
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/dist
@@ -82,7 +86,7 @@ jobs:
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
@@ -108,7 +112,7 @@ jobs:
       # - N "local" tasks that build each platform's binaries and platform-specific installers
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
     runs-on: ${{ matrix.runner }}
-    container: ${{ matrix.container && matrix.container.image || null }}
+    timeout-minutes: 45
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
@@ -116,22 +120,17 @@ jobs:
       - name: enable windows longpaths
         run: |
           git config --global core.longpaths true
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Install Rust non-interactively if not already installed
-        if: ${{ matrix.container }}
-        run: |
-          if ! command -v cargo > /dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          fi
       - name: Install dist
-        run: ${{ matrix.install_dist.run }}
+        # Install independently on each native runner so no cross-platform
+        # executable or unaudited installer script crosses the trust boundary.
+        run: cargo install cargo-dist --version 0.32.0 --locked
       # Get the dist-manifest
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -158,7 +157,7 @@ jobs:
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
           path: |
@@ -171,23 +170,24 @@ jobs:
       - plan
       - build-local-artifacts
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
           submodules: recursive
       - name: Install cached dist
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Get all the local artifacts for the global tasks to use (for e.g. checksums)
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -205,7 +205,7 @@ jobs:
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: artifacts-build-global
           path: |
@@ -222,22 +222,28 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
+    environment: release
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
           submodules: recursive
       - name: Install cached dist
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Fetch artifacts from scratch-storage
       - name: Fetch artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -250,14 +256,14 @@ jobs:
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
       # Create a GitHub Release while uploading all files to it
       - name: "Download GitHub Artifacts"
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: artifacts-*
           path: artifacts
@@ -266,6 +272,10 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
+      - name: Attest release artifacts
+        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
+        with:
+          subject-path: ${{ github.workspace }}/artifacts/*
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
@@ -283,6 +293,7 @@ jobs:
       - plan
       - host
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 20
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PLAN: ${{ needs.plan.outputs.val }}
@@ -290,14 +301,16 @@ jobs:
       GITHUB_EMAIL: "admin+bot@axo.dev"
     if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
     steps:
-      - uses: actions/checkout@v6
+      # This isolated publishing checkout is the sole credential-persisting
+      # exception: the following git push targets the dedicated tap repository.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: true
           repository: "Krishnarajan7/homebrew-tap"
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       # So we have access to the formula
       - name: Fetch homebrew formulae
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: artifacts-*
           path: Formula/
@@ -334,10 +347,11 @@ jobs:
     # "host" however must run to completion, no skipping allowed!
     if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
           submodules: recursive

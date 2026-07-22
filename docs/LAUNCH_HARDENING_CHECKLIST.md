@@ -22,6 +22,11 @@ Legend: todo / in progress / done
 - done: `anyhow` lower bound is pinned to the RustSec-patched `1.0.103` release.
 - done: `portable-pty` is upgraded to `0.9.0`, removing the unmaintained
   `serial` transitive dependency.
+- done: Linux/macOS Rust CI, RustSec audit, and website quality CI are green on
+  consecutive `main` commits.
+- done: Website dependencies are reduced to the packages used by the static
+  application; clean install, lint, typecheck, build, and npm audit are gated.
+- done: `glimps doctor` provides read-only installation and runtime diagnostics.
 - in progress: Public beta dogfood on a clean Mac outside this development
   machine. Use `docs/FRESH_MAC_DOGFOOD.md` and `scripts/dogfood-macos.sh`.
 - todo: Release/tap flow verified from an actual version tag.
@@ -36,6 +41,13 @@ Legend: todo / in progress / done
   crash upload, or persistent capture of terminal contents.
 - todo: Add a release checklist item that confirms no new dependency performs
   network I/O in normal GLIMPS runtime.
+- done: Add `SECURITY.md`, `CODE_OF_CONDUCT.md`, and trust-boundary CODEOWNERS.
+- done: Pin GitHub Actions to full commits, disable ordinary checkout credential
+  persistence, and default workflow permissions to read-only.
+- done: Generate signed GitHub provenance attestations for release artifacts.
+- done: Add Dependabot monitoring for Cargo, npm, and GitHub Actions.
+- todo: Enable GitHub private vulnerability reporting and a protected `main`
+  ruleset in repository settings.
 
 ## 2. Fresh-Machine Dogfood
 
@@ -75,6 +87,8 @@ Legend: todo / in progress / done
 - todo: Confirm the shell installer puts `glimps` in the expected location.
 - todo: Do not advertise `brew install glimps` until the tap works end-to-end.
 - todo: Add a short rollback/uninstall note to the release notes.
+- todo: Verify each downloaded artifact with `gh attestation verify` during the
+  release-candidate run.
 
 ## 4. Performance
 
@@ -143,10 +157,13 @@ Legend: todo / in progress / done
 - todo: Create live GitHub issues from `docs/GOOD_FIRST_ISSUES.md` after labels
   exist.
 - done: Add a formatter design guide for contributors.
+- done: Add a Code of Conduct, private security-reporting policy, CODEOWNERS,
+  compatibility matrix, and known-issues page.
 
 ## 7. Later, Not Public-Beta Blocking
 
-- todo: bash support.
+- done: bash support (beta; raw `DEBUG` trap replacement remains a documented
+  compatibility caveat).
 - todo: fish support.
 - todo: mixed-content segmentation, such as log lines containing JSON.
 - todo: OSC 8 URL hyperlinking.

@@ -5,6 +5,10 @@ members = ["cargo:."]
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.32.0"
+# The generated workflow is intentionally hardened by hand (immutable action
+# SHAs, least privilege, timeouts, Cargo-verified install, and attestations).
+# Prevent `dist plan` from rejecting those reviewed security changes as drift.
+allow-dirty = ["ci"]
 # CI backends to support
 ci = "github"
 # The installers to generate for each app

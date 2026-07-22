@@ -52,9 +52,9 @@ Exit criteria: zero interference on the top 50 common commands.
 ## v0.3 - Robustness And Config
 Goal: trustworthy enough to hand to strangers.
 
-- ◐ `.glimpsrc` (TOML): thresholds, enable/disable per type, color/separator/
-      timestamp toggles, master switch (done). Name-based bypass list still TODO
-      (needs command-name capture).
+- ☑ `.glimpsrc` (TOML): thresholds, per-type switches, color/separator/timestamp,
+      master switch, configurable bypass, sensitive commands, failure summaries,
+      and bounded buffering limits.
 - ☑ Large-output streaming switch (buffer/line caps → verbatim past threshold)
 - ☑ Golden-file test corpus (JSON/HTML goldens + **50** common-command byte-safety
       fixtures — incl. already-ANSI git color/graph, jq -C colored JSON, 256-color,
@@ -78,6 +78,8 @@ GIF people can understand without a private walkthrough.
       (`demo/glimps.tape` + `demo/README.md`, self-contained VHS script); the GIF
       itself just needs `vhs demo/glimps.tape` run on a machine with VHS installed
 - ☑ Docs: install, config, safety/privacy statement, uninstall (README + `.glimpsrc.example`)
+- ☑ Read-only `glimps doctor`, security policy, Code of Conduct, CODEOWNERS,
+      compatibility matrix, pinned CI actions, and least-privilege workflows
 - ☑ Hardened: 52-fixture command corpus (ANSI/Unicode/overstrike/tables/control-only/
       empty/binary/already-ANSI) all byte-preserved; password-prompt test; fuzz sweep
       over text+ANSI (10k cases) + arbitrary-bytes/arbitrary-config property tests
@@ -92,12 +94,13 @@ works."
 ## v1.x - Scale And Reach (post-launch, demand-driven)
 - ☐ Mixed-content segmentation (the multi-format screenshot case)
 - ☐ URL highlighting / clickable hyperlinks (OSC 8)
-- ☐ Error-line pinning / summary panel for long output
-- ☐ bash + fish support
+- ☑ Error-line pinning and deterministic failure summaries for long output
+- ◐ Shell breadth: bash is beta; fish remains TODO
 - ☐ Windows support (PTY + ANSI differences)
 - ◐ More formatters via the `add-formatter` skill: **diffs ☑** (unified-diff
       coloring, hunk-anchored detection) and **stack traces ☑** (Rust panics +
-      Python tracebacks, streaming); YAML, CSV, SQL still ☐
+      Python tracebacks, streaming); YAML, CSV/TSV, SQL, JSON-lines, source files,
+      config files, and database result tables ☑
 
 ## v2.0 - Ambition (only if v1 has real traction)
 - ☐ Optional, **local/offline**, opt-in AI output summarization (privacy-preserving)

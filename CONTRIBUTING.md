@@ -9,6 +9,11 @@ trustworthy.
 If you only read one thing, read this: **when GLIMPS is unsure, it should get
 out of the way.** Pass-through is a feature.
 
+By participating, you agree to follow the
+[`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). Report suspected vulnerabilities
+privately according to [`SECURITY.md`](./SECURITY.md), never through a public
+issue containing terminal output or reproduction details.
+
 ## Using AI
 
 Using AI tools is fine. GLIMPS itself is being built in a world where AI is part
