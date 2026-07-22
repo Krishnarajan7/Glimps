@@ -32,7 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, 2026-07-19
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install zsh (for PTY integration tests)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zsh
