@@ -894,6 +894,7 @@ impl Formatter {
             CommandView::Df => linefmt::colorize_df_line(line, &self.theme),
             CommandView::Ps => linefmt::colorize_ps_line(line, &self.theme),
             CommandView::Dns => linefmt::colorize_dns_line(line, &self.theme),
+            CommandView::KubectlPods => linefmt::colorize_kubectl_pods_line(line, &self.theme),
             CommandView::IfConfig => linefmt::colorize_ifconfig_line(line, &self.theme),
             CommandView::ScutilDns => linefmt::colorize_scutil_dns_line(line, &self.theme),
             CommandView::Route => linefmt::colorize_route_line(line, &self.theme),
@@ -1156,6 +1157,7 @@ enum CommandView {
     Df,
     Ps,
     Dns,
+    KubectlPods,
     IfConfig,
     ScutilDns,
     Route,
@@ -1241,6 +1243,7 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         return Some(view);
     }
     match name.as_str() {
+        "kubectl" => kubectl_command_view(cmd),
         "scutil" => scutil_command_view(cmd),
         "route" => route_command_view(cmd),
         "netstat" => netstat_command_view(cmd),
@@ -1387,6 +1390,20 @@ fn git_command_view(command: &[u8]) -> Option<CommandView> {
         }
         "log" | "show" => Some(CommandView::Git(linefmt::GitView::Log)),
         "branch" => Some(CommandView::Git(linefmt::GitView::Branch)),
+        _ => None,
+    }
+}
+
+fn kubectl_command_view(command: &[u8]) -> Option<CommandView> {
+    let text = std::str::from_utf8(command).ok()?;
+    let mut words = text.split_whitespace();
+
+    if words.next()? != "kubectl" {
+        return None;
+    }
+
+    match (words.next()?, words.next()?) {
+        ("get", "pods") => Some(CommandView::KubectlPods),
         _ => None,
     }
 }

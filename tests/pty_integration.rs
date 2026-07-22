@@ -229,6 +229,7 @@ impl ZdotDir {
         let path = std::env::temp_dir().join(format!("glimps-it-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path); // clear any stale dir from a crashed run
         std::fs::create_dir_all(&path).expect("create zdotdir");
+        std::fs::write(path.join(".zshenv"), "unsetopt GLOBAL_RCS\n").expect("write .zshenv");
         let init = std::process::Command::new(GLIMPS)
             .args(["init", "zsh"])
             .output()
