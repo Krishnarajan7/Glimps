@@ -643,7 +643,22 @@ impl Formatter {
         let Some(cmd) = self.pending_command.clone() else {
             return;
         };
-        let status = exitcode::describe(exit_code);
+        // A leading shell `!` deliberately reverses the underlying command's
+        // result. zsh/bash preserve that underlying result in their pipeline
+        // status array, so `[0]` plus final exit 1 means the command itself
+        // succeeded and only the boolean negation evaluated false. Treating
+        // that as an ordinary red failure is technically literal but deeply
+        // misleading (for example, a successful `! ssh-copy-id ...`).
+        let negated_success = exit_code == 1
+            && cmdline::starts_with_negation(&cmd)
+            && pipeline_statuses
+                .as_ref()
+                .is_some_and(|statuses| statuses.last() == Some(&0));
+        let status = if negated_success {
+            exitcode::negated_success()
+        } else {
+            exitcode::describe(exit_code)
+        };
         let success = status.class == ExitClass::Success;
         let pipeline_warning = pipeline_warning(&pipeline_statuses, exit_code);
         if success
@@ -905,6 +920,9 @@ impl Formatter {
             CommandView::Man => linefmt::format_man_line(line, &self.theme),
             CommandView::Markdown => self.format_markdown_line(line),
             CommandView::Config => linefmt::colorize_config_line(line, &self.theme),
+            CommandView::GitleaksIgnore => {
+                linefmt::colorize_gitleaks_ignore_line(line, &self.theme)
+            }
             CommandView::Delimited(delimiter) => linefmt::colorize_delimited_line(
                 line,
                 &self.theme,
@@ -947,6 +965,7 @@ impl Formatter {
                 CommandView::Man
                     | CommandView::Markdown
                     | CommandView::Config
+                    | CommandView::GitleaksIgnore
                     | CommandView::Delimited(_)
                     | CommandView::Sql
                     | CommandView::SqlResult
@@ -1166,6 +1185,7 @@ enum CommandView {
     Man,
     Markdown,
     Config,
+    GitleaksIgnore,
     Delimited(u8),
     Sql,
     SqlResult,
@@ -1427,6 +1447,9 @@ fn file_view_for_word(word: &str) -> Option<CommandView> {
         .to_ascii_lowercase();
     if clean.is_empty() {
         return None;
+    }
+    if clean == ".gitleaksignore" {
+        return Some(CommandView::GitleaksIgnore);
     }
     if matches!(
         clean.as_str(),

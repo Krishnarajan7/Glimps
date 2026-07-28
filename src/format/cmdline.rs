@@ -105,6 +105,16 @@ pub fn first_word(cmd: &[u8]) -> Option<String> {
     None
 }
 
+/// Whether the captured shell command begins with the `!` reserved word.
+///
+/// This deliberately requires whitespace after `!`: `! command` is shell
+/// negation, while `!command` can be a literal command name (and is also
+/// subject to shell-specific history-expansion rules).
+pub(crate) fn starts_with_negation(cmd: &[u8]) -> bool {
+    let cmd = cmd.trim_ascii_start();
+    cmd.first() == Some(&b'!') && cmd.get(1).is_some_and(|next| next.is_ascii_whitespace())
+}
+
 /// `VAR=value` style env assignment (a `=` before any `/`, with a name-ish lhs).
 fn is_env_assignment(word: &str) -> bool {
     match word.split_once('=') {
@@ -209,6 +219,15 @@ mod tests {
         assert_eq!(first_word(b"  git   status ").as_deref(), Some("git"));
         assert_eq!(first_word(b"").as_deref(), None);
         assert_eq!(first_word(b"sudo").as_deref(), None); // only a wrapper
+    }
+
+    #[test]
+    fn recognizes_shell_negation_but_not_bang_prefixed_commands() {
+        assert!(starts_with_negation(b"! true"));
+        assert!(starts_with_negation(b" \t! ssh-copy-id root@example"));
+        assert!(!starts_with_negation(b"!true"));
+        assert!(!starts_with_negation(b"echo ! true"));
+        assert!(!starts_with_negation(b""));
     }
 
     #[test]

@@ -562,6 +562,39 @@ fn failed_command_footer_pins_the_error_line_end_to_end() {
 }
 
 #[test]
+fn successful_negated_command_is_not_reported_as_failed_end_to_end() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+    let baseline = s.snapshot().len();
+
+    s.write(b"! printf 'key installed\\n'\n");
+    assert!(
+        s.wait_for(
+            b"underlying command succeeded; ! inverted its status",
+            FORMAT_BUDGET
+        ),
+        "negated-success notice missing. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    let command_output = &s.snapshot()[baseline..];
+    assert!(
+        !command_output
+            .windows(b"command failed:".len())
+            .any(|window| window == b"command failed:"),
+        "negated success was recapped as a failure: {:?}",
+        String::from_utf8_lossy(command_output)
+    );
+
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
 fn pipeline_stage_failure_warns_even_when_shell_exit_is_zero() {
     let Some(zsh) = zsh_path() else {
         eprintln!("skipping: zsh not available");

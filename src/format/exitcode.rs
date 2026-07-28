@@ -79,6 +79,15 @@ pub fn describe(code: i32) -> ExitStatus {
     }
 }
 
+/// Describe `! command` when the underlying command returned zero and the
+/// shell consequently inverted that success into status 1.
+pub fn negated_success() -> ExitStatus {
+    notice(
+        "negated",
+        "underlying command succeeded; ! inverted its status",
+    )
+}
+
 const fn status(class: ExitClass, verb: &'static str, explain: Option<&'static str>) -> ExitStatus {
     ExitStatus {
         class,
@@ -105,6 +114,17 @@ mod tests {
         assert_eq!(s.class, ExitClass::Success);
         assert_eq!(s.verb, "done");
         assert!(s.explain.is_none());
+    }
+
+    #[test]
+    fn negated_success_is_a_neutral_notice() {
+        let s = negated_success();
+        assert_eq!(s.class, ExitClass::Notice);
+        assert_eq!(s.verb, "negated");
+        assert_eq!(
+            s.explain,
+            Some("underlying command succeeded; ! inverted its status")
+        );
     }
 
     #[test]

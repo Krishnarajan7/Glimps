@@ -22,6 +22,10 @@ pub fn colorize_git_line(line: &[u8], theme: &Theme, view: GitView) -> Option<Ve
     if theme.reset.is_empty() {
         return None;
     }
+    if let Some(color) = git_diagnostic_color(line, theme, view) {
+        let (content, ending) = split_line(line);
+        return Some(paint_whole(content, ending, color, theme.reset));
+    }
     match view {
         GitView::Branch => colorize_git_branch_line(line, theme),
         GitView::DiffStat => colorize_git_diff_stat_line(line, theme),
@@ -29,6 +33,24 @@ pub fn colorize_git_line(line: &[u8], theme: &Theme, view: GitView) -> Option<Ve
         GitView::ShortStatus => colorize_git_short_status_line(line, theme),
         GitView::Status => colorize_git_status_line(line, theme),
     }
+}
+
+/// Git emits lowercase diagnostics, and some `git branch -d` warnings continue
+/// on an indented second line. These must outrank the branch-list renderer,
+/// which otherwise assumes every non-empty line is a branch name.
+fn git_diagnostic_color(line: &[u8], theme: &Theme, view: GitView) -> Option<&'static str> {
+    let (content, _) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    if trimmed.starts_with(b"warning:") {
+        return Some(theme.warn);
+    }
+    if trimmed.starts_with(b"error:") || trimmed.starts_with(b"fatal:") {
+        return Some(theme.error);
+    }
+    (view == GitView::Branch
+        && trimmed.starts_with(b"'refs/remotes/")
+        && contains_ascii(trimmed, b"but not yet merged to HEAD"))
+    .then_some(theme.warn)
 }
 
 fn colorize_git_diff_stat_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {

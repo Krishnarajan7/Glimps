@@ -139,6 +139,62 @@ pub fn colorize_config_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     None
 }
 
+/// Color `.gitleaksignore` comments and fingerprints.
+///
+/// A fingerprint has the shape `<commit>:<path>:<rule-id>:<line>`. Paths may
+/// themselves contain `:`, so parse the fixed fields from both ends rather than
+/// blindly splitting into four pieces.
+pub fn colorize_gitleaks_ignore_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with(b"#") {
+        return Some(paint_whole(content, ending, theme.comment, theme.reset));
+    }
+
+    let first_colon = trimmed.iter().position(|&b| b == b':')?;
+    let last_colon = trimmed.iter().rposition(|&b| b == b':')?;
+    if first_colon == last_colon {
+        return None;
+    }
+    let rule_colon = trimmed[..last_colon].iter().rposition(|&b| b == b':')?;
+    if rule_colon == first_colon {
+        return None;
+    }
+
+    let commit = &trimmed[..first_colon];
+    let path = &trimmed[first_colon + 1..rule_colon];
+    let rule = &trimmed[rule_colon + 1..last_colon];
+    let line_number = &trimmed[last_colon + 1..];
+    if !(7..=64).contains(&commit.len())
+        || !commit.iter().all(u8::is_ascii_hexdigit)
+        || path.is_empty()
+        || rule.is_empty()
+        || line_number.is_empty()
+        || !line_number.iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+
+    let offset = content.len() - trimmed.len();
+    let mut out = Vec::with_capacity(line.len() + 64);
+    out.extend_from_slice(&content[..offset]);
+    paint_bytes(&mut out, theme.number, commit, theme.reset);
+    paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+    paint_bytes(&mut out, theme.key, path, theme.reset);
+    paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+    paint_bytes(&mut out, theme.keyword, rule, theme.reset);
+    paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+    paint_bytes(&mut out, theme.number, line_number, theme.reset);
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
 fn paint_prefix(
     content: &[u8],
     ending: &[u8],

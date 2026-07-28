@@ -41,7 +41,8 @@ pub(crate) use common::{
 pub use diagnostics::colorize_cli_diagnostic_line;
 pub(crate) use diagnostics::is_cli_error_line;
 pub use documents::{
-    colorize_config_line, colorize_markdown_line, format_man_line, markdown_fence_language,
+    colorize_config_line, colorize_gitleaks_ignore_line, colorize_markdown_line, format_man_line,
+    markdown_fence_language,
 };
 pub use git::{colorize_git_line, GitView};
 pub use json_lines::{colorize_json_line, is_json_line};

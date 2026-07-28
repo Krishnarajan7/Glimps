@@ -285,9 +285,10 @@ new raw shell with `GLIMPS=0 zsh`.
   `scutil --dns`, `route get default`, `netstat -rn`, `lsof -i`,
   `networksetup`), system status output (`launchctl list`, `pmset -g`),
   `man`/help output, Markdown project files, YAML/TOML/INI/dotenv-style config
-  files, CSV/TSV files, SQL query files, JSON-lines streams/files, common
-  source-code extensions shown through reader commands, common database CLI
-  result tables, and Git status/branch/log/stat output. It also displays
+  files, `.gitleaksignore` fingerprints, CSV/TSV files, SQL query files,
+  JSON-lines streams/files, common source-code extensions shown through reader
+  commands, common database CLI result tables, and Git status/branch/log/stat
+  output. It also displays
   command exit code, duration, and failure summaries
   when the shell integration provides the command-end marker.
   Mixed-content output, such as JSON embedded inside non-JSON log lines, is

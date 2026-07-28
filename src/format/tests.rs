@@ -922,6 +922,46 @@ fn pipeline_status_does_not_replace_real_nonzero_failure() {
 }
 
 #[test]
+fn successful_negated_command_is_a_notice_not_a_failure() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"! ssh-copy-id root@example")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"Permission denied, please try again.\n"));
+    out.extend_from_slice(&f.process(b"Number of key(s) added: 1\n"));
+    out.extend_from_slice(&f.process(&pipeline_marker(&[0])));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\u{2298} negated exit 1 in "));
+    assert!(s.contains("underlying command succeeded; ! inverted its status"));
+    assert!(!s.contains("\u{2717} failed exit"));
+    assert!(!s.contains("command failed:"));
+    assert!(!s.contains("\u{21b3} Permission denied"));
+}
+
+#[test]
+fn leading_negation_does_not_hide_a_later_real_failure() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"! true; false")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(&pipeline_marker(&[1])));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\u{2717} failed exit 1 in "));
+    assert!(s.contains("command failed: ! true; false"));
+    assert!(!s.contains("underlying command succeeded"));
+}
+
+#[test]
 fn command_status_footer_shows_exit_and_duration_after_output() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -1321,6 +1361,29 @@ fn cat_config_gets_key_value_coloring() {
 }
 
 #[test]
+fn cat_gitleaksignore_colors_comments_and_fingerprint_fields() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat .gitleaksignore")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"# Expired dev-session JWT\n4646bf87405b2073d83fc4dbc1e5e3c5beff2cb8:backend/cookies.txt:jwt:6\n",
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[2m# Expired dev-session JWT\x1b[0m"));
+    assert!(s.contains(
+        "\x1b[38;5;220m4646bf87405b2073d83fc4dbc1e5e3c5beff2cb8\x1b[0m\
+\x1b[2m:\x1b[0m\x1b[36mbackend/cookies.txt\x1b[0m\
+\x1b[2m:\x1b[0m\x1b[35mjwt\x1b[0m\
+\x1b[2m:\x1b[0m\x1b[38;5;220m6\x1b[0m"
+    ));
+}
+
+#[test]
 fn cat_csv_gets_header_and_cell_coloring() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -1516,6 +1579,36 @@ fn git_branch_gets_current_branch_coloring() {
     assert!(s.contains("\x1b[32m*\x1b[0m \x1b[36mmain\x1b[0m"));
     assert!(s.contains("\x1b[36mfeature/git-polish\x1b[0m"));
     assert!(s.contains("\x1b[2mremotes/\x1b[0m\x1b[36morigin/main\x1b[0m"));
+}
+
+#[test]
+fn git_branch_delete_warning_is_gold_not_branch_cyan() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"git branch -d fix/ci-backend-pipeline")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(
+            concat!(
+            "warning: deleting branch 'fix/ci-backend-pipeline' that has been merged to\n",
+            "         'refs/remotes/origin/fix/ci-backend-pipeline', but not yet merged to HEAD\n",
+            "Deleted branch fix/ci-backend-pipeline (was 59d1c84).\n",
+        )
+            .as_bytes(),
+        ),
+    );
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains(
+        "\x1b[38;5;220mwarning: deleting branch 'fix/ci-backend-pipeline' that has been merged to\x1b[0m"
+    ));
+    assert!(s.contains(
+        "\x1b[38;5;220m         'refs/remotes/origin/fix/ci-backend-pipeline', but not yet merged to HEAD\x1b[0m"
+    ));
+    assert!(!s.contains("\x1b[36mwarning:"));
 }
 
 #[test]
@@ -2849,6 +2942,7 @@ proptest::proptest! {
 
         for cmd in [
             &b"git status --short"[..],
+            b"cat .gitleaksignore",
             b"cat data.csv",
             b"cat schema.sql",
             b"cat notes.md",
