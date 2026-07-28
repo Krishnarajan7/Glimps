@@ -98,6 +98,69 @@ pub fn colorize_du_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     colorize_size_path_line(line, theme)
 }
 
+pub fn colorize_kubectl_pods_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let spans = word_spans(content);
+    if spans.len() < 5 {
+        return None;
+    }
+    let cols: Vec<&[u8]> = spans.iter().map(|(s, e)| &content[*s..*e]).collect();
+
+    if cols[0] == b"NAME"
+        && cols[1] == b"READY"
+        && cols[2] == b"STATUS"
+        && cols[3] == b"RESTARTS"
+        && cols[4] == b"AGE"
+    {
+        return Some(paint_whole(content, ending, theme.debug, theme.reset));
+    }
+    if ready_color(cols[1], theme).is_none() || pod_status_color(cols[2], theme).is_none() {
+        return None;
+    }
+
+    Some(colorize_words(
+        content,
+        ending,
+        theme,
+        |idx, word| match idx {
+            0 => Some(theme.key),
+            1 => ready_color(word, theme),
+            2 => pod_status_color(word, theme),
+            3 => Some(theme.number),
+            4 => Some(theme.debug),
+            _ => None,
+        },
+    ))
+}
+
+fn pod_status_color(status: &[u8], theme: &Theme) -> Option<&'static str> {
+    match status {
+        b"Running" => Some(theme.info),
+        b"Pending" | b"ImagePullBackOff" => Some(theme.warn),
+        b"CrashLoopBackOff" | b"Error" => Some(theme.error),
+        _ => None,
+    }
+}
+
+fn ready_color(ready: &[u8], theme: &Theme) -> Option<&'static str> {
+    let slash = ready.iter().position(|&b| b == b'/')?;
+    let current = parse_u16(&ready[..slash])?;
+    let total = parse_u16(&ready[slash + 1..])?;
+
+    Some(if current == total && total > 0 {
+        theme.info
+    } else {
+        theme.warn
+    })
+}
+
+fn parse_u16(bytes: &[u8]) -> Option<u16> {
+    std::str::from_utf8(bytes).ok()?.parse().ok()
+}
+
 /// Color `df` output: header dimmed, numeric columns highlighted, high capacity
 /// values warned.
 pub fn colorize_df_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {

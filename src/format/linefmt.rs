@@ -32,7 +32,8 @@ mod tables;
 
 pub use code::{colorize_code_line, CodeLanguage};
 pub use command_views::{
-    colorize_df_line, colorize_du_line, colorize_find_line, colorize_ls_line, colorize_ps_line,
+    colorize_df_line, colorize_du_line, colorize_find_line, colorize_kubectl_pods_line,
+    colorize_ls_line, colorize_ps_line,
 };
 pub(crate) use common::{
     colorize_size_path_line, colorize_words, contains_ascii, paint_bytes, paint_span, paint_whole,
