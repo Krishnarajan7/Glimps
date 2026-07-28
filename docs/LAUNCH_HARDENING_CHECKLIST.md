@@ -27,6 +27,9 @@ Legend: todo / in progress / done
 - done: Website dependencies are reduced to the packages used by the static
   application; clean install, lint, typecheck, build, and npm audit are gated.
 - done: `glimps doctor` provides read-only installation and runtime diagnostics.
+- done: The repo-local strict preflight passes for the prepared
+  `v0.1.0-rc.1` version, including RustSec, production npm audit, and
+  `cargo-dist` planning (2026-07-28).
 - in progress: Public beta dogfood on a clean Mac outside this development
   machine. Use `docs/FRESH_MAC_DOGFOOD.md` and `scripts/dogfood-macos.sh`.
 - todo: Release/tap flow verified from an actual version tag.
@@ -36,7 +39,9 @@ Legend: todo / in progress / done
 - done: Patch `RUSTSEC-2026-0190` by resolving `anyhow >= 1.0.103`.
 - done: Resolve `RUSTSEC-2017-0008` by upgrading `portable-pty` to `0.9.0`,
   which removes the transitive `serial` dependency.
-- todo: Run `cargo audit` before every public release.
+- done: `cargo audit` is clean for the prepared `v0.1.0-rc.1` preflight
+  (2026-07-28).
+- todo: Rerun `cargo audit` immediately before every public release tag.
 - todo: Keep the no-telemetry promise enforceable: do not add logging, analytics,
   crash upload, or persistent capture of terminal contents.
 - todo: Add a release checklist item that confirms no new dependency performs
@@ -46,8 +51,10 @@ Legend: todo / in progress / done
   persistence, and default workflow permissions to read-only.
 - done: Generate signed GitHub provenance attestations for release artifacts.
 - done: Add Dependabot monitoring for Cargo, npm, and GitHub Actions.
-- todo: Enable GitHub private vulnerability reporting and a protected `main`
-  ruleset in repository settings.
+- done: Enable GitHub private vulnerability reporting, Dependabot vulnerability
+  alerts, and automatic security fixes.
+- todo: Enable the protected `main` ruleset after the pending beta changes are
+  committed, so it does not block the maintainer's preparation push.
 
 ## 2. Fresh-Machine Dogfood
 

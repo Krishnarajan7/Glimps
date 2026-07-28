@@ -21,10 +21,11 @@ recognizes: JSON, HTML, logs, HTTP responses, diffs, stack traces, Git output,
 tables, and common project files. No manual piping, no flags, no guessing what
 kind of output is coming.
 
-> Status: **beta** — functional and heavily tested. macOS + zsh/bash today; Linux is a
-> supported build target (CI covers Linux + macOS). Builds and runs **identically
-> on Apple Silicon and Intel Macs** — same install, no architecture-specific
-> steps. Homebrew packaging and broader shell support are on the roadmap.
+> Status: **public beta** — functional and heavily tested. macOS + zsh is the
+> primary early-adopter path; bash integration is beta, and Linux is a supported
+> build target covered by CI. Apple Silicon and Intel release artifacts are
+> configured, but clean-machine verification is still in progress. Homebrew
+> packaging and broader shell support are on the roadmap.
 
 > **Want to help?** GLIMPS is beta and there's real, scoped work with clear
 > acceptance criteria waiting for you. Browse the
@@ -135,7 +136,7 @@ scripts/dogfood-macos.sh session
 That builds `target/debug/glimps`, starts a wrapped zsh using a temporary
 `ZDOTDIR`, and cleans up when you exit. It does **not** install GLIMPS globally,
 does **not** edit `~/.zshrc`, and does **not** change your login shell. This is
-the recommended first test on both Apple Silicon and Intel Macs.
+the recommended first test on a Mac.
 
 ## Install From Source
 
@@ -149,7 +150,9 @@ cargo install --path .
 ```
 
 `cargo install --path .` builds a native binary for the machine you run it on.
-The steps are the same on Apple Silicon Macs, Intel Macs, and Linux.
+The source-install command is the same on Apple Silicon Macs, Intel Macs, and
+Linux. See the [compatibility matrix](./docs/COMPATIBILITY.md) for what has been
+physically verified.
 
 Not shipped yet:
 
@@ -240,8 +243,11 @@ GLIMPS sits in front of *everything* you type and see — including secrets, SSH
 sessions, and password prompts. That's a position of trust, and it's built to
 earn it. These are hard rules enforced in the code:
 
-- **Nothing is logged, stored, or transmitted.** No telemetry, ever. GLIMPS only
-  moves bytes between your shell and your screen.
+- **Nothing is transmitted or persistently logged.** No telemetry, analytics,
+  crash upload, or network calls. A private temporary file carries command,
+  working-directory, and exit-status metadata from the shell hooks to the local
+  supervisor; it is truncated as records are consumed and removed when the
+  GLIMPS session ends. Command output is never written to it.
 - **Default to pass-through.** When content type is uncertain, GLIMPS does
   nothing. It only reformats output it's confident about; everything else is
   byte-for-byte unchanged.
@@ -308,11 +314,11 @@ Restart your terminal. Fully gone.
 
 ## How it works (the honest version)
 
-GLIMPS is a **PTY session supervisor**, like ChromaTerm / `script` / `tmux` —
-*not* a shell hook. zsh's `preexec`/`precmd` hooks run before/after a command and
-can't intercept its output; owning the PTY can. GLIMPS reads the raw output
-stream, uses OSC-133 markers to find exactly where command output begins and
-ends, and reformats only that — never your prompt or input. Full rationale in
+GLIMPS is a **PTY session supervisor**, like ChromaTerm / `script` / `tmux`,
+assisted by lightweight shell hooks. The hooks report command boundaries,
+working directory, and status; they do not intercept command output. Owning the
+PTY is what lets GLIMPS read the raw output stream and reformat only the command
+output zone — never your prompt or input. Full rationale in
 [`GLIMPS-PLAN.md`](./GLIMPS-PLAN.md).
 
 | File | What |

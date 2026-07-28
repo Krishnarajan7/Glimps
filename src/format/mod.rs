@@ -552,12 +552,7 @@ impl Formatter {
             return osc_command;
         }
         self.refresh_metadata();
-        let command = self.trusted_command.take();
-        // Startup/previous-cycle result records must not bleed into this run.
-        self.trusted_cwd = None;
-        self.trusted_pipeline_statuses = None;
-        self.trusted_exit_code = None;
-        command
+        self.trusted_command.take()
     }
 
     fn refresh_metadata(&mut self) {
@@ -566,7 +561,17 @@ impl Formatter {
         };
         for event in metadata.drain() {
             match event {
-                MetadataEvent::Command(command) => self.trusted_command = Some(command),
+                MetadataEvent::Command(command) => {
+                    // A command record starts a new metadata cycle. Clear the
+                    // preceding prompt/startup result here, before accepting
+                    // any result that may already follow this command in the
+                    // same drain. Fast commands can finish before the PTY
+                    // reader processes their output-start marker.
+                    self.trusted_cwd = None;
+                    self.trusted_pipeline_statuses = None;
+                    self.trusted_exit_code = None;
+                    self.trusted_command = Some(command);
+                }
                 MetadataEvent::Result {
                     pipeline_statuses,
                     cwd,

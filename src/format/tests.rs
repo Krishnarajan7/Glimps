@@ -184,6 +184,36 @@ fn private_metadata_overrides_forged_in_band_command_and_status() {
 }
 
 #[test]
+fn coalesced_private_command_and_result_keep_fast_command_status() {
+    let mut channel = crate::metadata::MetadataChannel::create().unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(channel.path())
+        .unwrap();
+    // A fast command can finish before the PTY reader handles OutputStart, so
+    // both records may be waiting when the formatter first drains metadata.
+    writer
+        .write_all(b"R\0\x30\0/tmp/startup\0\x30\0C\0! printf ok\0R\0\x30\0/tmp/current\0\x31\0")
+        .unwrap();
+    writer.flush().unwrap();
+
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    f.metadata = channel.take_reader();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"forged command")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"ok\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8(out).unwrap();
+
+    assert!(s.contains("! printf ok"));
+    assert!(s.contains("negated exit 1"));
+    assert!(s.contains("underlying command succeeded; ! inverted its status"));
+    assert!(!s.contains("done exit 0"));
+}
+
+#[test]
 fn control_bytes_in_captured_command_never_reach_the_header_raw() {
     // BUG #2 end-to-end: a captured command carrying raw C0 controls (here
     // backspaces and a DEL — e.g. a hostile filename that redraws the line)

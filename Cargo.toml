@@ -1,6 +1,6 @@
 [package]
 name = "glimps"
-version = "0.0.1"
+version = "0.1.0-rc.1"
 edition = "2021"
 description = "Zero-config smart terminal output formatter — auto-detects and reformats JSON, HTML, and logs live in your shell."
 license = "MIT"
