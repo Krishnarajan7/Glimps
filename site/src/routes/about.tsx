@@ -61,11 +61,11 @@ function AboutPage() {
       <section className="space-y-4">
         <H2 id="overview">Overview</H2>
         <P>
-          <Glimps quiet /> is not a new terminal, not a shell, and not a shell hook. It re-execs your
-          shell (bash and zsh) inside a PTY it supervises, watching the output stream from
-          the outside. A single guarded init line turns it on. From there it quietly rewrites
-          recognized fragments — JSON payloads, structured logs, HTTP exchanges, diffs, stack
-          traces, and small tabular output — as they stream past.
+          <Glimps quiet /> is not a new terminal or a shell. It re-execs your shell (bash or
+          zsh) inside a PTY it supervises, with lightweight shell integration providing
+          trusted command boundaries and exit status. A single guarded init line turns it
+          on. From there it formats recognized output and keeps each command's result beside
+          the output that produced it.
         </P>
         <P>
           The design goal is intentionally narrow: make the text you already produce
@@ -97,8 +97,8 @@ function AboutPage() {
         <H2 id="what-it-is">What it is</H2>
         <UL>
           <li>
-            A single native binary that supervises the PTY your shell runs in — not a shell
-            hook, and not a wrapper that captures your output after the fact.
+            A single native binary that supervises the PTY your shell runs in, assisted by
+            lightweight shell hooks that report command boundaries and status.
           </li>
           <li>
             A streaming formatter that recognizes a fixed set of well-known formats and
@@ -108,7 +108,10 @@ function AboutPage() {
             A visible marker — the <Code>▌</Code> bar — placed at the start of every
             command's output so you always know where output begins.
           </li>
-          <li>Fully local. Nothing is transmitted, logged, or stored.</li>
+          <li>
+            Fully local. Nothing is transmitted or persistently logged; temporary metadata
+            is private to the session and removed on exit.
+          </li>
         </UL>
       </section>
 
@@ -144,12 +147,12 @@ function AboutPage() {
           touched. There is no invisible rewriting. If your terminal looks unusual, it's
           because <Glimps quiet /> did something — and you can see exactly where.
         </P>
-        <H3 id="silent">Silent when idle</H3>
+        <H3 id="silent">Quiet about itself</H3>
         <P>
-          <Glimps quiet /> never prints its own diagnostics into your session. No banners, no
-          version notices, no update prompts — just a short farewell when the session exits.
-          Anything you need is out-of-band: <Code>glimps --help</Code> for usage, and{" "}
-          <Code>glimps --version</Code> (which prints <Code>glimps 0.0.1</Code>).
+          <Glimps quiet /> adds useful command context — boundaries, status, duration, and
+          failure summaries — but no startup banner, update prompt, or promotional noise.
+          A short farewell appears when the session exits. Usage and version information stay
+          explicit through <Code>glimps --help</Code> and <Code>glimps --version</Code>.
         </P>
       </section>
 
@@ -157,12 +160,11 @@ function AboutPage() {
         <H2 id="history">Project history</H2>
         <P>
           <Glimps quiet /> is built on the proven PTY-supervisor model — the same approach used by{" "}
-          <Code>script</Code>, <Code>tmux</Code>, and ChromaTerm — rather than shell{" "}
-          <Code>preexec</Code>/<Code>precmd</Code> hooks. That choice is deliberate: a hook
-          runs before or after a command, so it can never see or transform the command's
-          output. Only the process that owns the PTY can. <Glimps quiet /> owns it, and uses OSC-133
-          shell-integration markers to find exactly where each command's output begins and
-          ends.
+          <Code>script</Code>, <Code>tmux</Code>, and ChromaTerm. The PTY owner is what can
+          safely observe and transform the output stream. Small <Code>preexec</Code>/
+          <Code>precmd</Code>-style hooks complement that supervisor by reporting trusted
+          command text, working directory, pipeline statuses, and exit code; they do not
+          transform output themselves.
         </P>
         <P>
           It ships as a single native Rust binary — no interpreter or runtime to install

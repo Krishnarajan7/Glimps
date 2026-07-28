@@ -1,4 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
+import { GitHubStars } from "@/components/ui/github-stars";
 import { GlimpsMark } from "@/components/ui/glimps-mark";
 import {
   useEffect,
@@ -10,12 +11,36 @@ import {
 
 export type TocItem = { id: string; label: string; depth?: 1 | 2 };
 
-const NAV: { group: string; items: { to: string; label: string }[] }[] = [
+/* The product name in nav labels, set in the palette's "key" cyan — the
+   same color the .glimps-word prose treatment uses. */
+function NavGlimps() {
+  return (
+    <span className="text-[oklch(0.47_0.12_210)] dark:text-[var(--color-syn-key)]">
+      GLIMPS
+    </span>
+  );
+}
+
+const NAV: { group: string; items: { to: string; label: ReactNode }[] }[] = [
   {
     group: "",
     items: [
-      { to: "/", label: "GLIMPS Home" },
-      { to: "/about", label: "About GLIMPS" },
+      {
+        to: "/",
+        label: (
+          <>
+            <NavGlimps /> Home
+          </>
+        ),
+      },
+      {
+        to: "/about",
+        label: (
+          <>
+            About <NavGlimps />
+          </>
+        ),
+      },
     ],
   },
   {
@@ -27,6 +52,66 @@ const NAV: { group: string; items: { to: string; label: string }[] }[] = [
     items: [{ to: "/features", label: "Features" }],
   },
 ];
+
+/* Nav link groups, shared by the desktop sidebar and the mobile sheet.
+   The active page carries the ▌ bar — the same mark GLIMPS paints at the
+   start of a command — so "you are here" reads in the product's own glyph. */
+function NavGroups({
+  pathname,
+  variant,
+  onNavigate,
+}: {
+  pathname: string;
+  variant: "sidebar" | "sheet";
+  onNavigate?: () => void;
+}) {
+  const sheet = variant === "sheet";
+  return (
+    <div className={sheet ? "space-y-5" : "space-y-6"}>
+      {NAV.map((g) => (
+        <div key={g.group || "root"}>
+          {g.group && (
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2 px-3">
+              {g.group}
+            </div>
+          )}
+          <ul className="space-y-0.5">
+            {g.items.map((it) => {
+              const isActive = pathname === it.to;
+              return (
+                <li key={it.to}>
+                  <Link
+                    to={it.to}
+                    onClick={onNavigate}
+                    aria-current={isActive ? "page" : undefined}
+                    className={
+                      "flex items-center rounded px-3 transition-colors " +
+                      (sheet ? "py-2.5 " : "py-1.5 ") +
+                      (isActive
+                        ? "bg-muted text-foreground"
+                        : "text-muted-foreground hover:text-foreground hover:bg-muted/60")
+                    }
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={
+                        "mr-2 inline-block w-[1ch] shrink-0 text-[var(--color-bar)]" +
+                        (isActive ? "" : " opacity-0")
+                      }
+                    >
+                      ▌
+                    </span>
+                    {it.label}
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function ThemeButton() {
   const [theme, setTheme] = useState<"light" | "dark">(() =>
@@ -66,6 +151,45 @@ export function DocsLayout({
   const [active, setActive] = useState<string>(toc[0]?.id ?? "");
   const [navOpen, setNavOpen] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+
+  // The mobile sheet overlays the page: lock the page scroll behind it,
+  // close on Escape (returning focus to the toggle), and move focus into
+  // the sheet so keyboard/screen-reader users land where the action is.
+  useEffect(() => {
+    if (!navOpen) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setNavOpen(false);
+        menuButtonRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    sheetRef.current?.focus({ preventScroll: true });
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [navOpen]);
+
+  // If the viewport crosses into desktop while the sheet is open, the sheet
+  // is display:none but the body scroll lock would linger — release it.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const onChange = () => {
+      if (mq.matches) setNavOpen(false);
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    setNavOpen(false);
+  }, [pathname]);
 
   // Only <main> scrolls on desktop, so a route change won't reset it the way a
   // normal page navigation resets the window. Scroll the article back to the top
@@ -82,20 +206,16 @@ export function DocsLayout({
   // We scroll the actual container directly (computing the target position)
   // rather than using scrollIntoView — the latter is flaky on the first click
   // inside a container that already has `scroll-behavior: smooth`.
-  const scrollToHeading = (
-    e: ReactMouseEvent<HTMLAnchorElement>,
-    id: string,
-  ) => {
+  const scrollToId = (id: string) => {
     const el = document.getElementById(id);
     if (!el) return;
-    e.preventDefault();
     const reduce =
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const behavior: ScrollBehavior = reduce ? "auto" : "smooth";
-    const offset = 24; // small breathing room above the heading
     const main = mainRef.current;
     if (main && main.scrollHeight > main.clientHeight + 1) {
+      const offset = 24; // small breathing room above the heading
       const top =
         el.getBoundingClientRect().top -
         main.getBoundingClientRect().top +
@@ -103,10 +223,32 @@ export function DocsLayout({
         offset;
       main.scrollTo({ top: Math.max(0, top), behavior });
     } else if (typeof window !== "undefined") {
+      // Window scrolling means the mobile layout, where the sticky h-14
+      // header overlays the top — clear it, plus the same breathing room.
+      const offset = 80;
       const top = el.getBoundingClientRect().top + window.scrollY - offset;
       window.scrollTo({ top: Math.max(0, top), behavior });
     }
     setActive(id);
+  };
+
+  const scrollToHeading = (
+    e: ReactMouseEvent<HTMLAnchorElement>,
+    id: string,
+  ) => {
+    e.preventDefault();
+    scrollToId(id);
+  };
+
+  // From the mobile sheet, close first and scroll on the next frames — the
+  // body scroll lock must be released before the target position is computed.
+  const sheetScrollToHeading = (
+    e: ReactMouseEvent<HTMLAnchorElement>,
+    id: string,
+  ) => {
+    e.preventDefault();
+    setNavOpen(false);
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollToId(id)));
   };
 
   // Scroll-spy for the "On this page" list. The scroll container is <main> on
@@ -213,68 +355,98 @@ export function DocsLayout({
             >
               landing
             </Link>
-            <a
-              href="https://github.com/Krishnarajan7/Glimps"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hidden sm:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-            >
-              github
-            </a>
+            <GitHubStars className="hidden sm:flex" />
             <ThemeButton />
             <button
+              ref={menuButtonRef}
               onClick={() => setNavOpen((v) => !v)}
-              className="lg:hidden px-2.5 py-1.5 rounded border text-xs"
+              className={
+                "lg:hidden px-2.5 py-1.5 rounded border text-xs transition-colors " +
+                (navOpen ? "bg-muted" : "hover:bg-muted")
+              }
               style={{ borderColor: "var(--color-border)" }}
-              aria-label="Toggle navigation"
+              aria-expanded={navOpen}
+              aria-controls="mobile-nav"
             >
-              {navOpen ? "close" : "menu"}
+              <span className="inline-block min-w-[5ch] text-center">
+                {navOpen ? "close" : "menu"}
+              </span>
             </button>
           </div>
         </div>
       </header>
 
-      <div className="lg:flex-1 lg:min-h-0">
-        <div className="mx-auto max-w-7xl h-full px-4 sm:px-6 grid grid-cols-1 lg:grid-cols-[240px_minmax(0,1fr)_220px] gap-8 lg:gap-10">
-        {/* Left nav */}
-        <aside
-          className={
-            "no-scrollbar lg:h-full lg:overflow-y-auto lg:py-10 " +
-            (navOpen ? "block py-6 border-b" : "hidden lg:block")
-          }
-          style={{ borderColor: "var(--color-border)" }}
-        >
-          <nav className="space-y-6 font-mono text-sm">
-            {NAV.map((g) => (
-              <div key={g.group || "root"}>
-                {g.group && (
-                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2 px-3">
-                    {g.group}
-                  </div>
-                )}
-                <ul className="space-y-0.5">
-                  {g.items.map((it) => {
-                    const isActive = pathname === it.to;
-                    return (
-                      <li key={it.to}>
-                        <Link
-                          to={it.to}
-                          onClick={() => setNavOpen(false)}
-                          className={
-                            "block px-3 py-1.5 rounded transition-colors " +
-                            (isActive
-                              ? "bg-muted text-foreground"
-                              : "text-muted-foreground hover:text-foreground hover:bg-muted/60")
-                          }
-                        >
-                          {it.label}
-                        </Link>
-                      </li>
-                    );
-                  })}
+      {/* Mobile nav sheet — drops from under the header over a scrim instead
+          of pushing the article down. Unmounts on close. */}
+      {navOpen && (
+        <div className="lg:hidden fixed inset-x-0 top-14 bottom-0 z-40">
+          <button
+            type="button"
+            className="nav-scrim absolute inset-0 w-full cursor-default"
+            onClick={() => setNavOpen(false)}
+            aria-label="Close navigation"
+            tabIndex={-1}
+          />
+          <div
+            id="mobile-nav"
+            ref={sheetRef}
+            tabIndex={-1}
+            className="nav-sheet relative max-h-full overflow-y-auto overscroll-contain border-b bg-[var(--color-background)] outline-none"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <nav
+              aria-label="GLIMPS docs"
+              className="px-4 sm:px-6 pt-5 pb-4 font-mono text-sm"
+            >
+              <NavGroups
+                pathname={pathname}
+                variant="sheet"
+                onNavigate={() => setNavOpen(false)}
+              />
+            </nav>
+            {toc.length > 0 && (
+              <div
+                className="border-t px-4 sm:px-6 pt-4 pb-5"
+                style={{ borderColor: "var(--color-border)" }}
+              >
+                <div className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground mb-2 px-3">
+                  On this page
+                </div>
+                <ul className="font-mono text-sm">
+                  {toc.map((t) => (
+                    <li key={t.id}>
+                      <a
+                        href={`#${t.id}`}
+                        onClick={(e) => sheetScrollToHeading(e, t.id)}
+                        className={
+                          "block rounded px-3 py-2 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors" +
+                          (t.depth === 2 ? " pl-7 text-xs" : "")
+                        }
+                      >
+                        {t.label}
+                      </a>
+                    </li>
+                  ))}
                 </ul>
               </div>
-            ))}
+            )}
+            <div
+              className="border-t px-4 sm:px-6 py-4 flex items-center justify-between font-mono text-sm"
+              style={{ borderColor: "var(--color-border)" }}
+            >
+              <GitHubStars className="flex" />
+              <span className="text-xs text-muted-foreground">docs v0.1</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="lg:flex-1 lg:min-h-0">
+        <div className="mx-auto max-w-7xl h-full px-4 sm:px-6 grid grid-cols-1 lg:grid-cols-[240px_minmax(0,1fr)_220px] gap-8 lg:gap-10">
+        {/* Left nav (desktop only — mobile uses the sheet above) */}
+        <aside className="no-scrollbar hidden lg:block lg:h-full lg:overflow-y-auto lg:py-10">
+          <nav aria-label="GLIMPS docs" className="font-mono text-sm">
+            <NavGroups pathname={pathname} variant="sidebar" />
           </nav>
         </aside>
 
@@ -402,7 +574,12 @@ export function Code({ children }: { children: ReactNode }) {
   );
 }
 
-export function Shell({ lines }: { lines: (string | { cmd: string } | { out: string })[] }) {
+type ShellLine =
+  | string
+  | { cmd: string }
+  | { out: string; tone?: "muted" | "error" | "warn" | "success" };
+
+export function Shell({ lines }: { lines: ShellLine[] }) {
   return (
     <div
       className="rounded-lg border overflow-hidden bg-[var(--color-terminal-bg)] my-2"
@@ -434,13 +611,18 @@ export function Shell({ lines }: { lines: (string | { cmd: string } | { out: str
             return (
               <div key={i}>
                 <span className="text-[var(--color-bar)]" aria-hidden="true">▌ </span>
-                <span className="text-[var(--color-syn-dim)]">$ </span>
                 <span>{l.cmd}</span>
               </div>
             );
           }
+          const tone = {
+            muted: "text-[var(--color-syn-dim)]",
+            error: "text-[var(--color-syn-error)]",
+            warn: "text-[var(--color-syn-number)]",
+            success: "text-[var(--color-syn-string)]",
+          }[l.tone ?? "muted"];
           return (
-            <div key={i} className="text-[var(--color-syn-dim)]">
+            <div key={i} className={tone}>
               {l.out}
             </div>
           );

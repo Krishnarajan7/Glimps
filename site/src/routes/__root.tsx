@@ -6,11 +6,11 @@ import { asset } from '../lib/seo'
 export const Route = createRootRoute({
   head: () => ({
     meta: [
-      { title: 'GLIMPS — zero-config smart terminal output formatter' },
+      { title: 'GLIMPS — readable terminal output, clear command failures' },
       {
         name: 'description',
         content:
-          "GLIMPS is a zero-config smart terminal output formatter. It marks where each command's output begins and colors what it can confidently recognize — JSON, logs, HTTP, diffs, stack traces, and more.",
+          'GLIMPS is a zero-config terminal formatter that structures recognized output and keeps exit status, duration, and useful failure context beside every command.',
       },
       { name: 'theme-color', content: '#1b1c22' },
       { name: 'robots', content: 'index, follow' },

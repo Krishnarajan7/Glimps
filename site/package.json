@@ -12,6 +12,9 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write ."
   },
+  "overrides": {
+    "postcss": "^8.5.18"
+  },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@fontsource/ibm-plex-sans": "^5.2.8",

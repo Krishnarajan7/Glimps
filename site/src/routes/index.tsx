@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { HeroVideoDialog } from "@/components/ui/hero-video-dialog";
+import { GitHubStars } from "@/components/ui/github-stars";
 import { Glimps } from "@/components/ui/glimps";
 import { GlimpsMark } from "@/components/ui/glimps-mark";
 import { canonical } from "@/lib/seo";
@@ -23,17 +24,17 @@ const DEMO_POSTER = "/demo-poster.svg";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "GLIMPS — your terminal output, finally readable" },
+      { title: "GLIMPS — readable terminal output, clear command failures" },
       {
         name: "description",
         content:
-          "Zero-config terminal formatter that marks where your output starts and colors what it recognizes — JSON, logs, HTTP, diffs, and more. It keeps your terminal; it just makes it legible.",
+          "Zero-config terminal formatter that structures recognized output and tells you how every command ended — with exit status, duration, and the error that mattered.",
       },
-      { property: "og:title", content: "GLIMPS — your terminal output, finally readable" },
+      { property: "og:title", content: "GLIMPS — readable output, clear failures" },
       {
         property: "og:description",
         content:
-          "A zero-config PTY-based formatter that makes everyday terminal output legible, and gets out of the way when it isn't sure.",
+          "A zero-config PTY-based formatter that makes terminal output legible, surfaces failed commands, and gets out of the way when it isn't sure.",
       },
       { property: "og:url", content: canonical("/") },
     ],
@@ -90,7 +91,6 @@ function CmdHeader({ cmd, badge, time }: { cmd: string; badge?: string; time?: s
       style={{ borderColor: "var(--color-terminal-border)" }}>
       <span className="text-[var(--color-bar)] text-lg leading-none select-none">▌</span>
       <code className="text-foreground truncate">
-        <span className="text-[var(--color-syn-dim)]">$ </span>
         {cmd}
       </code>
       {badge && (
@@ -114,22 +114,21 @@ function CmdHeader({ cmd, badge, time }: { cmd: string; badge?: string; time?: s
 }
 
 /* ------------------------------------------------------------------ */
-/*  Hero animation — a live session. Each command runs, dumps raw      */
-/*  output, then GLIMPS anchors it with the ▌ header + format badge    */
-/*  and resolves it line-by-line into color. Finished commands         */
-/*  collapse into their ▌ header rows — scrollback you can actually    */
-/*  read by command, which is the whole product in one loop.           */
+/*  Hero animation — a live session. Each command appears once, then   */
+/*  GLIMPS adds its real ▌ header, recognized formatting, and finally   */
+/*  the command status footer. Nothing morphs or collapses in a way the */
+/*  terminal product itself does not.                                  */
 /* ------------------------------------------------------------------ */
 
 type Seg = { t: string; c?: string };
 type HeroScene = {
   cmd: string;
-  badge: string;
+  badge?: string;
   time: string;
-  raw: string;
   lines: Seg[][];
+  footer: Seg[][];
 };
-type ScenePhase = "typing" | "raw" | "fmt";
+type ScenePhase = "typing" | "output" | "complete";
 
 const SYN = {
   key: "text-[var(--color-syn-key)]",
@@ -145,7 +144,6 @@ const HERO_SCENES: HeroScene[] = [
     cmd: "curl -s api.example.com/user",
     badge: "json",
     time: "14:23:01",
-    raw: '{"user":{"id":8421,"name":"Ada Lovelace","active":true,"tags":["founder","math"]},"latency_ms":38}',
     lines: [
       [{ t: "{", c: SYN.dim }],
       [{ t: "  " }, { t: '"user"', c: SYN.key }, { t: ": {", c: SYN.dim }],
@@ -157,30 +155,54 @@ const HERO_SCENES: HeroScene[] = [
       [{ t: "  " }, { t: '"latency_ms"', c: SYN.key }, { t: ": ", c: SYN.dim }, { t: "38", c: SYN.num }],
       [{ t: "}", c: SYN.dim }],
     ],
+    footer: [[{ t: "✓ done exit 0 in 38ms", c: SYN.dim }]],
+  },
+  {
+    cmd: "git push origin main",
+    time: "14:23:12",
+    lines: [
+      [{ t: "To https://github.com/example/project", c: SYN.dim }],
+      [
+        { t: " ! [rejected] ", c: SYN.num },
+        { t: "       main -> main (fetch first)" },
+      ],
+      [{ t: "error: failed to push some refs", c: SYN.err }],
+      [{ t: "hint: Updates were rejected because the remote contains work", c: SYN.dim }],
+      [{ t: "hint: that you do not have locally. Run git pull first.", c: SYN.dim }],
+    ],
+    footer: [
+      [{ t: "✗ failed exit 1 in 973ms", c: SYN.err }],
+      [
+        { t: "↳ ", c: SYN.err },
+        { t: "error: failed to push some refs", c: SYN.dim },
+        { t: "  (↑ 3 lines up)", c: SYN.dim },
+      ],
+      [{ t: "command failed: git push origin main", c: SYN.err }],
+    ],
   },
   {
     cmd: "tail -n 4 app.log",
     badge: "log",
-    time: "14:23:12",
-    raw: "14:22:01 INFO  server started on :8080\n14:22:04 WARN  cache miss key=session:8421\n14:22:06 ERROR upstream timeout after 3000ms\n14:22:07 INFO  retrying request (1/3)",
+    time: "14:23:26",
     lines: [
       [{ t: "14:22:01 ", c: SYN.dim }, { t: "INFO ", c: SYN.str }, { t: " server started on :8080" }],
       [{ t: "14:22:04 ", c: SYN.dim }, { t: "WARN ", c: SYN.num }, { t: " cache miss key=session:8421" }],
       [{ t: "14:22:06 ", c: SYN.dim }, { t: "ERROR", c: SYN.err }, { t: " upstream timeout after 3000ms" }],
       [{ t: "14:22:07 ", c: SYN.dim }, { t: "INFO ", c: SYN.str }, { t: " retrying request (1/3)" }],
     ],
+    footer: [[{ t: "✓ done exit 0 in 12ms", c: SYN.dim }]],
   },
   {
     cmd: "git diff src/api.ts",
     badge: "diff",
-    time: "14:23:26",
-    raw: "@@ -12,2 +12,3 @@\n- return fetch(url).then(r => r.json())\n+ const r = await fetch(url)\n+ if (!r.ok) throw new HttpError(r.status)",
+    time: "14:23:39",
     lines: [
       [{ t: "@@ -12,2 +12,3 @@", c: SYN.dim }],
       [{ t: "- return fetch(url).then(r => r.json())", c: SYN.err }],
       [{ t: "+ const r = await fetch(url)", c: SYN.str }],
       [{ t: "+ if (!r.ok) throw new HttpError(r.status)", c: SYN.str }],
     ],
+    footer: [[{ t: "✓ done exit 0 in 9ms", c: SYN.dim }]],
   },
 ];
 
@@ -219,10 +241,10 @@ function HeroTerminal() {
 
   useEffect(() => {
     if (reduce) return;
-    const wait = phase === "typing" ? 1100 : phase === "raw" ? 900 : 2700;
+    const wait = phase === "typing" ? 1000 : phase === "output" ? 1600 : 2200;
     const t = setTimeout(() => {
-      if (phase === "typing") setPhase("raw");
-      else if (phase === "raw") setPhase("fmt");
+      if (phase === "typing") setPhase("output");
+      else if (phase === "output") setPhase("complete");
       else {
         setScene((s) => (s + 1) % HERO_SCENES.length);
         setPhase("typing");
@@ -232,35 +254,17 @@ function HeroTerminal() {
   }, [phase, scene, reduce]);
 
   const active = HERO_SCENES[reduce ? 0 : scene];
-  const history = reduce ? [] : HERO_SCENES.slice(0, scene);
-  const shownPhase: ScenePhase = reduce ? "fmt" : phase;
+  const shownPhase: ScenePhase = reduce ? "complete" : phase;
 
   return (
     <TerminalFrame title="~/glimps — glimps session">
       <p className="sr-only">
-        Animated demo: commands run in a terminal, and GLIMPS marks each one
-        with a ▌ header and formats its output — JSON, logs, and diffs.
+        Animated demo: commands run in a terminal, and GLIMPS marks each one with
+        a ▌ header, formats recognized output, and reports how the command ended.
       </p>
-      <div aria-hidden="true" className="h-[310px] sm:h-[330px] overflow-hidden">
-        {/* Finished commands, collapsed to their ▌ anchors */}
-        <AnimatePresence initial={false}>
-          {history.map((s) => (
-            <motion.div
-              key={s.cmd}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, height: 0 }}
-              className="flex items-center gap-2 px-4 py-1.5 border-b border-dashed"
-              style={{ borderColor: "var(--color-terminal-border)" }}
-            >
-              <span className="text-[var(--color-bar)] select-none">▌</span>
-              <code className={"truncate " + SYN.dim}>$ {s.cmd}</code>
-              <FormatBadge label={s.badge} />
-              <span className={"ml-auto shrink-0 text-[10px] " + SYN.dim}>{s.time}</span>
-            </motion.div>
-          ))}
-        </AnimatePresence>
-
+      {/* Tall enough for the tallest scene (JSON, ~328px) at every width —
+          anything shorter crops the ✓ status footer on phones. */}
+      <div aria-hidden="true" className="h-[330px] overflow-hidden">
         {/* Active command: prompt line */}
         <div className="px-4 pt-3 pb-1">
           <code>
@@ -283,21 +287,9 @@ function HeroTerminal() {
         {/* Active command: output area */}
         <div className="px-4 pb-3">
           <AnimatePresence mode="wait">
-            {shownPhase === "raw" && (
-              <motion.pre
-                key={"raw-" + scene}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.14 }}
-                className={"whitespace-pre-wrap break-all " + SYN.dim}
-              >
-                {active.raw}
-              </motion.pre>
-            )}
-            {shownPhase === "fmt" && (
+            {shownPhase !== "typing" && (
               <motion.div
-                key={"fmt-" + scene}
+                key={"output-" + scene}
                 initial={reduce ? false : "hidden"}
                 animate="show"
                 exit={{ opacity: 0, transition: { duration: 0.12 } }}
@@ -307,17 +299,10 @@ function HeroTerminal() {
                 <motion.div variants={heroLineV} className="flex items-center gap-2 pb-1">
                   <span className="text-[var(--color-bar)] font-bold select-none">▌</span>
                   <code className={"truncate " + SYN.dim}>{active.cmd}</code>
-                  <FormatBadge label={active.badge} />
+                  {active.badge && <FormatBadge label={active.badge} />}
                   <span className={"ml-auto shrink-0 text-[10px] " + SYN.dim}>{active.time}</span>
                 </motion.div>
-                <div className="relative pl-3.5">
-                  <motion.div
-                    className="absolute left-0.5 top-0.5 bottom-0.5 w-[3px] rounded-full origin-top"
-                    style={{ background: "var(--color-bar)" }}
-                    initial={reduce ? false : { scaleY: 0 }}
-                    animate={{ scaleY: 1 }}
-                    transition={{ duration: 0.45, ease: "easeOut" }}
-                  />
+                <div>
                   {active.lines.map((ln, i) => (
                     <motion.div key={i} variants={heroLineV} className="whitespace-pre">
                       {ln.map((seg, j) => (
@@ -327,6 +312,25 @@ function HeroTerminal() {
                       ))}
                     </motion.div>
                   ))}
+                  <AnimatePresence>
+                    {shownPhase === "complete" && (
+                      <motion.div
+                        initial={reduce ? false : { opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="mt-2"
+                      >
+                        {active.footer.map((ln, i) => (
+                          <div key={i} className="whitespace-pre">
+                            {ln.map((seg, j) => (
+                              <span key={j} className={seg.c}>
+                                {seg.t}
+                              </span>
+                            ))}
+                          </div>
+                        ))}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               </motion.div>
             )}
@@ -387,7 +391,7 @@ function Nav({ theme, onToggle }: { theme: "light" | "dark"; onToggle: () => voi
           <Link to="/about" className="hidden sm:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">about</Link>
           <Link to="/features" className="hidden sm:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">features</Link>
           <Link to="/installation" className="px-2.5 sm:px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">install</Link>
-          <a href="https://github.com/Krishnarajan7/Glimps" target="_blank" rel="noopener noreferrer" className="hidden md:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">github</a>
+          <GitHubStars className="hidden md:flex" />
           <button
             onClick={onToggle}
             aria-label="Toggle theme"
@@ -563,7 +567,7 @@ function InstallBlock({ label, cmd }: { label: string; cmd: string }) {
       >
         <div className="flex items-start gap-3 px-4 py-3 pr-14">
           <span className="text-[var(--color-bar)] leading-6 select-none">▌</span>
-          <code className="flex-1 min-w-0 overflow-x-auto whitespace-pre pb-1">
+          <code className="flex-1 min-w-0 whitespace-pre-wrap break-all pb-1">
             {lines.map((line, i) => (
               <span key={i} className="block">
                 <span className="text-[var(--color-syn-dim)]">$ </span>
@@ -604,7 +608,7 @@ function Landing() {
 
       {/* HERO */}
       <section className="relative z-[1] mx-auto max-w-7xl px-4 sm:px-6 pt-10 sm:pt-16 md:pt-24 pb-14 sm:pb-20">
-        <div className="grid lg:grid-cols-2 gap-10 sm:gap-12 items-center">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 sm:gap-12 items-center">
           <div>
             <div className="inline-flex items-center gap-2 font-mono text-xs text-muted-foreground mb-5 sm:mb-6">
               <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span>
@@ -620,9 +624,9 @@ function Landing() {
               </span>
             </h1>
             <p className="mt-5 sm:mt-6 text-base md:text-lg text-muted-foreground max-w-xl leading-relaxed">
-              Zero-config formatter that marks where your output starts and colors what it
-              recognizes — JSON, logs, HTTP, diffs, and more. It keeps your terminal;
-              it just makes it legible.
+              Zero-config formatter that structures what it recognizes and tells you how
+              every command ended — exit status, duration, and the error that mattered.
+              It keeps your terminal; it just makes it legible.
             </p>
             <div className="mt-7 sm:mt-8 flex flex-wrap gap-3">
               <a
@@ -680,7 +684,7 @@ function Landing() {
       {/* PROBLEM */}
       <section className="relative z-[1] border-t" style={{ borderColor: "var(--color-border)" }}>
         <div className="mx-auto max-w-7xl px-4 sm:px-6 py-14 sm:py-20">
-          <div className="grid md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
             <div>
               <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
                 <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> the problem
@@ -718,7 +722,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
               <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> the transform
             </div>
             <h2 className="font-mono text-2xl md:text-3xl font-semibold leading-tight">
-              Same bytes. Now legible.
+              Same data. Now legible.
             </h2>
             <p className="mt-4 text-muted-foreground leading-relaxed">
               <Glimps /> recognizes what your commands emit and reformats it in place — with the
@@ -728,7 +732,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
             </p>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <JsonMiniCard />
             <LogsCard />
             <HttpCard />
@@ -739,10 +743,75 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
         </div>
       </section>
 
+      {/* FAILURE INTELLIGENCE */}
+      <section className="relative z-[1] border-t" style={{ borderColor: "var(--color-border)" }}>
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 py-14 sm:py-20">
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
+            <div>
+              <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
+                <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span>{" "}
+                failure intelligence
+              </div>
+              <h2 className="font-mono text-2xl md:text-3xl font-semibold leading-tight">
+                Know exactly how every command ended.
+              </h2>
+              <p className="mt-4 text-muted-foreground leading-relaxed">
+                <Glimps /> attaches the result to the output that produced it: exit status,
+                duration, and the most useful error line. Signals and negated commands are
+                explained without turning every non-zero status into a red alarm.
+              </p>
+              <div className="mt-6 grid gap-3 text-sm">
+                {[
+                  "Pins the error that mattered, even when it scrolled away.",
+                  "Decodes common exit codes and process signals.",
+                  "Warns when an earlier pipeline stage failed behind exit 0.",
+                  "Treats Ctrl-C and common SIGPIPE exits as neutral notices.",
+                ].map((item) => (
+                  <div key={item} className="flex gap-3">
+                    <span className="font-mono text-[var(--color-syn-number)]">✓</span>
+                    <span className="text-muted-foreground">{item}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <TerminalFrame title="~/project — git push">
+              <CmdHeader cmd="git push origin main" time="16:30:06" />
+              <div className="px-4 py-3 font-mono text-[13px] leading-6 overflow-x-auto">
+                <div className="text-[var(--color-syn-dim)]">
+                  To https://github.com/example/project
+                </div>
+                <div>
+                  <span className="text-[var(--color-syn-number)]"> ! [rejected] </span>
+                  <span>main -&gt; main (fetch first)</span>
+                </div>
+                <div className="text-[var(--color-syn-error)]">
+                  error: failed to push some refs
+                </div>
+                <div className="text-[var(--color-syn-dim)]">
+                  hint: Updates were rejected because the remote contains work.
+                </div>
+                <div className="mt-2 text-[var(--color-syn-error)]">
+                  ✗ failed exit 1 in 973ms
+                </div>
+                <div>
+                  <span className="text-[var(--color-syn-error)]">↳ </span>
+                  <span className="text-muted-foreground">error: failed to push some refs</span>
+                  <span className="text-[var(--color-syn-dim)]"> (↑ 2 lines up)</span>
+                </div>
+                <div className="text-[var(--color-syn-error)]">
+                  command failed: git push origin main
+                </div>
+              </div>
+            </TerminalFrame>
+          </div>
+        </div>
+      </section>
+
       {/* GETS OUT OF THE WAY */}
       <section className="relative z-[1] border-t" style={{ borderColor: "var(--color-border)" }}>
         <div className="mx-auto max-w-7xl px-4 sm:px-6 py-14 sm:py-20">
-          <div className="grid md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
             <div>
               <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
                 <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> it gets out of the way
@@ -798,13 +867,13 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
             </p>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-px rounded-lg overflow-hidden border"
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-px rounded-lg overflow-hidden border"
             style={{ borderColor: "var(--color-border)", background: "var(--color-border)" }}>
             {[
               {
                 k: "01",
-                t: "Nothing logged, stored, or transmitted.",
-                d: "No telemetry, ever. Output is formatted in memory and streamed back to your terminal.",
+                t: "Nothing persistently logged or transmitted.",
+                d: "No telemetry, cache, or output logs. A private temporary metadata channel is removed when the session ends.",
               },
               {
                 k: "02",
@@ -837,7 +906,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
       {/* INSTALL */}
       <section id="install" className="relative z-[1] border-t" style={{ borderColor: "var(--color-border)" }}>
         <div className="mx-auto max-w-7xl px-4 sm:px-6 py-14 sm:py-20">
-          <div className="grid md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-10 items-start">
             <div>
               <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
                 <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span> get started

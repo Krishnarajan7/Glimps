@@ -20,13 +20,13 @@ export const Route = createFileRoute("/features")({
       {
         name: "description",
         content:
-          "Every format GLIMPS recognizes, the guarantees it offers, and the behavior you can rely on. JSON, logs, HTTP, diffs, stack traces, tables, and the pass-through rules.",
+          "Every format GLIMPS recognizes, plus command exit status, duration, pinned errors, pipeline warnings, and the pass-through guarantees you can rely on.",
       },
       { property: "og:title", content: "GLIMPS Features" },
       {
         property: "og:description",
         content:
-          "The full list of formats GLIMPS recognizes and the behavior you can rely on.",
+          "Recognized formats, failure intelligence, and the behavior you can rely on.",
       },
       { property: "og:url", content: canonical("/features") },
     ],
@@ -45,6 +45,7 @@ const toc: TocItem[] = [
   { id: "stack", label: "Stack traces", depth: 2 },
   { id: "tables", label: "Small tables", depth: 2 },
   { id: "command-aware", label: "Command-aware", depth: 2 },
+  { id: "failure-intelligence", label: "Failure intelligence" },
   { id: "bar", label: "The ▌ command bar" },
   { id: "passthrough", label: "Pass-through rules" },
   { id: "kill-switch", label: "Kill switch" },
@@ -60,7 +61,7 @@ function FeaturesPage() {
       intro={
         <>
           The features <Glimps quiet /> supports and the promises it keeps. Everything here is
-          on by default — there is nothing to configure.
+          on by default, with optional controls when you want them.
         </>
       }
       toc={toc}
@@ -72,6 +73,11 @@ function FeaturesPage() {
           below.
         </P>
         <UL>
+          <li>
+            <b>Failure intelligence.</b> Every visible command result carries its exit
+            status and duration; failures can pin the most useful error line and explain
+            common exit codes.
+          </li>
           <li>
             <b>Command bar.</b> A <Code>▌</Code> is drawn at the start of every command's
             output so scrollback has visible anchors.
@@ -176,17 +182,65 @@ function FeaturesPage() {
             everyday commands and files and formats them accordingly: Git (
             <Code>status</Code>, <Code>branch</Code>, <Code>log</Code>, <Code>stat</Code>),
             CSV/TSV, SQL, config files (YAML, TOML, INI, dotenv), JSON-lines (
-            <Code>.jsonl</Code>), source-code files shown through reader commands (
-            <Code>cat</Code>, <Code>head</Code>), directory and system tools (
+            <Code>.jsonl</Code>), <Code>.gitleaksignore</Code> fingerprints, source-code
+            files shown through reader commands (<Code>cat</Code>, <Code>head</Code>),
+            Kubernetes pod tables (<Code>kubectl get pods</Code>), directory and system tools (
             <Code>ls</Code>, <Code>find</Code>, <Code>du</Code>, <Code>df</Code>,{" "}
-            <Code>ps</Code>, <Code>dig</Code>), <Code>man</Code>/help output, and Markdown
-            files.
+            <Code>ps</Code>, <Code>dig</Code>), macOS networking and service status,
+            <Code>man</Code>/help output, and Markdown files.
           </P>
           <P>
             Every formatter is on by default with zero config, and each can be toggled
             individually under <Code>[formatters]</Code> in <Code>~/.glimpsrc</Code>.
           </P>
         </div>
+      </section>
+
+      <section className="space-y-4">
+        <H2 id="failure-intelligence">Failure intelligence</H2>
+        <P>
+          <Glimps quiet /> keeps the result beside the output that produced it. A visible
+          command ends with its exit code and duration. Real failures stay loud; ordinary
+          success stays dim or can be hidden with <Code>on_success = "off"</Code>.
+        </P>
+        <Shell
+          lines={[
+            { cmd: "git push origin main" },
+            { out: "error: failed to push some refs", tone: "error" },
+            { out: "✗ failed exit 1 in 973ms", tone: "error" },
+            { out: "↳ error: failed to push some refs  (↑ 5 lines up)" },
+            { out: "command failed: git push origin main", tone: "error" },
+          ]}
+        />
+        <UL>
+          <li>
+            <b>Error pinning.</b> On failure, the strongest high-confidence diagnostic is
+            repeated under the footer, with a distance hint when it appeared farther up.
+          </li>
+          <li>
+            <b>Exit-code explanations.</b> Common cases such as command-not-found,
+            permission errors, timeouts, and portable process signals get a factual
+            one-line explanation.
+          </li>
+          <li>
+            <b>Neutral user actions.</b> Ctrl-C, SIGTERM, and common SIGPIPE exits are
+            notices rather than red failures. A successful command prefixed with{" "}
+            <Code>!</Code> is identified as a negated result instead of being blamed.
+          </li>
+          <li>
+            <b>Pipeline awareness.</b> If an earlier stage fails while the final stage
+            returns zero, <Glimps quiet /> warns which stage failed without changing your
+            shell's pipefail behavior.
+          </li>
+        </UL>
+        <Callout title="decode, don't diagnose">
+          GLIMPS explains only what the shell status and observed output support. It does
+          not invent a root cause.
+        </Callout>
+        <P>
+          The <Code>[failures]</Code> section in <Code>~/.glimpsrc</Code> controls the
+          footer, success visibility, explanations, and error pinning independently.
+        </P>
       </section>
 
       <section className="space-y-4">
@@ -263,8 +317,9 @@ function FeaturesPage() {
         <UL>
           <li>No telemetry, ever. No network calls.</li>
           <li>
-            Nothing is written to disk. <Glimps quiet /> only ever (optionally) reads your{" "}
-            <Code>~/.glimpsrc</Code> config — no state directory, no cache, no logs.
+            No persistent state, cache, or output logs. A private temporary metadata
+            channel carries trusted command boundaries and is removed when the session
+            exits.
           </li>
           <li>Your terminal is restored on exit, even after a crash.</li>
           <li>Copy/paste from your terminal yields exactly the bytes you see.</li>

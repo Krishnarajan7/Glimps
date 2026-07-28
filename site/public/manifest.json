@@ -1,7 +1,7 @@
 {
   "short_name": "GLIMPS",
-  "name": "GLIMPS — zero-config smart terminal output formatter",
-  "description": "Marks where each command's output begins and colors what it can confidently recognize — JSON, logs, HTTP, diffs, stack traces, and more.",
+  "name": "GLIMPS — readable terminal output, clear command failures",
+  "description": "Structures recognized terminal output and keeps exit status, duration, and useful failure context beside every command.",
   "icons": [
     {
       "src": "favicon.svg",

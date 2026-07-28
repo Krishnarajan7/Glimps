@@ -68,7 +68,11 @@ function InstallPage() {
       <section className="space-y-4">
         <H2 id="requirements">Requirements</H2>
         <UL>
-          <li>macOS (Apple Silicon or Intel), or any recent Linux distribution.</li>
+          <li>
+            macOS (Apple Silicon is the primary beta path; Intel artifacts are
+            configured but clean-machine verification is pending), or a recent Linux
+            distribution.
+          </li>
           <li>
             An interactive shell: zsh, or bash 3.2+ (the macOS system bash works).
           </li>
@@ -81,8 +85,8 @@ function InstallPage() {
             .
           </li>
           <li>
-            Any terminal with basic ANSI color — GLIMPS emits standard 16-color output,
-            so nothing special is required.
+            A modern terminal with ANSI SGR color support. GLIMPS uses standard 256-color
+            and truecolor sequences, with a no-color mode available.
           </li>
         </UL>
       </section>
@@ -109,8 +113,9 @@ function InstallPage() {
         <div className="space-y-3">
           <H3 id="macos">macOS</H3>
           <P>
-            Apple Silicon and Intel are identical — the same <Code>cargo install --path .</Code>{" "}
-            from a checkout, no arch-specific steps.
+            Apple Silicon and Intel use the same <Code>cargo install --path .</Code>{" "}
+            command with no arch-specific steps. Apple Silicon is the primary beta
+            path; physical Intel verification is still pending.
           </P>
         </div>
 
@@ -258,10 +263,10 @@ function InstallPage() {
 
         <H3 id="ts-colors">Colors look wrong</H3>
         <P>
-          GLIMPS uses standard 16-color ANSI, so the exact hues come from your terminal's
-          color theme — adjust the palette there if a color reads badly. If you'd rather
-          skip color entirely, set <Code>color = false</Code> in <Code>~/.glimpsrc</Code>{" "}
-          for a structure-only, no-color mode.
+          GLIMPS uses ANSI 256-color and truecolor sequences, so use a modern terminal with
+          color support and check any terminal-level color overrides. If you'd rather skip
+          color entirely, set <Code>color = false</Code> in <Code>~/.glimpsrc</Code> for a
+          structure-only, no-color mode.
         </P>
 
         <H3 id="ts-disable">Turn it off temporarily</H3>
