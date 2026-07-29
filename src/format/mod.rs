@@ -735,12 +735,16 @@ impl Formatter {
         line.push(b'\n');
         push_crlf(out, &line);
 
-        // The pinned error line (F3): quote the most telling line of the
-        // failed output right here, with a how-far-up hint, so nobody has
-        // to scroll a wall to find it. Failure class only — a Ctrl-C's
-        // output is not an error to hunt for.
+        // The pinned error line (F3): quote the most telling line only when it
+        // is far enough up to require hunting. Repeating the line immediately
+        // above this footer turns a concise failure into noisy duplication.
+        // Failure class only — a Ctrl-C's output is not an error to hunt for.
         if status.class == ExitClass::Failure && self.config.failures.pin_errors {
-            if let Some(pinned) = self.pin.take() {
+            if let Some(pinned) = self
+                .pin
+                .take()
+                .filter(|pinned| pinned.lines_up >= MIN_PIN_LINES_UP)
+            {
                 let mut quote = Vec::new();
                 quote.extend_from_slice(self.theme.error.as_bytes());
                 quote.extend_from_slice("\u{21b3} ".as_bytes()); // ↳
@@ -751,15 +755,11 @@ impl Formatter {
                 let text = cmdline::sanitize_display(&pinned.text);
                 quote.extend_from_slice(&truncate_display(&text, PIN_DISPLAY_CAP));
                 quote.extend_from_slice(reset.as_bytes());
-                // The distance hint only earns its ink when the error is
-                // actually far away.
-                if pinned.lines_up >= 3 {
-                    quote.extend_from_slice(self.theme.debug.as_bytes());
-                    quote.extend_from_slice(
-                        format!("  (\u{2191} {} lines up)", pinned.lines_up).as_bytes(),
-                    );
-                    quote.extend_from_slice(reset.as_bytes());
-                }
+                quote.extend_from_slice(self.theme.debug.as_bytes());
+                quote.extend_from_slice(
+                    format!("  (\u{2191} {} lines up)", pinned.lines_up).as_bytes(),
+                );
+                quote.extend_from_slice(reset.as_bytes());
                 quote.push(b'\n');
                 push_crlf(out, &quote);
             }
@@ -804,7 +804,11 @@ impl Formatter {
         push_crlf(out, &line);
 
         if self.config.failures.pin_errors {
-            if let Some(pinned) = self.pin.take() {
+            if let Some(pinned) = self
+                .pin
+                .take()
+                .filter(|pinned| pinned.lines_up >= MIN_PIN_LINES_UP)
+            {
                 let mut quote = Vec::new();
                 quote.extend_from_slice(self.theme.warn.as_bytes());
                 quote.extend_from_slice("\u{21b3} ".as_bytes()); // ↳
@@ -813,13 +817,11 @@ impl Formatter {
                 let text = cmdline::sanitize_display(&pinned.text);
                 quote.extend_from_slice(&truncate_display(&text, PIN_DISPLAY_CAP));
                 quote.extend_from_slice(reset.as_bytes());
-                if pinned.lines_up >= 3 {
-                    quote.extend_from_slice(self.theme.debug.as_bytes());
-                    quote.extend_from_slice(
-                        format!("  (\u{2191} {} lines up)", pinned.lines_up).as_bytes(),
-                    );
-                    quote.extend_from_slice(reset.as_bytes());
-                }
+                quote.extend_from_slice(self.theme.debug.as_bytes());
+                quote.extend_from_slice(
+                    format!("  (\u{2191} {} lines up)", pinned.lines_up).as_bytes(),
+                );
+                quote.extend_from_slice(reset.as_bytes());
                 quote.push(b'\n');
                 push_crlf(out, &quote);
             }
@@ -1591,6 +1593,10 @@ fn command_requests_help(command: &[u8]) -> bool {
 /// Longest pinned-error quote in the failure footer. One readable line; the
 /// full text is still right there in the scrollback.
 const PIN_DISPLAY_CAP: usize = 160;
+
+/// An error must be at least this many complete output lines above the footer
+/// before repeating it helps more than it duplicates nearby information.
+const MIN_PIN_LINES_UP: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PipelineWarning {

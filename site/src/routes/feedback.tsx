@@ -3,13 +3,16 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   DocsLayout,
   H2,
+  H3,
   P,
+  UL,
   Callout,
   Code,
   type TocItem,
 } from "../components/DocsLayout";
 import { canonical } from "@/lib/seo";
 import { Glimps } from "@/components/ui/glimps";
+import { GitHubIssues } from "@/components/ui/github-issues";
 
 export const Route = createFileRoute("/feedback")({
   head: () => ({
@@ -18,7 +21,7 @@ export const Route = createFileRoute("/feedback")({
       {
         name: "description",
         content:
-          "Rate GLIMPS out of 5 stars and tell us what worked, what broke, and what's missing. Every review goes straight to the maintainer.",
+          "Rate GLIMPS out of 5 stars, send feedback straight to the maintainer, or go further — pick up a good first issue and become a contributor.",
       },
       { property: "og:title", content: "GLIMPS feedback" },
       {
@@ -37,6 +40,8 @@ const toc: TocItem[] = [
   { id: "rating", label: "Rating" },
   { id: "send", label: "Send feedback" },
   { id: "reviews", label: "Reviews from this device" },
+  { id: "contribute", label: "Become a contributor" },
+  { id: "open-issues", label: "Open issues", depth: 2 },
   { id: "privacy", label: "Where it goes" },
 ];
 
@@ -235,7 +240,12 @@ function FeedbackPage() {
         <>
           <Glimps quiet /> is built in the open, and reviews are how it gets
           better. Rate it out of 5, say what worked and what broke — every
-          submission lands directly in the maintainer's inbox.
+          submission lands directly in the maintainer's inbox. And if you'd
+          rather fix things than describe them,{" "}
+          <a href="#contribute" className="underline">
+            become a contributor
+          </a>
+          .
         </>
       }
       toc={toc}
@@ -403,6 +413,71 @@ function FeedbackPage() {
             ))}
           </ul>
         )}
+      </section>
+
+      <section className="space-y-4">
+        <H2 id="contribute">Become a contributor</H2>
+        <P>
+          Reviews shape <Glimps quiet />; code moves it. The project is a Rust
+          codebase built in the open, and it's deliberately structured so a
+          newcomer can land a real change: most open work is adding coloring
+          for a specific command's output, and every formatter follows the same
+          established pattern — a detector, a formatter, golden-file tests, and
+          a property test proving byte-safety.
+        </P>
+        <UL>
+          <li>
+            Start at{" "}
+            <a
+              href="https://github.com/Krishnarajan7/Glimps/issues/1"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
+              issue #1 — "Start contributing to GLIMPS"
+            </a>
+            , the guided entry point for first-time contributors.
+          </li>
+          <li>
+            Read{" "}
+            <a
+              href="https://github.com/Krishnarajan7/Glimps/blob/main/CONTRIBUTING.md"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
+              CONTRIBUTING.md
+            </a>{" "}
+            for the dev setup, the safety invariants, and what a PR needs to
+            pass review.
+          </li>
+          <li>
+            Pick an issue below, comment on it to claim it, and open a PR —
+            small, focused changes are preferred over big ones.
+          </li>
+        </UL>
+        <Callout title="safety first">
+          <Glimps quiet /> sits between you and everything your terminal shows,
+          so issues labeled <Code>safety</Code> touch a hard invariant: never
+          corrupt the terminal, never drop or reorder bytes. The tests enforce
+          this — the pattern to follow is already in the codebase.
+        </Callout>
+
+        <H3 id="open-issues">Open issues</H3>
+        <P>
+          These are live from GitHub — every one of them is currently labeled{" "}
+          <Code>good first issue</Code>. The full list is on the{" "}
+          <a
+            href="https://github.com/Krishnarajan7/Glimps/issues"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline"
+          >
+            issue tracker
+          </a>
+          .
+        </P>
+        <GitHubIssues />
       </section>
 
       <section className="space-y-4">

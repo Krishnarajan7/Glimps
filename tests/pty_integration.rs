@@ -537,10 +537,11 @@ fn failed_command_footer_pins_the_error_line_end_to_end() {
     let zdot = ZdotDir::new();
     let mut s = spawn(&zsh, Some(zdot.path()));
     assert_prompt_ready(&s);
-    // An ERROR-severity line followed by a failing exit: the footer must
-    // quote the line under the status (the `↳ ` prefix is GLIMPS's — it
-    // distinguishes the pin from the original output line above it).
-    s.write(b"printf 'ERROR connection reset by peer\\n'; false\n");
+    // An ERROR-severity line buried by later context: the footer must quote the
+    // line under the status (the `↳ ` prefix is GLIMPS's) so it is easy to find.
+    s.write(
+        b"printf 'ERROR connection reset by peer\\ncontext one\\ncontext two\\ncontext three\\n'; false\n",
+    );
     // Colored mode interleaves ANSI between the `↳ ` marker and the quoted
     // text, so assert the two pieces separately: the pin marker, and the
     // quote in the muted pin color (the original output line above it is

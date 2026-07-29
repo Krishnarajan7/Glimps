@@ -18,7 +18,7 @@ import { canonical } from "@/lib/seo";
 /*  DEMO_POSTER: a 16:9 image in /public shown before play. Swap      */
 /*    /demo-poster.svg for a real screenshot (e.g. /demo-poster.png). */
 /* ------------------------------------------------------------------ */
-const DEMO_VIDEO_SRC = "https://www.youtube.com/embed/qh3NGpYRG3I"; // TODO: real GLIMPS demo
+const DEMO_VIDEO_SRC = "https://www.youtube.com/embed/7_5hzxcg3e0"; // GLIMPS explainer (youtu.be/7_5hzxcg3e0)
 const DEMO_POSTER = "/demo-poster.svg";
 
 export const Route = createFileRoute("/")({

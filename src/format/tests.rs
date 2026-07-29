@@ -928,7 +928,11 @@ fn pipeline_stage_failure_warns_even_when_final_exit_is_zero() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("pipeline stage failed: stage 1 exit 1; final exit 0 in "));
-    assert!(s.contains("\u{21b3} find: illegal option -- m"));
+    assert!(
+        !s.contains('\u{21b3}'),
+        "an error only two lines above the warning should not be repeated: {s:?}"
+    );
+    assert!(s.contains("find: illegal option -- m"));
     assert!(!s.contains("done exit 0"));
     assert!(!s.contains("command failed: find -maxdepth"));
 }
@@ -1188,7 +1192,7 @@ fn failed_colored_cargo_build_pins_the_error_line() {
 }
 
 #[test]
-fn failed_python_script_pins_the_final_exception() {
+fn failed_python_script_does_not_repeat_the_visible_final_exception() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
         return;
@@ -1202,15 +1206,18 @@ fn failed_python_script_pins_the_final_exception() {
     out.extend_from_slice(&f.process(b"ValueError: broken config\n"));
     out.extend_from_slice(&f.process(D1));
     let s = String::from_utf8_lossy(&out);
-    assert!(s.contains("\u{21b3} ValueError: broken config \u{2192} app.py:7"));
-    // The exception was the last line: no distance hint.
-    assert!(!s.contains("lines up"));
+    assert!(s.contains("ValueError: broken config"));
+    assert!(
+        !s.contains('\u{21b3}'),
+        "the final exception is already visible directly above the footer: {s:?}"
+    );
 }
 
 #[test]
-fn pin_is_failure_only_never_success_or_notice() {
-    // The same ERROR line in the output; only a Failure exit quotes it.
-    for (marker, expect_pin) in [(d_exit(1), true), (d_exit(0), false), (d_exit(130), false)] {
+fn nearby_error_is_never_repeated_for_any_exit_class() {
+    // The same ERROR line is directly above the footer in every case. Even a
+    // real failure should not quote information that is already in view.
+    for marker in [d_exit(1), d_exit(0), d_exit(130)] {
         let mut f = Formatter::new();
         if !f.is_enabled() {
             return;
@@ -1222,10 +1229,9 @@ fn pin_is_failure_only_never_success_or_notice() {
         out.extend_from_slice(&f.process(b"ERROR connection reset by peer\n"));
         out.extend_from_slice(&f.process(&marker));
         let s = String::from_utf8_lossy(&out);
-        assert_eq!(
-            s.contains('\u{21b3}'),
-            expect_pin,
-            "exit marker {marker:?}: {s:?}"
+        assert!(
+            !s.contains('\u{21b3}'),
+            "nearby error was needlessly repeated for marker {marker:?}: {s:?}"
         );
     }
 }
@@ -1303,6 +1309,7 @@ fn pinned_line_is_truncated_on_a_char_boundary() {
     out.extend_from_slice(&f.process(&cmd_marker(b"make")));
     out.extend_from_slice(&f.process(C));
     out.extend_from_slice(&f.process(&long));
+    out.extend_from_slice(&f.process(b"context one\ncontext two\ncontext three\n"));
     out.extend_from_slice(&f.process(D1));
     let s = String::from_utf8_lossy(&out);
     let pin_line = s
@@ -1310,8 +1317,8 @@ fn pinned_line_is_truncated_on_a_char_boundary() {
         .find(|l| l.contains('\u{21b3}'))
         .expect("pin line present");
     assert!(
-        pin_line.ends_with('\u{2026}'),
-        "truncated with …: {pin_line:?}"
+        pin_line.contains("\u{2026}  (\u{2191} 3 lines up)"),
+        "truncated with … before the distance hint: {pin_line:?}"
     );
     assert!(
         !pin_line.contains('\u{fffd}'),
