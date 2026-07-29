@@ -51,6 +51,10 @@ const NAV: { group: string; items: { to: string; label: ReactNode }[] }[] = [
     group: "Reference",
     items: [{ to: "/features", label: "Features" }],
   },
+  {
+    group: "Community",
+    items: [{ to: "/feedback", label: "Feedback" }],
+  },
 ];
 
 /* Nav link groups, shared by the desktop sidebar and the mobile sheet.
@@ -453,6 +457,7 @@ export function DocsLayout({
         {/* Main article */}
         <main
           ref={mainRef}
+          id="docs-main"
           className="no-scrollbar smooth-scroll min-w-0 lg:h-full lg:overflow-y-auto py-8 lg:py-14"
         >
           <div className="flex items-center gap-2 font-mono text-xs text-muted-foreground mb-6">

@@ -391,6 +391,7 @@ function Nav({ theme, onToggle }: { theme: "light" | "dark"; onToggle: () => voi
           <Link to="/about" className="hidden sm:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">about</Link>
           <Link to="/features" className="hidden sm:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">features</Link>
           <Link to="/installation" className="px-2.5 sm:px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">install</Link>
+          <Link to="/feedback" className="hidden sm:inline px-3 py-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">feedback</Link>
           <GitHubStars className="hidden md:flex" />
           <button
             onClick={onToggle}
@@ -971,6 +972,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
           <div className="flex items-center gap-4 text-sm font-mono text-muted-foreground">
             <a href="https://github.com/Krishnarajan7/Glimps" target="_blank" rel="noopener noreferrer" className="hover:text-foreground transition-colors">github</a>
             <Link to="/about" className="hover:text-foreground transition-colors">docs</Link>
+            <Link to="/feedback" className="hover:text-foreground transition-colors">feedback</Link>
             <span className="text-[var(--color-syn-dim)]">MIT</span>
           </div>
         </div>

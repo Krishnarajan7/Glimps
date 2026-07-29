@@ -16,6 +16,13 @@ const router = createRouter({
   routeTree,
   defaultPreload: 'intent',
   scrollRestoration: true,
+  // The docs article scrolls in its own <main id="docs-main"> container on
+  // desktop, not the window. Without this, the router's scroll restoration
+  // carries that container's scroll offset over to the next page (its element
+  // selector is identical on every docs route), so navigating between docs
+  // pages landed mid-page. Listing it here excludes it from that carry-over
+  // and resets it to the top on every navigation.
+  scrollToTopSelectors: ['#docs-main'],
 })
 
 declare module '@tanstack/react-router' {
