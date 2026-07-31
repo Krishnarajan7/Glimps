@@ -529,6 +529,71 @@ fn zsh_tab_completion_still_reaches_the_inner_shell() {
 }
 
 #[test]
+fn no_newline_interactive_prompt_is_visible_before_reply() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+
+    // Keep the expected prompt text non-contiguous in the typed command so the
+    // assertion cannot accidentally match terminal echo or GLIMPS's header.
+    s.write(b"printf 'INTERACTIVE_%s' 'QUESTION_VISIBLE'; read reply\n");
+    assert!(
+        s.wait_for(b"INTERACTIVE_QUESTION_VISIBLE", FORMAT_BUDGET),
+        "no-newline prompt stayed hidden while the command waited for input: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"n\n");
+    assert!(
+        s.wait_for(b"done exit 0", FORMAT_BUDGET),
+        "shell did not resume after answering the visible prompt"
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
+fn zsh_bulk_delete_confirmation_is_visible_before_reply() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    for index in 0..6 {
+        std::fs::write(zdot.path().join(format!("rm-fixture-{index}")), b"safe\n")
+            .expect("write rm confirmation fixture");
+    }
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+    s.write(format!("cd -- {}\n", zdot.path().display()).as_bytes());
+    assert!(
+        s.wait_for(b"moved to", FORMAT_BUDGET),
+        "fixture cd did not complete"
+    );
+
+    s.write(b"unsetopt RM_STAR_SILENT RM_STAR_WAIT; rm -rf ./*\n");
+    assert!(
+        s.wait_for(b"sure you want to delete all", FORMAT_BUDGET),
+        "zsh's bulk-delete question stayed hidden before any reply: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"n\n");
+    // Queue a harmless verification immediately; the inner shell will execute
+    // it only after the confirmation has accepted the reply and returned.
+    s.write(b"test -f rm-fixture-0 && printf 'RM_%s\\n' 'DECLINED_FILES_SAFE'\n");
+    assert!(
+        s.wait_for(b"RM_DECLINED_FILES_SAFE", FORMAT_BUDGET),
+        "bulk-delete fixture was unexpectedly removed or the shell did not resume: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
 fn failed_command_footer_pins_the_error_line_end_to_end() {
     let Some(zsh) = zsh_path() else {
         eprintln!("skipping: zsh not available");

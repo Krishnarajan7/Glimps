@@ -93,8 +93,10 @@ enum Collect {
     /// ends, then formatted as a unit.
     Buffer(Vec<u8>),
     /// Plain text output: streamed line-by-line with log/HTTP coloring. Holds the
-    /// current partial (un-terminated) line across chunks.
-    Stream(Vec<u8>),
+    /// current partial (un-terminated) line across chunks. The boolean records
+    /// that a stalled prefix was already emitted for interactive liveness; until
+    /// that physical line ends, its remaining bytes must pass through verbatim.
+    Stream(Vec<u8>, bool),
     /// Decided not to touch this output run; stream the rest verbatim.
     Passthrough,
 }
@@ -356,7 +358,7 @@ impl Formatter {
                 Collect::Idle => only_pass,
                 Collect::Passthrough => only_output,
                 // Stream may color lines, Sniff/Buffer hold bytes: never borrow.
-                Collect::Sniff(_) | Collect::Buffer(_) | Collect::Stream(_) => false,
+                Collect::Sniff(_) | Collect::Buffer(_) | Collect::Stream(_, _) => false,
             };
         if zero_copy {
             return Cow::Borrowed(chunk);
@@ -465,7 +467,9 @@ impl Formatter {
                 }
             }
             // Plain-text run: keep streaming lines (separator already emitted).
-            Collect::Stream(line) => self.push_stream(line, seg, out),
+            Collect::Stream(line, emitted_prefix) => {
+                self.push_stream(line, emitted_prefix, seg, out)
+            }
             // Idle (fresh run) and Sniff (only whitespace so far) are both still
             // undecided: classify, and emit the separator only on a text commit.
             Collect::Idle => self.decide(Vec::new(), seg, out),
@@ -511,7 +515,7 @@ impl Formatter {
                     Collect::Buffer(acc) // a formatting candidate; hold it
                 } else if !buffer_candidate && !self.streaming.is_empty() {
                     // Plain text: stream line-by-line through the streaming colorizers.
-                    self.push_stream(Vec::new(), &acc, out)
+                    self.push_stream(Vec::new(), false, &acc, out)
                 } else {
                     // No formatter wants it (or the blob is too big): verbatim.
                     out.extend_from_slice(&acc);
@@ -865,23 +869,77 @@ impl Formatter {
     /// severity / HTTP status) and carrying the trailing partial line across
     /// chunks. Returns the next state: `Stream` with the carried partial, or
     /// `Passthrough` if the partial line grew past `LINE_CAP` (not a log line).
-    fn push_stream(&mut self, mut line: Vec<u8>, seg: &[u8], out: &mut Vec<u8>) -> Collect {
+    fn push_stream(
+        &mut self,
+        mut line: Vec<u8>,
+        mut emitted_prefix: bool,
+        seg: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Collect {
         let mut start = 0;
         for (i, &b) in seg.iter().enumerate() {
             if b == b'\n' {
-                line.extend_from_slice(&seg[start..=i]);
-                self.emit_stream_line(out, &line);
-                line.clear();
+                if emitted_prefix {
+                    // A quiescence flush already exposed the beginning of this
+                    // physical line (normally an interactive question). We can
+                    // no longer color it as a unit, so preserve the remainder
+                    // byte-for-byte. Formatting resumes on the next line.
+                    debug_assert!(line.is_empty());
+                    out.extend_from_slice(&seg[start..=i]);
+                    self.command_output_line_count += 1;
+                    emitted_prefix = false;
+                } else {
+                    line.extend_from_slice(&seg[start..=i]);
+                    self.emit_stream_line(out, &line);
+                    line.clear();
+                }
                 start = i + 1;
             }
+        }
+        if emitted_prefix {
+            // Once a partial line is visible, never withhold its continuation:
+            // this is the user's live interaction line until its newline.
+            out.extend_from_slice(&seg[start..]);
+            return Collect::Stream(Vec::new(), true);
         }
         line.extend_from_slice(&seg[start..]);
         if line.len() > self.config.limits.line_cap {
             out.extend_from_slice(&line);
             Collect::Passthrough
         } else {
-            Collect::Stream(line)
+            Collect::Stream(line, false)
         }
+    }
+
+    /// Release output held across a quiet PTY interval.
+    ///
+    /// Interactive questions, password prompts, and shell confirmations usually
+    /// omit their trailing newline while waiting for input. A line formatter
+    /// cannot distinguish those from an ordinary line split across reads, so the
+    /// supervisor gives formatting a short coalescing window and then calls this
+    /// method. Liveness wins after that window: held bytes become visible
+    /// verbatim and the current physical line (or candidate document) declines
+    /// further formatting rather than risking reordered or duplicated output.
+    pub(crate) fn flush_stalled_output(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.collect = match std::mem::replace(&mut self.collect, Collect::Idle) {
+            Collect::Stream(line, false) if !line.is_empty() => {
+                out.extend_from_slice(&line);
+                Collect::Stream(Vec::new(), true)
+            }
+            Collect::Stream(line, emitted_prefix) => Collect::Stream(line, emitted_prefix),
+            Collect::Buffer(buf) if !buf.is_empty() => {
+                out.extend_from_slice(&buf);
+                Collect::Passthrough
+            }
+            Collect::Sniff(acc) if !acc.is_empty() => {
+                self.emit_header(&mut out);
+                out.extend_from_slice(&acc);
+                Collect::Passthrough
+            }
+            other => other,
+        };
+        out
     }
 
     fn emit_stream_line(&mut self, out: &mut Vec<u8>, line: &[u8]) {
@@ -1033,7 +1091,7 @@ impl Formatter {
                 self.emit_header(out);
                 out.extend_from_slice(&acc);
             }
-            Collect::Stream(line) => {
+            Collect::Stream(line, _) => {
                 // The trailing partial line has no newline; emit it verbatim (we
                 // only color complete lines). The separator was emitted at commit.
                 out.extend_from_slice(&line);

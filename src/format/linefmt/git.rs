@@ -251,6 +251,30 @@ fn colorize_git_branch_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
         return None;
     }
     let offset = content.len() - trimmed.len();
+    if let Some(rest) = trimmed.strip_prefix(b"Deleted branch ") {
+        let was = rest
+            .windows(b" (was ".len())
+            .position(|window| window == b" (was ")?;
+        let branch = &rest[..was];
+        let suffix = &rest[was + b" (was ".len()..];
+        let hash = suffix.strip_suffix(b").")?;
+        if branch.is_empty()
+            || !(4..=40).contains(&hash.len())
+            || !hash.iter().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        let mut out = Vec::with_capacity(line.len() + 64);
+        out.extend_from_slice(&content[..offset]);
+        paint_bytes(&mut out, theme.info, b"Deleted branch", theme.reset);
+        out.push(b' ');
+        paint_bytes(&mut out, theme.key, branch, theme.reset);
+        paint_bytes(&mut out, theme.html_delim, b" (was ", theme.reset);
+        paint_bytes(&mut out, theme.number, hash, theme.reset);
+        paint_bytes(&mut out, theme.html_delim, b").", theme.reset);
+        out.extend_from_slice(ending);
+        return Some(out);
+    }
     let mut out = Vec::with_capacity(line.len() + 32);
     out.extend_from_slice(&content[..offset]);
     if trimmed.starts_with(b"*") {

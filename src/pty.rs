@@ -25,6 +25,11 @@ use crate::format::{Clock, Formatter};
 use crate::metadata::MetadataChannel;
 use crate::terminal::{term_size, RawGuard};
 
+/// Maximum time formatter-held output may remain invisible while the PTY is
+/// quiet. This small coalescing window preserves coloring for lines split across
+/// adjacent reads while ensuring no-newline interactive prompts appear promptly.
+const INTERACTIVE_FLUSH_DELAY: Duration = Duration::from_millis(40);
+
 /// How the wrapped shell session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShellExit {
@@ -97,19 +102,46 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit>
         .as_mut()
         .and_then(MetadataChannel::take_reader);
     thread::spawn(move || {
+        // A blocking PTY read cannot itself notice that an unterminated prompt
+        // has gone quiet. Pump raw chunks through a channel so this formatter
+        // loop can use a bounded receive timeout as the liveness boundary.
+        // Keep the queue bounded so a producer that outruns formatting/stdout
+        // receives normal PTY backpressure instead of growing memory without
+        // limit. Eight reads cap queued payload at roughly 64 KiB.
+        let (pty_tx, pty_rx) = mpsc::sync_channel::<Vec<u8>>(8);
+        thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if pty_tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
         let mut formatter = Formatter::for_supervisor_with_metadata(clock, config, metadata_reader);
         let mut stdout = std::io::stdout();
-        let mut buf = [0u8; 8192];
         loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break, // shell exited, master closed
-                Ok(n) => {
-                    let out = formatter.process(&buf[..n]);
+            match pty_rx.recv_timeout(INTERACTIVE_FLUSH_DELAY) {
+                Ok(chunk) => {
+                    let out = formatter.process(&chunk);
                     if stdout.write_all(&out).is_err() || stdout.flush().is_err() {
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let out = formatter.flush_stalled_output();
+                    if !out.is_empty()
+                        && (stdout.write_all(&out).is_err() || stdout.flush().is_err())
+                    {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
         // The master closed while the formatter may still be holding a buffered

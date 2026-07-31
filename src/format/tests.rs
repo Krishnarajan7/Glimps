@@ -561,6 +561,51 @@ fn log_line_split_across_chunks_is_colored_once_whole() {
 }
 
 #[test]
+fn stalled_no_newline_prompt_is_released_before_command_end() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"ask-user")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"Continue with operation? [yn] "));
+    assert!(
+        !out.ends_with(b"Continue with operation? [yn] "),
+        "the line formatter should initially coalesce a partial line"
+    );
+
+    let visible = f.flush_stalled_output();
+    assert_eq!(visible, b"Continue with operation? [yn] ");
+
+    // The reply completes the already-visible physical line verbatim. Once its
+    // newline arrives, normal line formatting resumes without byte loss.
+    out.extend_from_slice(&visible);
+    out.extend_from_slice(&f.process(b"n\r\nINFO next line\r\n"));
+    out.extend_from_slice(&f.process(D0));
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("Continue with operation? [yn] n\r\n"));
+    assert!(rendered.contains("INFO next line\r\n"));
+}
+
+#[test]
+fn stalled_buffer_candidate_declines_formatting_for_prompt_liveness() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"<choose a value> "));
+    out.extend_from_slice(&f.flush_stalled_output());
+    out.extend_from_slice(&f.process(b"yes\r\n"));
+    out.extend_from_slice(&f.process(D));
+    assert_eq!(out, cat(&[C, &sep(), b"<choose a value> yes\r\n", D]));
+}
+
+#[test]
 fn http_status_split_across_chunks_is_colored_whole() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -1645,6 +1690,13 @@ fn git_branch_delete_warning_is_gold_not_branch_cyan() {
     assert!(s.contains(
         "\x1b[38;5;220m         'refs/remotes/origin/fix/ci-backend-pipeline', but not yet merged to HEAD\x1b[0m"
     ));
+    assert!(s.contains(concat!(
+        "\x1b[32mDeleted branch\x1b[0m ",
+        "\x1b[36mfix/ci-backend-pipeline\x1b[0m",
+        "\x1b[2m (was \x1b[0m",
+        "\x1b[38;5;220m59d1c84\x1b[0m",
+        "\x1b[2m).\x1b[0m"
+    )));
     assert!(!s.contains("\x1b[36mwarning:"));
 }
 
@@ -2679,9 +2731,20 @@ fn password_prompt_output_is_never_touched() {
     // is no-echo, so it never appears in the stream at all — GLIMPS can't see
     // it. This pins the "password prompts never touched" promise.
     let prompt = b"Password:";
-    let stream = cat(&[C, prompt, D]);
-    // No trailing newline, prompt waits inline -> Stream holds it, flushed on D.
-    assert_eq!(run(&[&stream]), cat(&[C, &sep(), prompt, D]));
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(prompt));
+    out.extend_from_slice(&f.flush_stalled_output());
+    // Crucially, the password question is visible while the command is still
+    // waiting; command end has not been sent yet.
+    assert_eq!(out, cat(&[C, &sep(), prompt]));
+    out.extend_from_slice(&f.process(D));
+    assert_eq!(out, cat(&[C, &sep(), prompt, D]));
 }
 
 #[test]
