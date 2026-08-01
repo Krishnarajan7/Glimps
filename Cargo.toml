@@ -52,7 +52,7 @@ time = { version = "0.3", features = ["local-offset"] }
 # `.glimpsrc` config parsing. `serde` derive + `toml` are the standard, audited
 # choice for a small typed config; loaded once at startup, never on the hot path.
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 
 [dev-dependencies]
 # Property-based testing. The charter mandates a property test proving every
