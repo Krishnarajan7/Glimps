@@ -25,6 +25,8 @@ bug.
 - Preserve already-colored output unless a formatter has explicitly claimed a
   clean output run.
 - Flush any buffered tail on clean PTY EOF so user output is not silently lost.
+- Release unterminated output after a short quiet interval so interactive
+  questions and password prompts are visible before input is expected.
 
 ## Trust And Privacy
 
@@ -35,6 +37,9 @@ bug.
   runtime behavior.
 - Keep `GLIMPS=0` and `enabled = false` working as startup-time off switches.
 - Do not rewrite a user's prompt.
+- Sensitive credential commands remain raw pass-through. A deliberately read
+  dotenv file may receive byte-preserving ANSI spans, but its output must never
+  feed error pins or be copied into GLIMPS-authored summaries.
 
 ## Resource Bounds
 

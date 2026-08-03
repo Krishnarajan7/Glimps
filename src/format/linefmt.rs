@@ -23,6 +23,7 @@ mod code;
 mod command_views;
 mod common;
 mod diagnostics;
+mod diskutil;
 mod documents;
 mod git;
 mod json_lines;
@@ -32,8 +33,9 @@ mod tables;
 
 pub use code::{colorize_code_line, CodeLanguage};
 pub use command_views::{
-    colorize_df_line, colorize_du_line, colorize_find_line, colorize_kubectl_pods_line,
-    colorize_ls_line, colorize_ps_line,
+    colorize_df_line, colorize_du_line, colorize_find_line, colorize_getfileinfo_line,
+    colorize_history_count_line, colorize_history_line, colorize_kubectl_pods_line,
+    colorize_ls_line, colorize_ps_line, colorize_whereis_line, colorize_xattr_line,
 };
 pub(crate) use common::{
     colorize_size_path_line, colorize_words, contains_ascii, paint_bytes, paint_span, paint_whole,
@@ -41,16 +43,18 @@ pub(crate) use common::{
 };
 pub use diagnostics::colorize_cli_diagnostic_line;
 pub(crate) use diagnostics::is_cli_error_line;
+pub use diskutil::colorize_diskutil_info_line;
 pub use documents::{
-    colorize_config_line, colorize_gitleaks_ignore_line, colorize_markdown_line, format_man_line,
-    markdown_fence_language,
+    colorize_config_line, colorize_dotenv_line, colorize_gitignore_line,
+    colorize_gitleaks_ignore_line, colorize_man_index_line, colorize_markdown_line,
+    format_man_line, markdown_fence_language, MarkdownEmbeddedLanguage,
 };
 pub use git::{colorize_git_line, GitView};
 pub use json_lines::{colorize_json_line, is_json_line};
 pub use network::{
     colorize_dns_line, colorize_ifconfig_line, colorize_launchctl_line, colorize_lsof_line,
-    colorize_netstat_line, colorize_networksetup_line, colorize_pmset_line, colorize_route_line,
-    colorize_scutil_dns_line,
+    colorize_netstat_line, colorize_networksetup_line, colorize_ping_line, colorize_pmset_line,
+    colorize_route_line, colorize_scutil_dns_line,
 };
 pub use streaming::{colorize_line, Http, Logs, StackTrace};
 pub(crate) use streaming::{is_error_log_line, is_exception_line, ltrim};

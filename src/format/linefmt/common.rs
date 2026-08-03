@@ -24,7 +24,7 @@ pub(crate) fn colorize_size_path_line(line: &[u8], theme: &Theme) -> Option<Vec<
     }
     Some(colorize_words(content, ending, theme, |idx, _| match idx {
         0 => Some(theme.number),
-        _ => Some(theme.key),
+        _ => Some(theme.path),
     }))
 }
 

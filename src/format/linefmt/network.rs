@@ -45,6 +45,173 @@ pub fn colorize_dns_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     ))
 }
 
+/// Color live `ping` output and its final statistics without buffering.
+pub fn colorize_ping_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if contains_ascii_case_insensitive(trimmed, b"unreachable")
+        || contains_ascii_case_insensitive(trimmed, b"unknown host")
+        || contains_ascii_case_insensitive(trimmed, b"cannot resolve")
+    {
+        return Some(paint_whole(content, ending, theme.error, theme.reset));
+    }
+    if contains_ascii_case_insensitive(trimmed, b"timeout")
+        || contains_ascii_case_insensitive(trimmed, b"no answer yet")
+    {
+        return Some(paint_whole(content, ending, theme.warn, theme.reset));
+    }
+
+    let words = word_spans(content);
+    let first = words.first().map(|(start, end)| &content[*start..*end])?;
+    if first == b"PING" {
+        return Some(colorize_words(content, ending, theme, |idx, word| {
+            if idx == 0 {
+                Some(theme.keyword)
+            } else if looks_like_ping_address(word) {
+                Some(theme.path)
+            } else if ping_plain_number(word).is_some() {
+                Some(theme.number)
+            } else if matches!(word, b"data" | b"bytes" | b"of") {
+                Some(theme.muted)
+            } else {
+                Some(theme.key)
+            }
+        }));
+    }
+
+    if contains_ascii(trimmed, b"bytes from") {
+        return Some(colorize_words(content, ending, theme, |idx, word| {
+            if idx == 0 && ping_plain_number(word).is_some() {
+                Some(theme.number)
+            } else if matches!(word, b"bytes" | b"from" | b"ms") {
+                Some(theme.muted)
+            } else if looks_like_ping_address(word) {
+                Some(theme.path)
+            } else if let Some(latency) = ping_latency(word) {
+                Some(latency_color(latency, theme))
+            } else if word.starts_with(b"icmp_seq=") || word.starts_with(b"ttl=") {
+                Some(theme.number)
+            } else {
+                Some(theme.string)
+            }
+        }));
+    }
+
+    if trimmed.starts_with(b"---") && contains_ascii(trimmed, b"ping statistics") {
+        return Some(colorize_words(content, ending, theme, |idx, word| {
+            if idx == 0 || word == b"---" {
+                Some(theme.html_delim)
+            } else if idx == 1 {
+                Some(theme.key)
+            } else {
+                Some(theme.muted)
+            }
+        }));
+    }
+
+    if contains_ascii(trimmed, b"packets transmitted") && contains_ascii(trimmed, b"packet loss") {
+        return Some(colorize_words(content, ending, theme, |_idx, word| {
+            if let Some(loss) = ping_percent(word) {
+                Some(loss_color(loss, theme))
+            } else if ping_plain_number(word).is_some() {
+                Some(theme.number)
+            } else {
+                Some(theme.muted)
+            }
+        }));
+    }
+
+    if (trimmed.starts_with(b"round-trip ") || trimmed.starts_with(b"rtt "))
+        && trimmed.contains(&b'=')
+    {
+        return Some(colorize_words(content, ending, theme, |_idx, word| {
+            if word == b"=" {
+                Some(theme.html_delim)
+            } else if word == b"ms" {
+                Some(theme.muted)
+            } else if ping_latency_group(word) {
+                Some(theme.number)
+            } else {
+                Some(theme.key)
+            }
+        }));
+    }
+    None
+}
+
+fn looks_like_ping_address(word: &[u8]) -> bool {
+    let word = word.strip_suffix(b":").unwrap_or(word);
+    looks_like_ip_address(word)
+        || word
+            .strip_prefix(b"(")
+            .and_then(|value| value.strip_suffix(b")"))
+            .is_some_and(looks_like_ip_address)
+}
+
+fn ping_plain_number(word: &[u8]) -> Option<f64> {
+    let word = word
+        .strip_suffix(b",")
+        .or_else(|| word.strip_suffix(b":"))
+        .unwrap_or(word);
+    std::str::from_utf8(word).ok()?.parse().ok()
+}
+
+fn ping_latency(word: &[u8]) -> Option<f64> {
+    let value = word
+        .strip_prefix(b"time=")
+        .or_else(|| word.strip_prefix(b"time<"))?;
+    let value = value.strip_suffix(b"ms").unwrap_or(value);
+    std::str::from_utf8(value).ok()?.parse().ok()
+}
+
+fn ping_percent(word: &[u8]) -> Option<f64> {
+    let value = word.strip_suffix(b",").unwrap_or(word).strip_suffix(b"%")?;
+    std::str::from_utf8(value).ok()?.parse().ok()
+}
+
+fn ping_latency_group(word: &[u8]) -> bool {
+    word.contains(&b'/')
+        && word
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(*byte, b'.' | b'/'))
+}
+
+fn latency_color(latency_ms: f64, theme: &Theme) -> &'static str {
+    if latency_ms < 100.0 {
+        theme.info
+    } else if latency_ms < 250.0 {
+        theme.warn
+    } else {
+        theme.error
+    }
+}
+
+fn loss_color(loss_percent: f64, theme: &Theme) -> &'static str {
+    if loss_percent == 0.0 {
+        theme.info
+    } else if loss_percent < 25.0 {
+        theme.warn
+    } else {
+        theme.error
+    }
+}
+
+fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
+}
+
 /// Color `ifconfig` output. The command is a dense nested report, so we keep the
 /// original layout and only mark interface headers, field names, addresses,
 /// status words, and numeric values.

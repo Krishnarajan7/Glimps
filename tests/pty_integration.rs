@@ -459,6 +459,61 @@ fn json_output_is_formatted_end_to_end() {
 }
 
 #[test]
+fn dotenv_file_is_colored_end_to_end() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let env_path = zdot.path().join(".env.local");
+    std::fs::write(&env_path, b"API_TOKEN=fixture-only\nPORT=3000\n")
+        .expect("write dotenv fixture");
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+    s.write(format!("cat -- {}\n", env_path.display()).as_bytes());
+    assert!(
+        s.wait_for(b"\x1b[36mAPI_TOKEN\x1b[0m", FORMAT_BUDGET),
+        "dotenv key was not colored through the real supervisor: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        s.wait_for(b"\x1b[38;5;220m3000\x1b[0m", FORMAT_BUDGET),
+        "dotenv numeric value was not colored through the real supervisor"
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
+fn gitignore_file_is_colored_end_to_end() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let ignore_path = zdot.path().join(".gitignore");
+    std::fs::write(
+        &ignore_path,
+        b"# build output\n/target/\n*.log\n!important.log\n",
+    )
+    .expect("write gitignore fixture");
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+    s.write(format!("cat -- {}\n", ignore_path.display()).as_bytes());
+    assert!(
+        s.wait_for(b"\x1b[2m# build output\x1b[0m", FORMAT_BUDGET),
+        "gitignore comment was not colored through the real supervisor: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        s.wait_for(b"\x1b[35m!\x1b[0m", FORMAT_BUDGET),
+        "gitignore negation marker was not colored through the real supervisor"
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
 fn private_metadata_path_is_not_inherited_by_commands() {
     let Some(zsh) = zsh_path() else {
         eprintln!("skipping: zsh not available");

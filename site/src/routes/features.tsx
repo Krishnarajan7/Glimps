@@ -182,15 +182,25 @@ function FeaturesPage() {
             everyday commands and files and formats them accordingly: Git (
             <Code>status</Code>, <Code>branch</Code>, <Code>log</Code>, <Code>stat</Code>),
             CSV/TSV, SQL, config files (YAML, TOML, INI, dotenv), JSON-lines (
-            <Code>.jsonl</Code>), <Code>.gitleaksignore</Code> fingerprints, source-code
+            <Code>.jsonl</Code>), <Code>.gitignore</Code> patterns, <Code>.gitleaksignore</Code>{" "}
+            fingerprints, source-code
             files shown through reader commands (<Code>cat</Code>, <Code>head</Code>),
             Kubernetes pod tables (<Code>kubectl get pods</Code>), directory and system tools (
             <Code>ls</Code>, <Code>find</Code>, <Code>du</Code>, <Code>df</Code>,{" "}
-            <Code>ps</Code>, <Code>dig</Code>), macOS networking and service status,
-            <Code>man</Code>/help output, and Markdown files.
+            <Code>ps</Code>, <Code>ping</Code>, <Code>dig</Code>), macOS networking, file metadata (
+            <Code>diskutil info</Code>, <Code>GetFileInfo</Code>, <Code>xattr -l</Code>), service status, <Code>man</Code>/help
+            output, manual-index searches (<Code>whatis</Code>, <Code>apropos</Code>,
+            <Code>man -k</Code>, <Code>man -f</Code>), and Markdown files.
           </P>
           <P>
-            Every formatter is on by default with zero config, and each can be toggled
+            Dotenv values receive visual coloring only when you deliberately read the file.
+            Because real <Code>.env</Code> files may contain credentials, their lines are never
+            copied into failure summaries or error pins.
+          </P>
+          <P>
+            Silent successful actions such as <Code>cd</Code>, <Code>touch</Code>,
+            <Code>mkdir</Code>, <Code>rm</Code>, and <Code>killall</Code> receive a concise
+            breadcrumb in scrollback. Every formatter is on by default with zero config, and each can be toggled
             individually under <Code>[formatters]</Code> in <Code>~/.glimpsrc</Code>.
           </P>
         </div>

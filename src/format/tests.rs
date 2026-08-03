@@ -843,6 +843,47 @@ fn successful_rm_gets_a_conservative_target_breadcrumb_without_done_footer() {
 }
 
 #[test]
+fn successful_killall_gets_a_conservative_process_breadcrumb() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"killall Finder")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("killall Finder"));
+    assert!(
+        s.contains("\x1b[38;2;5;130;202mkillall completed for \x1b[38;2;142;202;230mFinder\x1b[0m")
+    );
+    assert!(!s.contains("done exit 0"));
+}
+
+#[test]
+fn killall_failure_and_flagged_forms_do_not_claim_completion() {
+    let mut failed = Formatter::new();
+    if !failed.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&failed.process(&cmd_marker(b"killall MissingProcess")));
+    out.extend_from_slice(&failed.process(C));
+    out.extend_from_slice(&failed.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(!s.contains("killall completed for"));
+    assert!(s.contains("failed exit 1"));
+
+    let mut flagged = Formatter::new();
+    let mut out = Vec::new();
+    out.extend_from_slice(&flagged.process(&cmd_marker(b"killall -u krish Finder")));
+    out.extend_from_slice(&flagged.process(C));
+    out.extend_from_slice(&flagged.process(D0));
+    assert!(!String::from_utf8_lossy(&out).contains("killall completed for"));
+}
+
+#[test]
 fn failed_rm_keeps_failure_footer_and_no_success_breadcrumb() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -1425,6 +1466,77 @@ fn cat_markdown_gets_project_doc_coloring() {
 }
 
 #[test]
+fn markdown_composes_raw_html_and_shell_formatters() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "<p align=\"center\">\n",
+        "  <a href=\"https://glimps.dev\">Website</a>\n",
+        "</p>\n",
+        "Inline <kbd>Ctrl-C</kbd> stays Markdown text.\n",
+        "```bash\n",
+        "GLIMPS=0 zsh # raw shell\n",
+        "git --no-pager diff -- README.md\n",
+        "```\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat README.md")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[2m<\x1b[0m\x1b[38;2;224;82;125mp\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220malign\x1b[0m\x1b[2m=\x1b[0m\x1b[38;5;117m\"center\"\x1b[0m"));
+    assert!(s.contains("Inline \x1b[2m<\x1b[0m\x1b[38;2;224;82;125mkbd\x1b[0m"));
+    assert!(
+        s.contains("\x1b[35mGLIMPS\x1b[0m\x1b[2m=\x1b[0m\x1b[38;5;117m0\x1b[0m \x1b[36mzsh\x1b[0m")
+    );
+    assert!(
+        s.contains(
+            "\x1b[36mgit\x1b[0m \x1b[38;5;220m--no-pager\x1b[0m diff \x1b[38;5;220m--\x1b[0m README.md"
+        ),
+        "unexpected shell fence output: {s:?}"
+    );
+    assert!(!s.contains("\x1b[38;5;220mREADME\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn markdown_tracks_html_and_unknown_fences_without_markdown_leakage() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "```html\n",
+        "<strong class=\"signal\">Ready</strong>\n",
+        "```\n",
+        "```unknown\n",
+        "**not Markdown emphasis inside code**\n",
+        "```\n",
+        "**Markdown again**\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat README.md")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[38;2;224;82;125mstrong\x1b[0m"));
+    assert!(!s.contains("\x1b[38;5;117m**not Markdown emphasis inside code**\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117m**Markdown again**\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
 fn cat_config_gets_key_value_coloring() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -1440,6 +1552,129 @@ fn cat_config_gets_key_value_coloring() {
     assert!(s.contains("\x1b[36mname\x1b[0m \x1b[2m=\x1b[0m\x1b[38;5;117m \"glimps\"\x1b[0m"));
     assert!(s.contains("\x1b[36mversion\x1b[0m \x1b[2m=\x1b[0m\x1b[38;5;220m 1\x1b[0m"));
     assert!(s.contains("\x1b[2m# comment\x1b[0m"));
+}
+
+#[test]
+fn cat_dotenv_gets_semantic_coloring_without_secret_pinning() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "# local development\n",
+        "export API_URL=\"https://localhost:3000/v1#fragment\"\n",
+        "PORT=3000\n",
+        "DEBUG=true\n",
+        "EMPTY=\n",
+        "ERROR=super-secret-value\n",
+        "MODE=development # selected profile\n",
+        "context one\ncontext two\ncontext three\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat .env.local")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[2m# local development\x1b[0m"));
+    assert!(s.contains(concat!(
+        "\x1b[35mexport\x1b[0m ",
+        "\x1b[36mAPI_URL\x1b[0m",
+        "\x1b[2m=\x1b[0m",
+        "\x1b[38;5;117m\"https://localhost:3000/v1#fragment\"\x1b[0m"
+    )));
+    assert!(s.contains("\x1b[36mPORT\x1b[0m\x1b[2m=\x1b[0m\x1b[38;5;220m3000\x1b[0m"));
+    assert!(s.contains("\x1b[36mDEBUG\x1b[0m\x1b[2m=\x1b[0m\x1b[35mtrue\x1b[0m"));
+    assert!(s.contains("\x1b[36mEMPTY\x1b[0m\x1b[2m=\x1b[0m\n"));
+    assert!(s.contains("\x1b[2m# selected profile\x1b[0m"));
+    assert!(s.contains("command failed: cat .env.local"));
+    assert!(
+        !s.contains('\u{21b3}'),
+        "dotenv secrets must never be copied into a failure pin: {s:?}"
+    );
+    assert_eq!(
+        s.matches("super-secret-value").count(),
+        1,
+        "secret value should appear only in the requested file output"
+    );
+}
+
+#[test]
+fn dotenv_examples_use_the_same_view_but_unrelated_output_does_not() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"head .env.example")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"DATABASE_URL=postgres://localhost/app\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36mDATABASE_URL\x1b[0m\x1b[2m=\x1b[0m"));
+
+    let mut f = Formatter::new();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"printf config-like-text")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"DATABASE_URL=postgres://localhost/app\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(!s.contains("\x1b[36mDATABASE_URL"));
+}
+
+#[test]
+fn custom_sensitive_rule_can_force_dotenv_back_to_raw_passthrough() {
+    let cfg = Config {
+        sensitive_commands: vec!["cat .env".to_string()],
+        ..Config::default()
+    };
+    let mut f = fmt_with(cfg);
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat .env")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"API_TOKEN=secret\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("API_TOKEN=secret\n"));
+    assert!(!s.contains("\x1b[36mAPI_TOKEN"));
+}
+
+#[test]
+fn dotenv_view_does_not_weaken_other_secret_file_passthrough() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat .env id_ed25519")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"API_TOKEN=secret\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("API_TOKEN=secret\n"));
+    assert!(!s.contains("\x1b[36mAPI_TOKEN"));
+}
+
+#[test]
+fn compound_dotenv_reader_stays_raw_and_never_pins_secrets() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat .env; false")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b"ERROR=compound-secret\ncontext one\ncontext two\ncontext three\n"),
+    );
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("ERROR=compound-secret\n"));
+    assert!(!s.contains("\x1b[36mERROR"));
+    assert!(!s.contains('\u{21b3}'));
+    assert_eq!(s.matches("compound-secret").count(), 1);
 }
 
 #[test]
@@ -1463,6 +1698,143 @@ fn cat_gitleaksignore_colors_comments_and_fingerprint_fields() {
 \x1b[2m:\x1b[0m\x1b[35mjwt\x1b[0m\
 \x1b[2m:\x1b[0m\x1b[38;5;220m6\x1b[0m"
     ));
+}
+
+#[test]
+fn cat_gitignore_colors_comments_negation_paths_and_globs() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = b"# generated files\n/target/\n*.log\n!important.log\nsrc/**/generated?.rs\n\\#literal-name\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat .gitignore")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[2m# generated files\x1b[0m"));
+    assert!(s.contains(concat!(
+        "\x1b[2m/\x1b[0m",
+        "\x1b[38;5;117mtarget\x1b[0m",
+        "\x1b[2m/\x1b[0m"
+    )));
+    assert!(s.contains("\x1b[38;5;220m*\x1b[0m\x1b[38;5;117m.log\x1b[0m"));
+    assert!(s.contains("\x1b[35m!\x1b[0m\x1b[38;5;117mimportant.log\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m**\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m?\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117m\\#\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body));
+}
+
+#[test]
+fn getfileinfo_colors_metadata_labels_paths_attributes_and_dates() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "directory: \"/Volumes/One Touch\"\n",
+        "attributes: avbstClinmedz\n",
+        "created: 01/01/1904 05:21:10\n",
+        "modified: 01/01/1904 05:21:10\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"GetFileInfo /Volumes/One\\ Touch")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[36mdirectory\x1b[0m\x1b[2m:\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230m \"/Volumes/One Touch\"\x1b[0m"));
+    assert!(s.contains("\x1b[35m avbstClinmedz\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m 01/01/1904 05:21:10\x1b[0m"));
+}
+
+#[test]
+fn xattr_long_view_colors_attribute_names_and_values_only_with_long_flag() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"xattr -l /Volumes/One\\ Touch")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"com.apple.FinderInfo:\ncom.apple.test: 0A FF 12\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[36mcom.apple.FinderInfo\x1b[0m\x1b[2m:\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m 0A FF 12\x1b[0m"));
+
+    let mut f = Formatter::new();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"xattr /tmp/file")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"com.apple.FinderInfo\n"));
+    out.extend_from_slice(&f.process(D0));
+    assert!(!String::from_utf8_lossy(&out).contains("\x1b[36mcom.apple.FinderInfo"));
+}
+
+#[test]
+fn diskutil_info_colors_aligned_typed_fields() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "   Device Identifier:        disk6s1\n",
+        "   Device Node:              /dev/disk6s1\n",
+        "   Mounted:                  Yes\n",
+        "   Mount Point:              /Volumes/One Touch\n",
+        "   File System Personality:  ExFAT\n",
+        "   SMART Status:             Not Supported\n",
+        "   Volume UUID:              396DF0B8-CE18-3EDA-8486-7295049E9D8A\n",
+        "   Disk Size:                2.0 TB (2000397795328 Bytes)\n",
+        "   Volume Used Space:        332.7 GB (16.6%)\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"diskutil info /Volumes/One\\ Touch")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[36mDevice Identifier\x1b[0m\x1b[2m:\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230m/dev/disk6s1\x1b[0m"));
+    assert!(s.contains("\x1b[32mYes\x1b[0m"));
+    assert!(s.contains("\x1b[35mExFAT\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220mNot Supported\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m396DF0B8-CE18-3EDA-8486-7295049E9D8A\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m2.0\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m16.6%\x1b[0m"));
+}
+
+#[test]
+fn piped_diskutil_info_keeps_the_report_view_but_plist_declines_it() {
+    let mut piped = Formatter::new();
+    if !piped.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&piped.process(&cmd_marker(
+        b"diskutil info /Volumes/One\\ Touch | grep 'File System'",
+    )));
+    out.extend_from_slice(&piped.process(C));
+    out.extend_from_slice(&piped.process(b"   File System Personality:  ExFAT\n"));
+    out.extend_from_slice(&piped.process(D0));
+    assert!(String::from_utf8_lossy(&out).contains("\x1b[35mExFAT\x1b[0m"));
+
+    let mut plist = Formatter::new();
+    let mut out = Vec::new();
+    out.extend_from_slice(&plist.process(&cmd_marker(b"diskutil info -plist disk6")));
+    out.extend_from_slice(&plist.process(C));
+    out.extend_from_slice(&plist.process(b"<key>DeviceIdentifier</key>\n"));
+    out.extend_from_slice(&plist.process(D0));
+    assert!(!String::from_utf8_lossy(&out).contains("\x1b[36mDeviceIdentifier"));
 }
 
 #[test]
@@ -1892,9 +2264,48 @@ fn ls_simple_output_distinguishes_hidden_names() {
     out.extend_from_slice(&f.process(D));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[38;2;69;73;85m.git\x1b[0m"));
-    assert!(s.contains("\x1b[36mREADME.md\x1b[0m"));
-    assert!(!s.contains("\x1b[38;2;69;73;85m.\x1b[0m"));
-    assert!(!s.contains("\x1b[38;2;69;73;85m..\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117mREADME.md\x1b[0m"));
+    assert!(s.contains("\x1b[2m.\x1b[0m"));
+    assert!(s.contains("\x1b[2m..\x1b[0m"));
+}
+
+#[test]
+fn ls_simple_and_long_views_share_filename_semantics() {
+    let mut simple = Formatter::new();
+    if !simple.is_enabled() {
+        return;
+    }
+    let mut simple_out = Vec::new();
+    simple_out.extend_from_slice(&simple.process(&cmd_marker(b"ls -F")));
+    simple_out.extend_from_slice(&simple.process(C));
+    simple_out.extend_from_slice(&simple.process(b"README.md  src/  run*  current@  .git/\n"));
+    simple_out.extend_from_slice(&simple.process(D));
+    let simple_text = String::from_utf8_lossy(&simple_out);
+    assert!(simple_text.contains("\x1b[38;5;117mREADME.md\x1b[0m"));
+    assert!(simple_text.contains("\x1b[38;2;122;162;247msrc/\x1b[0m"));
+    assert!(simple_text.contains("\x1b[32mrun*\x1b[0m"));
+    assert!(simple_text.contains("\x1b[35mcurrent@\x1b[0m"));
+    assert!(simple_text.contains("\x1b[38;2;69;73;85m.git/\x1b[0m"));
+
+    let mut long = Formatter::new();
+    let mut long_out = Vec::new();
+    long_out.extend_from_slice(&long.process(&cmd_marker(b"ls -la")));
+    long_out.extend_from_slice(&long.process(C));
+    long_out.extend_from_slice(
+        &long.process(b"-rw-r--r--  1 krishv staff 17230 Aug 1 23:34 README.md\n"),
+    );
+    long_out
+        .extend_from_slice(&long.process(b"-rwxr-xr-x  1 krishv staff   512 Aug 1 23:34 run\n"));
+    long_out.extend_from_slice(
+        &long.process(b"lrwxr-xr-x  1 krishv staff     3 Aug 1 23:34 current -> src\n"),
+    );
+    long_out.extend_from_slice(&long.process(D));
+    let long_text = String::from_utf8_lossy(&long_out);
+    assert!(long_text.contains("\x1b[38;5;117mREADME.md\x1b[0m"));
+    assert!(long_text.contains("\x1b[32mrun\x1b[0m"));
+    assert!(long_text.contains("\x1b[35mcurrent\x1b[0m"));
+    assert!(long_text.contains("\x1b[2m->\x1b[0m"));
+    assert!(long_text.contains("\x1b[38;2;142;202;230msrc\x1b[0m"));
 }
 
 #[test]
@@ -1964,9 +2375,43 @@ fn du_and_df_outputs_highlight_sizes_and_capacity() {
     out.extend_from_slice(&f.process(D));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[38;5;220m12K\x1b[0m"));
-    assert!(s.contains("\x1b[36m./src\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230m./src\x1b[0m"));
+    assert!(!s.contains("\x1b[36m./src\x1b[0m"));
     assert!(s.contains("\x1b[38;5;220m203Ki\x1b[0m"));
-    assert!(s.contains("\x1b[38;5;220m100%\x1b[0m"));
+    assert!(s.contains("\x1b[31m100%\x1b[0m"));
+}
+
+#[test]
+fn df_uses_semantic_storage_colors_and_handles_multiword_filesystems() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "Filesystem        Size Used Avail Capacity iused ifree %iused Mounted on\n",
+        "/dev/disk3s1s1    245G  13G   49G      21%  459k  483M      0% /\n",
+        "/dev/disk3s5      245G 173G   49G      78%  2.8M  483M      1% /System/Volumes/Data\n",
+        "map auto_home       0B   0B    0B     100%     0     0       - /System/Volumes/Data/home\n",
+        "/dev/disk5s1       18G  18G  466M      98%  627k  4.6M     12% /Library/Developer\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"df -H")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[36mmap\x1b[0m \x1b[36mauto_home\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;153m245G\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m173G\x1b[0m"));
+    assert!(s.contains("\x1b[32m466M\x1b[0m"));
+    assert!(s.contains("\x1b[32m21%\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m78%\x1b[0m"));
+    assert!(s.contains("\x1b[31m98%\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230m/Library/Developer\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
 }
 
 #[test]
@@ -2009,6 +2454,83 @@ fn dig_output_highlights_dns_sections_and_records() {
     assert!(s.contains("\x1b[36m360astra.io.\x1b[0m"));
     assert!(s.contains("\x1b[35mA\x1b[0m"));
     assert!(s.contains("\x1b[36m82.180.142.20\x1b[0m"));
+}
+
+#[test]
+fn ping_colors_live_replies_and_macos_statistics_semantically() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "PING 360astra.io (82.180.142.20): 56 data bytes\n",
+        "64 bytes from 82.180.142.20: icmp_seq=0 ttl=49 time=75.102 ms\n",
+        "64 bytes from 82.180.142.20: icmp_seq=1 ttl=49 time=180.500 ms\n",
+        "64 bytes from 82.180.142.20: icmp_seq=2 ttl=49 time=320.750 ms\n",
+        "--- 360astra.io ping statistics ---\n",
+        "5 packets transmitted, 5 packets received, 0.0% packet loss\n",
+        "round-trip min/avg/max/stddev = 61.847/75.815/83.587/7.533 ms\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"ping -c 5 360astra.io")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[35mPING\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230m82.180.142.20:\x1b[0m"));
+    assert!(s.contains("\x1b[32mtime=75.102\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220mtime=180.500\x1b[0m"));
+    assert!(s.contains("\x1b[31mtime=320.750\x1b[0m"));
+    assert!(s.contains("\x1b[32m0.0%\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m61.847/75.815/83.587/7.533\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn ping_handles_linux_loss_ipv6_timeouts_and_unreachable_errors() {
+    let cases: &[(&[u8], &[u8], &str)] = &[
+        (
+            b"ping example.com",
+            b"4 packets transmitted, 3 received, 25% packet loss, time 3004ms\n",
+            "\x1b[31m25%\x1b[0m",
+        ),
+        (
+            b"ping6 ::1",
+            b"64 bytes from ::1: icmp_seq=1 ttl=64 time=0.042 ms\n",
+            "\x1b[38;2;142;202;230m::1:\x1b[0m",
+        ),
+        (
+            b"ping example.com",
+            b"Request timeout for icmp_seq 2\n",
+            "\x1b[38;5;220mRequest timeout",
+        ),
+        (
+            b"ping example.com",
+            b"From 192.0.2.1 icmp_seq=1 Destination Host Unreachable\n",
+            "\x1b[31mFrom 192.0.2.1",
+        ),
+    ];
+    for (command, line, expected) in cases {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(&cmd_marker(command)));
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(line));
+        out.extend_from_slice(&f.process(D0));
+        assert!(
+            String::from_utf8_lossy(&out).contains(expected),
+            "missing ping formatting for {:?}: {:?}",
+            String::from_utf8_lossy(command),
+            String::from_utf8_lossy(&out)
+        );
+    }
 }
 
 #[test]
@@ -2227,7 +2749,6 @@ fn custom_sensitive_commands_are_token_aware_and_passthrough() {
 fn other_sensitive_commands_are_passthrough_and_never_pinned() {
     for command in [
         &b"gh auth token"[..],
-        &b"cat .env.local"[..],
         &b"aws secretsmanager get-secret-value --secret-id prod/db"[..],
     ] {
         let mut f = Formatter::new();
@@ -2271,6 +2792,144 @@ fn man_overstrike_output_is_cleaned_and_highlighted() {
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[36mNAME\x1b[0m\n"));
     assert!(!s.contains('\u{8}'));
+}
+
+#[test]
+fn whatis_colors_names_sections_aliases_and_descriptions() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "cat(1)                    - concatenate and print files\n",
+        "man(1), apropos(1), whatis(1) - display online manual documentation pages\n",
+        "DateTime::Locale::en_IM(3pm) - Locale data examples for the English Isle of Man locale\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"whatis man")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[36mcat\x1b[0m\x1b[2m(\x1b[0m\x1b[38;5;220m1\x1b[0m"));
+    assert!(s.contains("\x1b[2m, \x1b[0m\x1b[36mapropos\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m3pm\x1b[0m"));
+    assert!(s.contains("\x1b[2m - \x1b[0m\x1b[38;5;153mdisplay online manual"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn whereis_distinguishes_command_executable_and_manual_locations() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = b"ls: /bin/ls /usr/share/man/man1/ls.1\nmissing:\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"whereis ls missing")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[36mls\x1b[0m\x1b[2m:\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230m/bin/ls\x1b[0m"));
+    assert!(s.contains("\x1b[35m/usr/share/man/man1/ls.1\x1b[0m"));
+    assert!(s.contains("\x1b[36mmissing\x1b[0m\x1b[2m:\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body));
+}
+
+#[test]
+fn history_colors_event_numbers_and_command_syntax() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = b"    42  git status --short\n    43  echo 'hello world'\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"history 1")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[38;5;220m42\x1b[0m  \x1b[36mgit\x1b[0m status"));
+    assert!(s.contains("\x1b[38;5;220m--short\x1b[0m"));
+    assert!(s.contains("\x1b[36mecho\x1b[0m \x1b[38;5;117m'hello world'\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body));
+}
+
+#[test]
+fn history_frequency_pipeline_colors_counts_and_commands() {
+    let command = b"history 1 | awk '{print $2}' | sort | uniq -c | sort -nr | head -100";
+    let body = b"  128 git\n   64 cargo\n    9 code\n";
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(command)));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[38;5;220m128\x1b[0m \x1b[36mgit\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m64\x1b[0m \x1b[36mcargo\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body));
+}
+
+#[test]
+fn history_unknown_transform_pipeline_stays_conservative() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = b"git\ncargo\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"history 1 | awk '{print $2}'")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D0));
+
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body));
+    assert!(!String::from_utf8_lossy(&out).contains("\x1b[38;5;220mgit"));
+}
+
+#[test]
+fn apropos_and_man_index_flags_share_the_whatis_view() {
+    for command in [
+        &b"apropos terminal"[..],
+        b"man -k terminal",
+        b"man --apropos terminal",
+        b"man -f cat",
+        b"man --whatis cat",
+    ] {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(&cmd_marker(command)));
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"cat(1) - concatenate and print files\n"));
+        out.extend_from_slice(&f.process(D0));
+        assert!(
+            String::from_utf8_lossy(&out).contains("\x1b[36mcat\x1b[0m"),
+            "missing manual-index coloring for {command:?}"
+        );
+    }
 }
 
 #[test]
@@ -3092,12 +3751,21 @@ proptest::proptest! {
 
         for cmd in [
             &b"git status --short"[..],
+            b"cat .gitignore",
             b"cat .gitleaksignore",
+            b"cat .env.example",
             b"cat data.csv",
             b"cat schema.sql",
             b"cat notes.md",
             b"cat main.rs",
             b"kubectl get pods",
+            b"GetFileInfo /tmp/example",
+            b"xattr -l /tmp/example",
+            b"diskutil info /dev/disk1",
+            b"whatis cat",
+            b"whereis cat",
+            b"history 1",
+            b"ping -c 1 127.0.0.1",
         ] {
             let mut f = Formatter::build(Clock::Off, true, Config::default());
             if !f.is_enabled() {

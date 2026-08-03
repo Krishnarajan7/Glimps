@@ -71,6 +71,9 @@ pub fn render(cmd: &[u8], theme: &Theme) -> Vec<u8> {
                 i += 1;
             }
             let word = &cmd[start..i];
+            if expect_command && render_env_assignment(&mut out, word, theme) {
+                continue;
+            }
             let color = if expect_command {
                 expect_command = false;
                 theme.key
@@ -83,6 +86,27 @@ pub fn render(cmd: &[u8], theme: &Theme) -> Vec<u8> {
         }
     }
     out
+}
+
+fn render_env_assignment(out: &mut Vec<u8>, word: &[u8], theme: &Theme) -> bool {
+    let Some(equals) = word.iter().position(|byte| *byte == b'=') else {
+        return false;
+    };
+    let name = &word[..equals];
+    if name.is_empty()
+        || !name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        || name.first().is_some_and(u8::is_ascii_digit)
+    {
+        return false;
+    }
+    paint(out, theme.keyword, name, theme.reset);
+    paint(out, theme.comment, b"=", theme.reset);
+    if equals + 1 < word.len() {
+        paint(out, theme.string, &word[equals + 1..], theme.reset);
+    }
+    true
 }
 
 /// The command's name (basename), looking past wrapper commands and env
@@ -168,6 +192,10 @@ pub(crate) fn sanitize_display(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn paint(out: &mut Vec<u8>, color: &str, text: &[u8], reset: &str) {
+    if color.is_empty() {
+        out.extend_from_slice(text);
+        return;
+    }
     out.extend_from_slice(color.as_bytes());
     out.extend_from_slice(text);
     out.extend_from_slice(reset.as_bytes());

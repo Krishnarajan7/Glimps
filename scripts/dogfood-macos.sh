@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/debug/glimps"
 DOGFOOD_TMP=""
+DOGFOOD_RESTART_STATUS=75
 
 usage() {
   cat <<'EOF'
@@ -14,6 +15,7 @@ session   Start an interactive GLIMPS-wrapped zsh using a temporary ZDOTDIR.
 
 Neither mode edits ~/.zshrc, installs GLIMPS globally, or changes your login shell.
 The session preserves HOME so Git credentials and desktop tools keep working.
+Dogfood command history is persisted separately under the user's state directory.
 EOF
 }
 
@@ -55,7 +57,16 @@ run_session() {
   cd "$ROOT"
   cargo build
 
+  local state_root="${XDG_STATE_HOME:-$HOME/.local/state}/glimps"
+  local history_file="${GLIMPS_DOGFOOD_HISTFILE:-$state_root/dogfood_history}"
+  local history_parent
+  history_parent="$(dirname "$history_file")"
+  mkdir -p "$history_parent"
+  touch "$history_file"
+  chmod 600 "$history_file"
+
   DOGFOOD_TMP="$(mktemp -d "${TMPDIR:-/tmp}/glimps-dogfood.XXXXXX")"
+  local restart_cwd_file="$DOGFOOD_TMP/restart-cwd"
   cleanup() {
     if [[ -n "${DOGFOOD_TMP:-}" ]]; then
       rm -rf "$DOGFOOD_TMP"
@@ -64,13 +75,38 @@ run_session() {
   }
   trap cleanup EXIT
 
-  cat >"$DOGFOOD_TMP/.zshrc" <<EOF
+  cat >"$DOGFOOD_TMP/.zshrc" <<'EOF'
 export PROMPT='glimps-dogfood %~ %# '
 autoload -Uz compinit
-compinit -u -d "$DOGFOOD_TMP/.zcompdump"
+compinit -u -d "$GLIMPS_DOGFOOD_TMP/.zcompdump"
 setopt auto_menu complete_in_word
 zstyle ':completion:*' menu select
-eval "\$("$BIN" init zsh)"
+
+# Keep dogfood history independent from the user's normal zsh history while
+# preserving it across wrapper updates and future dogfood sessions.
+export HISTFILE="$GLIMPS_DOGFOOD_HISTFILE"
+HISTSIZE=200000
+SAVEHIST=200000
+setopt append_history inc_append_history
+
+# Rebuild and request a controlled wrapper restart. The outer dogfood launcher
+# recognizes the reserved status, starts the new binary, and restores $PWD.
+glimps-update() {
+  local resume_cwd="$PWD"
+  if ! (
+    builtin cd -- "$GLIMPS_DOGFOOD_ROOT" &&
+    command cargo build
+  ); then
+    print -u2 -- 'glimps-update: build failed; continuing with the current formatter.'
+    return 1
+  fi
+  builtin fc -AI "$HISTFILE" 2>/dev/null || true
+  print -rn -- "$resume_cwd" >| "$GLIMPS_DOGFOOD_RESTART_CWD_FILE" || return 1
+  print -- 'glimps-update: build complete; restarting GLIMPS and preserving history...'
+  builtin exit "$GLIMPS_DOGFOOD_RESTART_STATUS"
+}
+
+eval "$("$GLIMPS_DOGFOOD_BIN" init zsh)"
 EOF
 
   cat >"$DOGFOOD_TMP/.glimpsrc" <<'EOF'
@@ -123,9 +159,45 @@ Try these commands:
   printf 'A\x01\x02B'
 
 Exit with: exit
+
+After changing GLIMPS source, update this session with: glimps-update
+Dogfood history persists at: $history_file
 EOF
 
-  ZDOTDIR="$DOGFOOD_TMP" GLIMPSRC="$DOGFOOD_TMP/.glimpsrc" SHELL="$(command -v zsh)" "$BIN"
+  local session_cwd="$ROOT"
+  local session_status=0
+  while true; do
+    cd "$session_cwd"
+    set +e
+    ZDOTDIR="$DOGFOOD_TMP" \
+      GLIMPSRC="$DOGFOOD_TMP/.glimpsrc" \
+      SHELL="$(command -v zsh)" \
+      GLIMPS_DOGFOOD_TMP="$DOGFOOD_TMP" \
+      GLIMPS_DOGFOOD_ROOT="$ROOT" \
+      GLIMPS_DOGFOOD_BIN="$BIN" \
+      GLIMPS_DOGFOOD_HISTFILE="$history_file" \
+      GLIMPS_DOGFOOD_RESTART_CWD_FILE="$restart_cwd_file" \
+      GLIMPS_DOGFOOD_RESTART_STATUS="$DOGFOOD_RESTART_STATUS" \
+      "$BIN"
+    session_status=$?
+    set -e
+
+    if [[ "$session_status" -ne "$DOGFOOD_RESTART_STATUS" ]]; then
+      break
+    fi
+    if [[ -f "$restart_cwd_file" ]]; then
+      local requested_cwd
+      requested_cwd="$(<"$restart_cwd_file")"
+      if [[ -d "$requested_cwd" ]]; then
+        session_cwd="$requested_cwd"
+      else
+        echo "warning: update resume directory no longer exists; using $ROOT" >&2
+        session_cwd="$ROOT"
+      fi
+    fi
+    echo "Restarting with the updated GLIMPS binary..."
+  done
+  return "$session_status"
 }
 
 main() {

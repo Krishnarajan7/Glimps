@@ -9,6 +9,9 @@ use super::cmdline;
 pub(super) enum CommandTrust {
     Normal,
     InteractiveBypass,
+    /// Deliberately displayed sensitive text (currently dotenv files): allow
+    /// byte-preserving line coloring, but never inspect/copy it into error pins.
+    SensitiveText,
     Sensitive,
 }
 
@@ -23,7 +26,13 @@ pub(super) fn classify(
     sensitive_rules: &[String],
 ) -> CommandPolicy {
     let name = cmdline::first_word(command);
-    let trust = if is_sensitive(command, sensitive_rules) {
+    let custom_sensitive = is_custom_sensitive(command, sensitive_rules);
+    let built_in_sensitive = is_builtin_sensitive(command);
+    let trust = if custom_sensitive {
+        CommandTrust::Sensitive
+    } else if built_in_sensitive && reads_dotenv_file(command) {
+        CommandTrust::SensitiveText
+    } else if built_in_sensitive {
         CommandTrust::Sensitive
     } else if name
         .as_ref()
@@ -42,7 +51,7 @@ pub(super) fn silent_breadcrumb(command: &[u8]) -> Option<Vec<u8>> {
     // never for a word that merely appears later as an argument.
     let executable = std::str::from_utf8(words.first()?).ok()?;
     let name = executable.rsplit('/').next()?;
-    if !matches!(name, "touch" | "mkdir" | "rm") {
+    if !matches!(name, "touch" | "mkdir" | "rm" | "killall") {
         return None;
     }
     let args = &words[1..];
@@ -50,6 +59,10 @@ pub(super) fn silent_breadcrumb(command: &[u8]) -> Option<Vec<u8>> {
         "touch" => command_targets(args, &["-t", "-d", "-r", "--date", "--reference"]),
         "mkdir" => command_targets(args, &["-m", "--mode", "-Z", "--context"]),
         "rm" => command_targets(args, &[]),
+        // `killall` flags differ across platforms and some take values that
+        // look like process names. Only summarize the unambiguous positional
+        // form rather than risk naming an option value as a killed process.
+        "killall" => simple_targets(args)?,
         _ => Vec::new(),
     };
     if targets.is_empty() {
@@ -68,6 +81,19 @@ pub(super) fn silent_breadcrumb(command: &[u8]) -> Option<Vec<u8>> {
             verb.extend_from_slice(b" completed for");
             push_target_summary(&mut out, &verb, n, b"targets", &targets);
         }
+        ("killall", 1) => {
+            out.extend_from_slice(b"killall completed for ");
+            out.extend_from_slice(&cmdline::sanitize_display(&targets[0]));
+        }
+        ("killall", n) => {
+            push_target_summary(
+                &mut out,
+                b"killall completed for",
+                n,
+                b"process names",
+                &targets,
+            );
+        }
         _ => return None,
     }
     Some(out)
@@ -78,6 +104,7 @@ pub(super) fn breadcrumb_path_start(message: &[u8]) -> Option<usize> {
         b"touch completed for ",
         b"mkdir completed for ",
         b"rm completed for ",
+        b"killall completed for ",
     ];
     message
         .windows(2)
@@ -90,11 +117,20 @@ pub(super) fn breadcrumb_path_start(message: &[u8]) -> Option<usize> {
         })
 }
 
+#[cfg(test)]
 pub(super) fn is_sensitive(command: &[u8], custom_rules: &[String]) -> bool {
+    is_builtin_sensitive(command) || is_custom_sensitive(command, custom_rules)
+}
+
+fn is_builtin_sensitive(command: &[u8]) -> bool {
     let Some(words) = shell_words(command) else {
-        return false;
+        // Operators deliberately make the structured parser decline. For
+        // secrets, decline must mean *more* conservative, not less: a compound
+        // `cat .env; ...` command stays raw rather than accidentally enabling
+        // formatting and failure pinning.
+        return contains_sensitive_file_reader_loose(command);
     };
-    let built_in = words.iter().enumerate().any(|(idx, word)| {
+    words.iter().enumerate().any(|(idx, word)| {
         let Ok(name) = std::str::from_utf8(word) else {
             return false;
         };
@@ -113,11 +149,57 @@ pub(super) fn is_sensitive(command: &[u8], custom_rules: &[String]) -> bool {
                 .any(|arg| std::str::from_utf8(arg).is_ok_and(secret_file_argument)),
             _ => false,
         }
+    })
+}
+
+fn contains_sensitive_file_reader_loose(command: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(command) else {
+        return false;
+    };
+    let tokens = text.split_whitespace().collect::<Vec<_>>();
+    let has_reader = tokens.iter().any(|token| {
+        let clean = token.trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')'));
+        matches!(
+            clean.rsplit('/').next(),
+            Some("cat" | "head" | "tail" | "sed")
+        )
     });
-    built_in
-        || custom_rules
+    has_reader && tokens.iter().any(|token| secret_file_argument(token))
+}
+
+fn is_custom_sensitive(command: &[u8], custom_rules: &[String]) -> bool {
+    let Some(words) = shell_words(command) else {
+        return false;
+    };
+    custom_rules
+        .iter()
+        .any(|rule| sensitive_rule_matches(&words, rule))
+}
+
+fn reads_dotenv_file(command: &[u8]) -> bool {
+    let Some(words) = shell_words(command) else {
+        return false;
+    };
+    words.iter().enumerate().any(|(idx, word)| {
+        let Ok(name) = std::str::from_utf8(word) else {
+            return false;
+        };
+        if !matches!(
+            name.rsplit('/').next(),
+            Some("cat" | "head" | "tail" | "sed")
+        ) {
+            return false;
+        }
+        let sensitive_files = words[idx + 1..]
             .iter()
-            .any(|rule| sensitive_rule_matches(&words, rule))
+            .filter_map(|arg| std::str::from_utf8(arg).ok())
+            .filter(|text| secret_file_argument(text))
+            .collect::<Vec<_>>();
+        !sensitive_files.is_empty()
+            && sensitive_files
+                .iter()
+                .all(|text| is_dotenv_file_argument(text))
+    })
 }
 
 /// Parse enough shell syntax for conservative command classification. Any
@@ -184,6 +266,22 @@ fn sensitive_rule_matches(command_words: &[Vec<u8>], rule: &str) -> bool {
                 }
             })
     })
+}
+
+fn simple_targets(args: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
+    let mut targets = Vec::new();
+    let mut end_options = false;
+    for arg in args {
+        let text = std::str::from_utf8(arg).ok()?;
+        if !end_options && text == "--" {
+            end_options = true;
+        } else if !end_options && text.starts_with('-') {
+            return None;
+        } else {
+            targets.push(arg.clone());
+        }
+    }
+    Some(targets)
 }
 
 fn push_target_summary(
@@ -344,6 +442,9 @@ fn secret_file_argument(text: &str) -> bool {
             ".env.example" | ".env.sample" | ".env.template" | ".env.defaults"
         );
     }
+    if name.ends_with(".env") {
+        return true;
+    }
     if name.ends_with(".pem") || name.ends_with(".key") {
         return true;
     }
@@ -354,6 +455,16 @@ fn secret_file_argument(text: &str) -> bool {
         return true;
     }
     contains_secret_word(name)
+}
+
+fn is_dotenv_file_argument(text: &str) -> bool {
+    if text.starts_with('-') || shell_operator_word(text) {
+        return false;
+    }
+    let clean = text.trim_matches(|c| matches!(c, '"' | '\'' | '`' | ',' | ':' | ';' | ')' | '('));
+    let lower = clean.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    name == ".env" || name.starts_with(".env.") || name.ends_with(".env")
 }
 
 fn contains_secret_word(text: &str) -> bool {

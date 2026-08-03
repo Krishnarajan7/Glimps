@@ -220,7 +220,7 @@ pub struct Formatter {
     /// Fenced code language while streaming a Markdown file. This lets
     /// `cat README.md` color all lines inside ```bash / ```rust blocks
     /// consistently instead of treating each line as unrelated prose.
-    markdown_fence: Option<linefmt::CodeLanguage>,
+    markdown_fence: Option<Option<linefmt::MarkdownEmbeddedLanguage>>,
     /// Whether the previous chunk left a full-screen TUI on the alternate screen.
     /// Tracked so the chunk that *exits* alt-screen is also passed through.
     was_alt_screen: bool,
@@ -410,7 +410,10 @@ impl Formatter {
                             .trust
                         })
                         .unwrap_or(CommandTrust::Normal);
-                    if trust != CommandTrust::Normal {
+                    if matches!(
+                        trust,
+                        CommandTrust::InteractiveBypass | CommandTrust::Sensitive
+                    ) {
                         self.collect = Collect::Passthrough;
                     }
                     // Arm error-line pinning for this command's output zone.
@@ -969,11 +972,18 @@ impl Formatter {
             }
             CommandView::Pwd => None,
             CommandView::Find => linefmt::colorize_find_line(line, &self.theme),
+            CommandView::Whereis => linefmt::colorize_whereis_line(line, &self.theme),
+            CommandView::History => linefmt::colorize_history_line(line, &self.theme),
+            CommandView::HistoryCounts => linefmt::colorize_history_count_line(line, &self.theme),
             CommandView::Ls => linefmt::colorize_ls_line(line, &self.theme),
             CommandView::Du => linefmt::colorize_du_line(line, &self.theme),
+            CommandView::GetFileInfo => linefmt::colorize_getfileinfo_line(line, &self.theme),
+            CommandView::Xattr => linefmt::colorize_xattr_line(line, &self.theme),
             CommandView::Df => linefmt::colorize_df_line(line, &self.theme),
             CommandView::Ps => linefmt::colorize_ps_line(line, &self.theme),
             CommandView::Dns => linefmt::colorize_dns_line(line, &self.theme),
+            CommandView::Ping => linefmt::colorize_ping_line(line, &self.theme),
+            CommandView::DiskutilInfo => linefmt::colorize_diskutil_info_line(line, &self.theme),
             CommandView::KubectlPods => linefmt::colorize_kubectl_pods_line(line, &self.theme),
             CommandView::IfConfig => linefmt::colorize_ifconfig_line(line, &self.theme),
             CommandView::ScutilDns => linefmt::colorize_scutil_dns_line(line, &self.theme),
@@ -984,8 +994,11 @@ impl Formatter {
             CommandView::Pmset => linefmt::colorize_pmset_line(line, &self.theme),
             CommandView::NetworkSetup => linefmt::colorize_networksetup_line(line, &self.theme),
             CommandView::Man => linefmt::format_man_line(line, &self.theme),
+            CommandView::ManIndex => linefmt::colorize_man_index_line(line, &self.theme),
             CommandView::Markdown => self.format_markdown_line(line),
             CommandView::Config => linefmt::colorize_config_line(line, &self.theme),
+            CommandView::Dotenv => linefmt::colorize_dotenv_line(line, &self.theme),
+            CommandView::Gitignore => linefmt::colorize_gitignore_line(line, &self.theme),
             CommandView::GitleaksIgnore => {
                 linefmt::colorize_gitleaks_ignore_line(line, &self.theme)
             }
@@ -1013,15 +1026,23 @@ impl Formatter {
             self.markdown_fence = if self.markdown_fence.is_some() {
                 None
             } else {
-                lang
+                Some(lang)
             };
             return formatted;
         }
-        if let Some(lang) = self.markdown_fence {
-            return linefmt::colorize_code_line(line, &self.theme, lang)
-                .or_else(|| linefmt::colorize_markdown_line(line, &self.theme));
+        if let Some(embedded) = self.markdown_fence {
+            return match embedded {
+                Some(linefmt::MarkdownEmbeddedLanguage::Code(lang)) => {
+                    linefmt::colorize_code_line(line, &self.theme, lang)
+                }
+                Some(linefmt::MarkdownEmbeddedLanguage::Html) => {
+                    html::colorize_fragment_line(line, &self.theme)
+                }
+                None => None,
+            };
         }
-        linefmt::colorize_markdown_line(line, &self.theme)
+        html::colorize_fragment_line(line, &self.theme)
+            .or_else(|| linefmt::colorize_markdown_line(line, &self.theme))
     }
 
     fn pending_command_prefers_text_lines(&self) -> bool {
@@ -1029,8 +1050,14 @@ impl Formatter {
             command_view(&self.pending_command),
             Some(
                 CommandView::Man
+                    | CommandView::ManIndex
+                    | CommandView::Whereis
+                    | CommandView::History
+                    | CommandView::HistoryCounts
                     | CommandView::Markdown
                     | CommandView::Config
+                    | CommandView::Dotenv
+                    | CommandView::Gitignore
                     | CommandView::GitleaksIgnore
                     | CommandView::Delimited(_)
                     | CommandView::Sql
@@ -1038,6 +1065,10 @@ impl Formatter {
                     | CommandView::JsonLines
                     | CommandView::Code(_)
                     | CommandView::Git(_)
+                    | CommandView::DiskutilInfo
+                    | CommandView::Ping
+                    | CommandView::GetFileInfo
+                    | CommandView::Xattr
                     | CommandView::IfConfig
                     | CommandView::ScutilDns
                     | CommandView::Route
@@ -1236,11 +1267,18 @@ fn split_line_ending(line: &[u8]) -> (&[u8], &[u8]) {
 enum CommandView {
     Pwd,
     Find,
+    Whereis,
+    History,
+    HistoryCounts,
     Ls,
     Du,
+    GetFileInfo,
+    Xattr,
     Df,
     Ps,
     Dns,
+    Ping,
+    DiskutilInfo,
     KubectlPods,
     IfConfig,
     ScutilDns,
@@ -1250,8 +1288,11 @@ enum CommandView {
     Launchctl,
     Pmset,
     Man,
+    ManIndex,
     Markdown,
     Config,
+    Dotenv,
+    Gitignore,
     GitleaksIgnore,
     Delimited(u8),
     Sql,
@@ -1278,12 +1319,20 @@ const COMMAND_VIEW_REGISTRY: &[CommandViewRegistration] = &[
         view: CommandView::Find,
     },
     CommandViewRegistration {
+        names: &["whereis"],
+        view: CommandView::Whereis,
+    },
+    CommandViewRegistration {
         names: &["ls"],
         view: CommandView::Ls,
     },
     CommandViewRegistration {
         names: &["du"],
         view: CommandView::Du,
+    },
+    CommandViewRegistration {
+        names: &["GetFileInfo"],
+        view: CommandView::GetFileInfo,
     },
     CommandViewRegistration {
         names: &["df"],
@@ -1298,12 +1347,12 @@ const COMMAND_VIEW_REGISTRY: &[CommandViewRegistration] = &[
         view: CommandView::Dns,
     },
     CommandViewRegistration {
-        names: &["ifconfig"],
-        view: CommandView::IfConfig,
+        names: &["ping", "ping6"],
+        view: CommandView::Ping,
     },
     CommandViewRegistration {
-        names: &["man", "apropos"],
-        view: CommandView::Man,
+        names: &["ifconfig"],
+        view: CommandView::IfConfig,
     },
     CommandViewRegistration {
         names: &["sqlite3", "psql", "mysql", "mariadb", "duckdb"],
@@ -1336,10 +1385,166 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "launchctl" => launchctl_command_view(cmd),
         "pmset" => pmset_command_view(cmd),
         "networksetup" => networksetup_command_view(cmd),
+        "diskutil" => diskutil_command_view(cmd),
+        "xattr" => xattr_command_view(cmd),
+        "history" => history_command_view(cmd),
+        "man" => man_command_view(cmd),
+        "apropos" | "whatis" => Some(CommandView::ManIndex),
         "git" => git_command_view(cmd),
         _ if command_requests_help(cmd) => Some(CommandView::Man),
         _ => None,
     }
+}
+
+fn history_command_view(command: &[u8]) -> Option<CommandView> {
+    let stages = shell_pipeline_words(command)?;
+    if stages.len() == 1 {
+        return Some(CommandView::History);
+    }
+
+    if let Some(count_index) = stages.iter().position(|stage| {
+        stage_name(stage) == Some("uniq")
+            && stage.iter().skip(1).any(|arg| {
+                std::str::from_utf8(arg).ok().is_some_and(|arg| {
+                    arg == "--count"
+                        || arg
+                            .strip_prefix('-')
+                            .is_some_and(|flags| !flags.starts_with('-') && flags.contains('c'))
+                })
+            })
+    }) {
+        let count_shape_survives = stages[count_index + 1..]
+            .iter()
+            .all(|stage| matches!(stage_name(stage), Some("sort" | "head" | "tail")));
+        return count_shape_survives.then_some(CommandView::HistoryCounts);
+    }
+
+    let rows_stay_history_shaped = stages.iter().skip(1).all(|stage| {
+        matches!(
+            stage_name(stage),
+            Some("head" | "tail" | "sort" | "grep" | "egrep" | "fgrep" | "rg" | "uniq")
+        )
+    });
+    rows_stay_history_shaped.then_some(CommandView::History)
+}
+
+fn stage_name(stage: &[Vec<u8>]) -> Option<&str> {
+    let word = std::str::from_utf8(stage.first()?).ok()?;
+    word.rsplit('/').next()
+}
+
+fn shell_pipeline_words(command: &[u8]) -> Option<Vec<Vec<Vec<u8>>>> {
+    let mut stages = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut stage_start = 0;
+    for (index, byte) in command.iter().copied().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            if quote == Some(byte) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(byte);
+            }
+            continue;
+        }
+        if quote.is_none() && byte == b'|' {
+            if command.get(index + 1) == Some(&b'|')
+                || command.get(index.wrapping_sub(1)) == Some(&b'|')
+            {
+                return None;
+            }
+            let words = shell_words(&command[stage_start..index])?;
+            if words.is_empty() {
+                return None;
+            }
+            stages.push(words);
+            stage_start = index + 1;
+        }
+    }
+    if quote.is_some() || escaped {
+        return None;
+    }
+    let words = shell_words(&command[stage_start..])?;
+    if words.is_empty() {
+        return None;
+    }
+    stages.push(words);
+    Some(stages)
+}
+
+fn man_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    let searches_index = words.iter().skip(1).any(|word| {
+        matches!(
+            std::str::from_utf8(word),
+            Ok("-k" | "-f" | "--apropos" | "--whatis")
+        )
+    });
+    Some(if searches_index {
+        CommandView::ManIndex
+    } else {
+        CommandView::Man
+    })
+}
+
+fn diskutil_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = first_shell_segment_words(command)?;
+    let subcommand = words
+        .get(1)
+        .and_then(|word| std::str::from_utf8(word).ok())?;
+    let plist = words
+        .iter()
+        .skip(2)
+        .any(|word| matches!(std::str::from_utf8(word), Ok("-plist" | "-plistbundle")));
+    (subcommand.eq_ignore_ascii_case("info") && !plist).then_some(CommandView::DiskutilInfo)
+}
+
+fn first_shell_segment_words(command: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in command.iter().copied().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            if quote == Some(byte) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(byte);
+            }
+            continue;
+        }
+        if quote.is_none() && matches!(byte, b'|' | b'&' | b';' | b'<' | b'>') {
+            return shell_words(&command[..index]);
+        }
+    }
+    shell_words(command)
+}
+
+fn xattr_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    words
+        .iter()
+        .skip(1)
+        .filter_map(|word| std::str::from_utf8(word).ok())
+        .any(|arg| {
+            arg.strip_prefix('-')
+                .is_some_and(|flags| !flags.starts_with('-') && flags.contains('l'))
+        })
+        .then_some(CommandView::Xattr)
 }
 
 fn scutil_command_view(command: &[u8]) -> Option<CommandView> {
@@ -1533,6 +1738,9 @@ fn file_view_for_word(word: &str) -> Option<CommandView> {
     if clean == ".gitleaksignore" {
         return Some(CommandView::GitleaksIgnore);
     }
+    if clean == ".gitignore" {
+        return Some(CommandView::Gitignore);
+    }
     if matches!(
         clean.as_str(),
         "readme" | "readme.md" | "changelog.md" | "contributing.md" | "license.md" | "roadmap.md"
@@ -1542,16 +1750,16 @@ fn file_view_for_word(word: &str) -> Option<CommandView> {
     {
         return Some(CommandView::Markdown);
     }
-    if matches!(
-        clean.as_str(),
-        ".env" | ".env.local" | ".env.development" | ".env.production" | ".glimpsrc"
-    ) || clean.ends_with(".yml")
+    if is_dotenv_file_name(&clean) {
+        return Some(CommandView::Dotenv);
+    }
+    if matches!(clean.as_str(), ".glimpsrc")
+        || clean.ends_with(".yml")
         || clean.ends_with(".yaml")
         || clean.ends_with(".toml")
         || clean.ends_with(".ini")
         || clean.ends_with(".conf")
         || clean.ends_with(".cfg")
-        || clean.ends_with(".env")
     {
         return Some(CommandView::Config);
     }
@@ -1571,6 +1779,10 @@ fn file_view_for_word(word: &str) -> Option<CommandView> {
         return Some(CommandView::Code(lang));
     }
     None
+}
+
+fn is_dotenv_file_name(name: &str) -> bool {
+    name == ".env" || name.starts_with(".env.") || name.ends_with(".env")
 }
 
 fn code_language_for_file(name: &str) -> Option<linefmt::CodeLanguage> {

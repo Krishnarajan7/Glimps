@@ -63,6 +63,84 @@ pub fn try_format(bytes: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     Some(out.into_bytes())
 }
 
+/// Color HTML embedded inside another text format without re-indenting or
+/// otherwise rewriting it. Markdown uses this for raw HTML blocks and inline
+/// fragments so they share the standalone HTML tokenizer and palette.
+pub(crate) fn colorize_fragment_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = if let Some(content) = line.strip_suffix(b"\r\n") {
+        (content, &line[line.len() - 2..])
+    } else if let Some(content) = line.strip_suffix(b"\n") {
+        (content, &line[line.len() - 1..])
+    } else {
+        (line, &b""[..])
+    };
+    std::str::from_utf8(content).ok()?;
+    let tokens = tokenize(content)?;
+    let mut saw_markup = false;
+    let mut out = String::with_capacity(line.len() + 96);
+
+    for token in &tokens {
+        match token {
+            Token::Text(start, end) => out.push_str(&slice(content, *start, *end)),
+            Token::Comment(start, end) => {
+                saw_markup = true;
+                paint(
+                    &mut out,
+                    theme.comment,
+                    theme.reset,
+                    &slice(content, *start, *end),
+                );
+            }
+            Token::Decl(start, end) => {
+                saw_markup = true;
+                colorize_markup(&mut out, &slice(content, *start, *end), theme);
+            }
+            Token::Open {
+                start, end, name, ..
+            }
+            | Token::Close {
+                start, end, name, ..
+            } => {
+                if !valid_embedded_tag_name(name) {
+                    return None;
+                }
+                saw_markup = true;
+                colorize_markup(&mut out, &slice(content, *start, *end), theme);
+            }
+            Token::Raw { open, inner, close } => {
+                let name = tag_name(&content[open.0 + 1..open.1 - 1]);
+                if !valid_embedded_tag_name(&name) {
+                    return None;
+                }
+                saw_markup = true;
+                colorize_markup(&mut out, &slice(content, open.0, open.1), theme);
+                paint(
+                    &mut out,
+                    theme.html_raw,
+                    theme.reset,
+                    &slice(content, inner.0, inner.1),
+                );
+                colorize_markup(&mut out, &slice(content, close.0, close.1), theme);
+            }
+        }
+    }
+    if !saw_markup {
+        return None;
+    }
+    out.push_str(std::str::from_utf8(ending).ok()?);
+    Some(out.into_bytes())
+}
+
+fn valid_embedded_tag_name(name: &str) -> bool {
+    name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 /// Registry entry for the HTML formatter. See [`super::BufferedFormatter`].
 pub struct Html;
 

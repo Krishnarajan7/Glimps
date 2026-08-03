@@ -136,7 +136,19 @@ scripts/dogfood-macos.sh session
 That builds `target/debug/glimps`, starts a wrapped zsh using a temporary
 `ZDOTDIR`, and cleans up when you exit. It does **not** install GLIMPS globally,
 does **not** edit `~/.zshrc`, and does **not** change your login shell. This is
-the recommended first test on a Mac.
+the recommended first test on a Mac. Dogfood command history is kept separately
+at `${XDG_STATE_HOME:-$HOME/.local/state}/glimps/dogfood_history`, so it survives
+normal exits without modifying your regular zsh history.
+
+After editing GLIMPS source, rebuild and resume the active dogfood session with:
+
+```bash
+glimps-update
+```
+
+The command restarts the wrapper with the new binary while preserving dogfood
+history and the current working directory. Running jobs and unsaved shell-local
+variables cannot cross that controlled restart.
 
 ## Install From Source
 
@@ -257,7 +269,10 @@ earn it. These are hard rules enforced in the code:
 - **Secret-printing commands pass through raw.** Known credential readers such
   as Keychain password reveal commands, `gh auth token`, password-manager CLIs,
   cloud secret fetches, and direct reads of common secret files are not
-  formatted, pinned, or quoted in failure summaries.
+  formatted, pinned, or quoted in failure summaries. Deliberately reading a
+  dotenv file with `cat`, `head`, `tail`, or `sed` is the narrow exception:
+  GLIMPS may add byte-preserving ANSI color to that requested text, but disables
+  error pinning so values are never duplicated into its own summaries.
 - **The terminal is always restored** on exit — including on crash.
 - **Simple off switch.** Start a shell with `GLIMPS=0` to skip wrapping, or set
   `enabled = false` in `~/.glimpsrc` to turn it off persistently for new
@@ -287,15 +302,17 @@ new raw shell with `GLIMPS=0 zsh`.
   is verified from a real version tag.
 - The current formatter handles whole JSON/HTML/diff/HTTP-response documents,
   streaming log/HTTP/stack-trace lines, and command-aware `cd`, `find`, `ls`,
-  `du`, `df`, `ps`, `dig`/`nslookup`, macOS networking output (`ifconfig`,
+  `du`, `df`, `ps`, `ping`, `dig`/`nslookup`, macOS networking output (`ifconfig`,
   `scutil --dns`, `route get default`, `netstat -rn`, `lsof -i`,
-  `networksetup`), system status output (`launchctl list`, `pmset -g`),
-  `man`/help output, Markdown project files, YAML/TOML/INI/dotenv-style config
-  files, `.gitleaksignore` fingerprints, CSV/TSV files, SQL query files,
+  `networksetup`), macOS disk and file metadata (`diskutil info`, `GetFileInfo`, `xattr -l`), system status
+  output (`launchctl list`, `pmset -g`),
+  `man`/help output and manual-index searches (`whatis`, `apropos`, `man -k`, `man -f`), Markdown project files, YAML/TOML/INI/dotenv-style config
+  files, `.gitignore` patterns, `.gitleaksignore` fingerprints, CSV/TSV files, SQL query files,
   JSON-lines streams/files, common source-code extensions shown through reader
   commands, common database CLI result tables, and Git status/branch/log/stat
   output. It also displays
-  command exit code, duration, and failure summaries
+  command exit code, duration, success breadcrumbs for recognized silent actions
+  such as `cd`, `touch`, `mkdir`, `rm`, and `killall`, and failure summaries
   when the shell integration provides the command-end marker.
   Mixed-content output, such as JSON embedded inside non-JSON log lines, is
   planned later.
@@ -356,8 +373,9 @@ PTY supervisor, raw-mode handling, or the OSC-133 scanner:
   change must leave alone.
 - **Read first:** [`CONTRIBUTING.md`](./CONTRIBUTING.md) and
   [`docs/FORMATTER_DESIGN_GUIDE.md`](./docs/FORMATTER_DESIGN_GUIDE.md).
-- **Try it like a user:** `scripts/dogfood-macos.sh session` wraps a throwaway
-  zsh and cleans up on exit — it won't touch your `~/.zshrc`.
+- **Try it like a user:** `scripts/dogfood-macos.sh session` wraps a temporary
+  zsh configuration and cleans it up on exit. It won't touch your `~/.zshrc`;
+  dogfood history is retained in a separate state file for the next session.
 
 Comment on an issue to claim it before you start. A ten-line question beats a
 two-hundred-line PR that went the wrong way.

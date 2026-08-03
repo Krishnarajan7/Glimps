@@ -1,7 +1,10 @@
 //! Filesystem and process command views.
 
-use super::super::theme::Theme;
-use super::{colorize_size_path_line, colorize_words, paint_whole, split_line, word_spans};
+use super::super::{cmdline, theme::Theme};
+use super::{
+    colorize_size_path_line, colorize_words, paint_bytes, paint_whole, split_line,
+    trim_ascii_start, word_spans,
+};
 
 /// Color one `find` output line as a path without filesystem lookups.
 pub fn colorize_find_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
@@ -35,6 +38,99 @@ pub fn colorize_find_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Color `whereis` results as a command label followed by typed locations.
+/// Manual-page locations are distinguished from executable/source paths while
+/// preserving the command's spacing and line ending exactly.
+pub fn colorize_whereis_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let colon = content.iter().position(|byte| *byte == b':')?;
+    let label = &content[..colon];
+    if label.is_empty()
+        || label.iter().any(u8::is_ascii_whitespace)
+        || !label
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-' | b'.'))
+    {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(line.len() + 64);
+    paint_bytes(&mut out, theme.key, label, theme.reset);
+    paint_bytes(&mut out, theme.comment, b":", theme.reset);
+
+    let locations = &content[colon + 1..];
+    let words = word_spans(locations);
+    let mut cursor = 0;
+    for (start, end) in words {
+        out.extend_from_slice(&locations[cursor..start]);
+        let location = &locations[start..end];
+        let color = if is_manual_page_path(location) {
+            theme.keyword
+        } else {
+            theme.path
+        };
+        paint_bytes(&mut out, color, location, theme.reset);
+        cursor = end;
+    }
+    out.extend_from_slice(&locations[cursor..]);
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+fn is_manual_page_path(path: &[u8]) -> bool {
+    path.windows(4)
+        .any(|window| window.eq_ignore_ascii_case(b"/man"))
+}
+
+/// Color one shell-history row: event number first, then the original command
+/// using the same syntax colors as the GLIMPS command header.
+pub fn colorize_history_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    colorize_numbered_command_line(line, theme)
+}
+
+/// Color an aggregated history-frequency row such as `uniq -c` emits.
+pub fn colorize_history_count_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    colorize_numbered_command_line(line, theme)
+}
+
+fn colorize_numbered_command_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let number_start = content
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())?;
+    let number_end = content[number_start..]
+        .iter()
+        .position(|byte| !byte.is_ascii_digit())
+        .map(|offset| number_start + offset)
+        .unwrap_or(content.len());
+    if number_start == number_end || number_end == content.len() {
+        return None;
+    }
+    let command_start = content[number_end..]
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .map(|offset| number_end + offset)?;
+
+    let mut out = Vec::with_capacity(line.len() + 64);
+    out.extend_from_slice(&content[..number_start]);
+    paint_bytes(
+        &mut out,
+        theme.number,
+        &content[number_start..number_end],
+        theme.reset,
+    );
+    out.extend_from_slice(&content[number_end..command_start]);
+    out.extend_from_slice(&cmdline::render(&content[command_start..], theme));
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
 /// Color one `ls` output line. Handles both long listings and simple
 /// multi-column filename output without changing any visible text.
 pub fn colorize_ls_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
@@ -58,14 +154,25 @@ pub fn colorize_ls_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     let first = &content[words[0].0..words[0].1];
     let long_listing = looks_like_mode(first) && words.len() >= 8;
     let name_start = if long_listing { 8 } else { 0 };
-    let long_name_is_hidden =
-        long_listing && is_hidden_ls_name(&content[words[name_start].0..words[name_start].1]);
-    let name_color = if long_name_is_hidden {
+    let long_name = long_listing.then(|| &content[words[name_start].0..words[name_start].1]);
+    let arrow_idx = if long_listing {
+        words
+            .iter()
+            .enumerate()
+            .skip(name_start)
+            .find_map(|(idx, (start, end))| (&content[*start..*end] == b"->").then_some(idx))
+    } else {
+        None
+    };
+    let name_color = if long_name.is_some_and(is_dot_ls_entry) {
+        theme.comment
+    } else if long_name.is_some_and(is_hidden_ls_name) {
         theme.hidden
     } else {
         match first.first().copied() {
             Some(b'd') => theme.folder,
             Some(b'l') => theme.keyword,
+            Some(b'-') if is_executable_mode(first) => theme.info,
             _ => theme.string,
         }
     };
@@ -76,26 +183,145 @@ pub fn colorize_ls_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
                 0 => Some(theme.debug),
                 1 | 4 => Some(theme.number),
                 2 | 3 | 5..=7 => Some(theme.comment),
+                i if arrow_idx == Some(i) => Some(theme.comment),
+                i if arrow_idx.is_some_and(|arrow| i > arrow) => Some(theme.path),
                 i if i >= name_start => Some(name_color),
                 _ => None,
             }
-        } else if word == b"->" {
+        } else if is_dot_ls_entry(word) || word == b"->" {
             Some(theme.comment)
         } else if is_hidden_ls_name(word) {
             Some(theme.hidden)
+        } else if word.ends_with(b"/") {
+            Some(theme.folder)
+        } else if word.ends_with(b"*") {
+            Some(theme.info)
+        } else if word.ends_with(b"@") {
+            Some(theme.keyword)
         } else {
-            Some(theme.key)
+            Some(theme.string)
         }
     }))
+}
+
+fn is_dot_ls_entry(name: &[u8]) -> bool {
+    matches!(name, b"." | b"..")
 }
 
 fn is_hidden_ls_name(name: &[u8]) -> bool {
     name.starts_with(b".") && name != b"." && name != b".."
 }
 
+fn is_executable_mode(mode: &[u8]) -> bool {
+    mode.iter()
+        .skip(1)
+        .take(9)
+        .any(|byte| matches!(*byte, b'x' | b's' | b't'))
+}
+
 /// Color `du` output: size first, path after.
 pub fn colorize_du_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     colorize_size_path_line(line, theme)
+}
+
+/// Color the label/value report emitted by macOS `GetFileInfo`.
+pub fn colorize_getfileinfo_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    let colon = trimmed.iter().position(|byte| *byte == b':')?;
+    let label = &trimmed[..colon];
+    if label.is_empty()
+        || !label
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_' | b'-'))
+    {
+        return None;
+    }
+
+    let offset = content.len() - trimmed.len();
+    let value_start = offset + colon + 1;
+    let value = &content[value_start..];
+    let value_color = match ascii_lower(label).as_slice() {
+        b"file" | b"directory" => theme.path,
+        b"created" | b"modified" => theme.number,
+        b"attributes" | b"type" | b"creator" => theme.keyword,
+        _ => theme.string,
+    };
+
+    let mut out = Vec::with_capacity(line.len() + 40);
+    out.extend_from_slice(&content[..offset]);
+    paint_bytes(&mut out, theme.key, label, theme.reset);
+    paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+    if !value.is_empty() {
+        paint_bytes(&mut out, value_color, value, theme.reset);
+    }
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+/// Color macOS `xattr -l` extended-attribute names and their values.
+pub fn colorize_xattr_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(colon) = trimmed.iter().position(|byte| *byte == b':') {
+        let name = &trimmed[..colon];
+        if !name.is_empty()
+            && name
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b'-'))
+        {
+            let offset = content.len() - trimmed.len();
+            let value_start = offset + colon + 1;
+            let value = &content[value_start..];
+            let color = if looks_like_hex_value(value) {
+                theme.number
+            } else {
+                theme.string
+            };
+            let mut out = Vec::with_capacity(line.len() + 40);
+            out.extend_from_slice(&content[..offset]);
+            paint_bytes(&mut out, theme.key, name, theme.reset);
+            paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+            if !value.is_empty() {
+                paint_bytes(&mut out, color, value, theme.reset);
+            }
+            out.extend_from_slice(ending);
+            return Some(out);
+        }
+    }
+
+    Some(paint_whole(
+        content,
+        ending,
+        if looks_like_hex_value(trimmed) {
+            theme.number
+        } else {
+            theme.string
+        },
+        theme.reset,
+    ))
+}
+
+fn ascii_lower(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().map(u8::to_ascii_lowercase).collect()
+}
+
+fn looks_like_hex_value(value: &[u8]) -> bool {
+    let trimmed = trim_ascii_start(value);
+    !trimmed.is_empty()
+        && trimmed
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit() || byte.is_ascii_whitespace())
 }
 
 pub fn colorize_kubectl_pods_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
@@ -161,8 +387,9 @@ fn parse_u16(bytes: &[u8]) -> Option<u16> {
     std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
-/// Color `df` output: header dimmed, numeric columns highlighted, high capacity
-/// values warned.
+/// Color `df` output by storage meaning rather than treating every number alike.
+/// The capacity column anchors the schema, so multi-word filesystem names such
+/// as macOS `map auto_home` do not shift the remaining columns.
 pub fn colorize_df_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     if theme.reset.is_empty() {
         return None;
@@ -174,20 +401,69 @@ pub fn colorize_df_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     }
     let first = &content[words[0].0..words[0].1];
     if first == b"Filesystem" {
-        return Some(paint_whole(content, ending, theme.debug, theme.reset));
+        return Some(colorize_words(
+            content,
+            ending,
+            theme,
+            |_idx, word| match word {
+                b"Filesystem" => Some(theme.key),
+                b"Used" | b"iused" => Some(theme.warn),
+                b"Avail" | b"Available" | b"ifree" => Some(theme.info),
+                b"Capacity" | b"Use%" | b"%iused" => Some(theme.keyword),
+                b"Mounted" | b"on" => Some(theme.path),
+                _ => Some(theme.muted),
+            },
+        ));
     }
-    Some(colorize_words(
-        content,
-        ending,
-        theme,
-        |idx, word| match idx {
-            0 => Some(theme.key),
-            1..=3 => Some(theme.number),
-            4 if percent_value(word).is_some_and(|p| p >= 90) => Some(theme.warn),
-            4 => Some(theme.number),
-            _ => Some(theme.string),
-        },
-    ))
+
+    let percentages = words
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (start, end))| {
+            percent_value(&content[*start..*end]).map(|value| (idx, value))
+        })
+        .collect::<Vec<_>>();
+    let (capacity_idx, _) = *percentages.first()?;
+    if capacity_idx < 3 {
+        return None;
+    }
+    let size_idx = capacity_idx - 3;
+    let used_idx = capacity_idx - 2;
+    let available_idx = capacity_idx - 1;
+    let inode_percent_idx = percentages.get(1).map(|(idx, _)| *idx);
+    let mount_idx = inode_percent_idx.map_or(capacity_idx + 1, |idx| idx + 1);
+
+    Some(colorize_words(content, ending, theme, |idx, word| {
+        if idx < size_idx {
+            Some(theme.key)
+        } else if idx == size_idx {
+            Some(theme.muted)
+        } else if idx == used_idx {
+            Some(theme.warn)
+        } else if idx == available_idx {
+            Some(theme.info)
+        } else if idx == capacity_idx || inode_percent_idx == Some(idx) {
+            percent_value(word).map(|value| storage_pressure_color(value, theme))
+        } else if inode_percent_idx.is_some_and(|inode_idx| idx + 2 == inode_idx) {
+            Some(theme.warn)
+        } else if inode_percent_idx.is_some_and(|inode_idx| idx + 1 == inode_idx) {
+            Some(theme.info)
+        } else if idx >= mount_idx {
+            Some(theme.path)
+        } else {
+            Some(theme.string)
+        }
+    }))
+}
+
+fn storage_pressure_color(percent: f64, theme: &Theme) -> &'static str {
+    if percent >= 90.0 {
+        theme.error
+    } else if percent >= 70.0 {
+        theme.warn
+    } else {
+        theme.info
+    }
 }
 
 /// Color `ps` output: header dimmed, ids/resources highlighted, expensive rows
@@ -236,7 +512,7 @@ fn looks_like_mode(word: &[u8]) -> bool {
         })
 }
 
-fn percent_value(word: &[u8]) -> Option<u8> {
+fn percent_value(word: &[u8]) -> Option<f64> {
     let number = word.strip_suffix(b"%").unwrap_or(word);
     std::str::from_utf8(number).ok()?.parse().ok()
 }

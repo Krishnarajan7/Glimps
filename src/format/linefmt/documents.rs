@@ -6,6 +6,12 @@ use super::{
     CodeLanguage,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkdownEmbeddedLanguage {
+    Code(CodeLanguage),
+    Html,
+}
+
 /// Clean and lightly format classic man-page overstrike output.
 pub fn format_man_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     let (content, ending) = split_line(line);
@@ -30,6 +36,100 @@ pub fn format_man_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     out.extend_from_slice(theme.reset.as_bytes());
     out.extend_from_slice(ending);
     Some(out)
+}
+
+/// Color one `whatis`/`apropos` result while preserving its aligned text.
+///
+/// Results have the shape `name(section), alias(section) - description`. Some
+/// shell built-in entries contain hundreds of aliases on one physical line, so
+/// this parser streams spans into the result without splitting or wrapping it.
+pub fn colorize_man_index_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let separator = content.windows(3).position(|window| window == b" - ")?;
+    let entries = &content[..separator];
+    let description = &content[separator + 3..];
+    if description.is_empty() || !valid_man_index_entries(entries) {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(line.len() + 96);
+    let mut index = 0;
+    while index < entries.len() {
+        let start = index;
+        match entries[index] {
+            byte if byte.is_ascii_whitespace() => {
+                index += 1;
+                while index < entries.len() && entries[index].is_ascii_whitespace() {
+                    index += 1;
+                }
+                out.extend_from_slice(&entries[start..index]);
+            }
+            b'(' => {
+                paint_bytes(&mut out, theme.html_delim, b"(", theme.reset);
+                index += 1;
+                let section_start = index;
+                while index < entries.len() && entries[index] != b')' {
+                    index += 1;
+                }
+                paint_bytes(
+                    &mut out,
+                    theme.number,
+                    &entries[section_start..index],
+                    theme.reset,
+                );
+                paint_bytes(&mut out, theme.html_delim, b")", theme.reset);
+                index += 1;
+            }
+            b',' => {
+                index += 1;
+                while index < entries.len() && entries[index].is_ascii_whitespace() {
+                    index += 1;
+                }
+                paint_bytes(
+                    &mut out,
+                    theme.html_delim,
+                    &entries[start..index],
+                    theme.reset,
+                );
+            }
+            _ => {
+                index += 1;
+                while index < entries.len() && !matches!(entries[index], b'(' | b',') {
+                    index += 1;
+                }
+                paint_bytes(&mut out, theme.key, &entries[start..index], theme.reset);
+            }
+        }
+    }
+    paint_bytes(&mut out, theme.html_delim, b" - ", theme.reset);
+    paint_bytes(&mut out, theme.muted, description, theme.reset);
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+fn valid_man_index_entries(entries: &[u8]) -> bool {
+    let mut saw_entry = false;
+    for entry in entries.split(|byte| *byte == b',') {
+        let entry = trim_ascii(entry);
+        let Some(open) = entry.iter().rposition(|byte| *byte == b'(') else {
+            return false;
+        };
+        if !entry.ends_with(b")") || open == 0 || open + 2 >= entry.len() {
+            return false;
+        }
+        let section = &entry[open + 1..entry.len() - 1];
+        if !section
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'+' | b'-'))
+        {
+            return false;
+        }
+        saw_entry = true;
+    }
+    saw_entry
 }
 
 /// Color Markdown output from project-file commands such as `cat README.md`.
@@ -68,7 +168,7 @@ pub fn colorize_markdown_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     paint_markdown_inline(content, ending, theme, None)
 }
 
-pub fn markdown_fence_language(line: &[u8]) -> Option<Option<CodeLanguage>> {
+pub fn markdown_fence_language(line: &[u8]) -> Option<Option<MarkdownEmbeddedLanguage>> {
     let (content, _) = split_line(line);
     let trimmed = trim_ascii_start(content);
     let fence = if trimmed.starts_with(b"```") {
@@ -139,6 +239,100 @@ pub fn colorize_config_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     None
 }
 
+/// Color dotenv assignments without changing or summarizing their values.
+///
+/// Real `.env` files commonly contain credentials, so this formatter is only a
+/// visual pass: keys, delimiters, typed values, and comments receive ANSI spans,
+/// while the original bytes remain recoverable exactly after stripping ANSI.
+pub fn colorize_dotenv_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with(b"#") {
+        return Some(paint_whole(content, ending, theme.comment, theme.reset));
+    }
+
+    let offset = content.len() - trimmed.len();
+    let (export, assignment) = if let Some(rest) = trimmed.strip_prefix(b"export ") {
+        (true, rest)
+    } else {
+        (false, trimmed)
+    };
+    let equals = assignment.iter().position(|byte| *byte == b'=')?;
+    let key = trim_ascii_end(&assignment[..equals]);
+    if !valid_dotenv_key(key) {
+        return None;
+    }
+    let after_equals = &assignment[equals + 1..];
+    let comment = dotenv_comment_start(after_equals);
+    let value = &after_equals[..comment.unwrap_or(after_equals.len())];
+    let inline_comment = comment.map(|index| &after_equals[index..]);
+
+    let mut out = Vec::with_capacity(line.len() + 80);
+    out.extend_from_slice(&content[..offset]);
+    if export {
+        paint_bytes(&mut out, theme.keyword, b"export", theme.reset);
+        out.push(b' ');
+    }
+    paint_bytes(&mut out, theme.key, key, theme.reset);
+    out.extend_from_slice(&assignment[key.len()..equals]);
+    paint_bytes(&mut out, theme.html_delim, b"=", theme.reset);
+    if !value.is_empty() {
+        paint_bytes(
+            &mut out,
+            color_for_config_value(value, theme),
+            value,
+            theme.reset,
+        );
+    }
+    if let Some(comment) = inline_comment {
+        paint_bytes(&mut out, theme.comment, comment, theme.reset);
+    }
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+fn valid_dotenv_key(key: &[u8]) -> bool {
+    key.first()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+        && key
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'.' | b'-'))
+}
+
+fn dotenv_comment_start(value: &[u8]) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in value.iter().copied().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte == b'\\' && quote == Some(b'"') {
+            escaped = true;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            if quote == Some(byte) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(byte);
+            }
+            continue;
+        }
+        if byte == b'#' && quote.is_none() && (index == 0 || value[index - 1].is_ascii_whitespace())
+        {
+            return Some(index);
+        }
+    }
+    None
+}
+
 /// Color `.gitleaksignore` comments and fingerprints.
 ///
 /// A fingerprint has the shape `<commit>:<path>:<rule-id>:<line>`. Paths may
@@ -191,6 +385,80 @@ pub fn colorize_gitleaks_ignore_line(line: &[u8], theme: &Theme) -> Option<Vec<u
     paint_bytes(&mut out, theme.keyword, rule, theme.reset);
     paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
     paint_bytes(&mut out, theme.number, line_number, theme.reset);
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+/// Color a `.gitignore` pattern without changing any of its bytes.
+///
+/// Gitignore syntax is deliberately kept distinct from generic configuration:
+/// comments are muted, negation is highlighted, path separators stay subtle,
+/// and glob operators stand out from the literal path around them.
+pub fn colorize_gitignore_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    if content.is_empty() {
+        return None;
+    }
+    if content.starts_with(b"#") {
+        return Some(paint_whole(content, ending, theme.comment, theme.reset));
+    }
+
+    let mut out = Vec::with_capacity(line.len() + 64);
+    let mut index = 0;
+    if content.starts_with(b"!") {
+        paint_bytes(&mut out, theme.keyword, b"!", theme.reset);
+        index = 1;
+    }
+
+    while index < content.len() {
+        let start = index;
+        let color = match content[index] {
+            b'\\' => {
+                index = (index + 2).min(content.len());
+                theme.string
+            }
+            b'*' => {
+                while content.get(index) == Some(&b'*') {
+                    index += 1;
+                }
+                theme.warn
+            }
+            b'?' => {
+                index += 1;
+                theme.warn
+            }
+            b'[' => {
+                index += 1;
+                while index < content.len() {
+                    let byte = content[index];
+                    index += 1;
+                    if byte == b'\\' && index < content.len() {
+                        index += 1;
+                    } else if byte == b']' {
+                        break;
+                    }
+                }
+                theme.warn
+            }
+            b'/' => {
+                index += 1;
+                theme.html_delim
+            }
+            _ => {
+                index += 1;
+                while index < content.len()
+                    && !matches!(content[index], b'\\' | b'*' | b'?' | b'[' | b'/')
+                {
+                    index += 1;
+                }
+                theme.string
+            }
+        };
+        paint_bytes(&mut out, color, &content[start..index], theme.reset);
+    }
     out.extend_from_slice(ending);
     Some(out)
 }
@@ -355,24 +623,26 @@ fn markdown_html_comment_end(bytes: &[u8], start: usize) -> Option<usize> {
     Some(start + 7 + end_rel)
 }
 
-fn markdown_code_language(lang: &[u8]) -> Option<CodeLanguage> {
+fn markdown_code_language(lang: &[u8]) -> Option<MarkdownEmbeddedLanguage> {
     let lower = lang.to_ascii_lowercase();
-    match lower.as_slice() {
-        b"bash" | b"sh" | b"shell" | b"zsh" | b"fish" | b"console" => Some(CodeLanguage::Shell),
-        b"rust" | b"rs" => Some(CodeLanguage::Rust),
-        b"python" | b"py" => Some(CodeLanguage::Python),
-        b"javascript" | b"js" | b"jsx" => Some(CodeLanguage::JavaScript),
-        b"typescript" | b"ts" | b"tsx" => Some(CodeLanguage::TypeScript),
-        b"go" => Some(CodeLanguage::Go),
-        b"java" => Some(CodeLanguage::Java),
-        b"kotlin" | b"kt" => Some(CodeLanguage::Kotlin),
-        b"swift" => Some(CodeLanguage::Swift),
-        b"ruby" | b"rb" => Some(CodeLanguage::Ruby),
-        b"php" => Some(CodeLanguage::Php),
-        b"css" | b"scss" | b"sass" => Some(CodeLanguage::Css),
-        b"c" | b"h" | b"cpp" | b"cc" | b"cxx" | b"hpp" => Some(CodeLanguage::CLike),
-        _ => None,
-    }
+    let code = match lower.as_slice() {
+        b"html" | b"htm" => return Some(MarkdownEmbeddedLanguage::Html),
+        b"bash" | b"sh" | b"shell" | b"zsh" | b"fish" | b"console" => CodeLanguage::Shell,
+        b"rust" | b"rs" => CodeLanguage::Rust,
+        b"python" | b"py" => CodeLanguage::Python,
+        b"javascript" | b"js" | b"jsx" => CodeLanguage::JavaScript,
+        b"typescript" | b"ts" | b"tsx" => CodeLanguage::TypeScript,
+        b"go" => CodeLanguage::Go,
+        b"java" => CodeLanguage::Java,
+        b"kotlin" | b"kt" => CodeLanguage::Kotlin,
+        b"swift" => CodeLanguage::Swift,
+        b"ruby" | b"rb" => CodeLanguage::Ruby,
+        b"php" => CodeLanguage::Php,
+        b"css" | b"scss" | b"sass" => CodeLanguage::Css,
+        b"c" | b"h" | b"cpp" | b"cc" | b"cxx" | b"hpp" => CodeLanguage::CLike,
+        _ => return None,
+    };
+    Some(MarkdownEmbeddedLanguage::Code(code))
 }
 
 fn key_value_separator(bytes: &[u8]) -> Option<usize> {

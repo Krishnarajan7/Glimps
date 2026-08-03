@@ -1,6 +1,6 @@
 //! Lightweight source-code lexer for reader commands.
 
-use super::super::theme::Theme;
+use super::super::{cmdline, theme::Theme};
 use super::{find_sql_block_comment_end, lower_ascii, paint_bytes, split_line};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +27,9 @@ pub enum CodeLanguage {
 pub fn colorize_code_line(line: &[u8], theme: &Theme, lang: CodeLanguage) -> Option<Vec<u8>> {
     if theme.reset.is_empty() {
         return None;
+    }
+    if lang == CodeLanguage::Shell {
+        return colorize_shell_line(line, theme);
     }
     let (content, ending) = split_line(line);
     if content.is_empty() {
@@ -84,6 +87,49 @@ pub fn colorize_code_line(line: &[u8], theme: &Theme, lang: CodeLanguage) -> Opt
     }
     out.extend_from_slice(ending);
     Some(out)
+}
+
+fn colorize_shell_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    let (content, ending) = split_line(line);
+    if content.is_empty() {
+        return None;
+    }
+    let comment = shell_comment_start(content);
+    let command = &content[..comment.unwrap_or(content.len())];
+    let mut out = cmdline::render(command, theme);
+    if let Some(start) = comment {
+        paint_bytes(&mut out, theme.comment, &content[start..], theme.reset);
+    }
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+fn shell_comment_start(bytes: &[u8]) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            if quote == Some(byte) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(byte);
+            }
+            continue;
+        }
+        if byte == b'#' && quote.is_none() && (index == 0 || bytes[index - 1].is_ascii_whitespace())
+        {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn code_line_comment_end(bytes: &[u8], start: usize, lang: CodeLanguage) -> Option<usize> {
