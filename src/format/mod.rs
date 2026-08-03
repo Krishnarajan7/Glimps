@@ -995,29 +995,76 @@ impl Formatter {
             CommandView::NetworkSetup => linefmt::colorize_networksetup_line(line, &self.theme),
             CommandView::Man => linefmt::format_man_line(line, &self.theme),
             CommandView::ManIndex => linefmt::colorize_man_index_line(line, &self.theme),
-            CommandView::Markdown => self.format_markdown_line(line),
-            CommandView::Config => linefmt::colorize_config_line(line, &self.theme),
-            CommandView::Dotenv => linefmt::colorize_dotenv_line(line, &self.theme),
-            CommandView::Gitignore => linefmt::colorize_gitignore_line(line, &self.theme),
-            CommandView::GitleaksIgnore => {
-                linefmt::colorize_gitleaks_ignore_line(line, &self.theme)
-            }
-            CommandView::Delimited(delimiter) => linefmt::colorize_delimited_line(
-                line,
-                &self.theme,
-                delimiter,
-                self.command_output_line_count == 0,
-            ),
-            CommandView::Sql => linefmt::colorize_sql_line(line, &self.theme),
+            CommandView::File(view) => self.format_file_line(line, view),
+            CommandView::Nl(view) => self.format_nl_line(line, view),
             CommandView::SqlResult => linefmt::colorize_sql_result_line(
                 line,
                 &self.theme,
                 self.command_output_line_count <= 1,
             ),
-            CommandView::JsonLines => linefmt::colorize_json_line(line, &self.theme),
-            CommandView::Code(lang) => linefmt::colorize_code_line(line, &self.theme, lang),
             CommandView::Git(view) => linefmt::colorize_git_line(line, &self.theme, view),
         }
+    }
+
+    fn format_file_line(&mut self, line: &[u8], view: FileView) -> Option<Vec<u8>> {
+        match view {
+            FileView::Html => html::colorize_fragment_line(line, &self.theme),
+            FileView::Markdown => self.format_markdown_line(line),
+            FileView::Config => linefmt::colorize_config_line(line, &self.theme),
+            FileView::Dotenv => linefmt::colorize_dotenv_line(line, &self.theme),
+            FileView::Gitignore => linefmt::colorize_gitignore_line(line, &self.theme),
+            FileView::GitleaksIgnore => linefmt::colorize_gitleaks_ignore_line(line, &self.theme),
+            FileView::Delimited(delimiter) => linefmt::colorize_delimited_line(
+                line,
+                &self.theme,
+                delimiter,
+                self.command_output_line_count == 0,
+            ),
+            FileView::Sql => linefmt::colorize_sql_line(line, &self.theme),
+            FileView::Json => linefmt::colorize_json_fragment_line(line, &self.theme),
+            FileView::JsonLines => linefmt::colorize_json_line(line, &self.theme),
+            FileView::Code(lang) => linefmt::colorize_code_line(line, &self.theme, lang),
+        }
+    }
+
+    fn format_nl_line(&mut self, line: &[u8], view: NlView) -> Option<Vec<u8>> {
+        let (content, ending) = split_line_ending(line);
+        let gutter = parse_nl_gutter(content, view.width, view.separator_len)?;
+        let payload = &content[gutter.payload_start..];
+        let mut payload_line = Vec::with_capacity(payload.len() + ending.len());
+        payload_line.extend_from_slice(payload);
+        payload_line.extend_from_slice(ending);
+        let formatted_payload = view
+            .file
+            .and_then(|file_view| self.format_file_line(&payload_line, file_view));
+
+        let mut out = Vec::with_capacity(line.len() + 96);
+        out.extend_from_slice(&content[..gutter.number_start]);
+        if gutter.number_start < gutter.number_end {
+            linefmt::paint_bytes(
+                &mut out,
+                self.theme.comment,
+                &content[gutter.number_start..gutter.number_end],
+                self.theme.reset,
+            );
+        }
+        out.extend_from_slice(&content[gutter.number_end..gutter.field_end]);
+        if gutter.field_end < gutter.payload_start {
+            linefmt::paint_bytes(
+                &mut out,
+                self.theme.debug,
+                &content[gutter.field_end..gutter.payload_start],
+                self.theme.reset,
+            );
+        }
+        match formatted_payload {
+            Some(formatted) => out.extend_from_slice(&formatted),
+            None => {
+                out.extend_from_slice(payload);
+                out.extend_from_slice(ending);
+            }
+        }
+        Some(out)
     }
 
     fn format_markdown_line(&mut self, line: &[u8]) -> Option<Vec<u8>> {
@@ -1054,16 +1101,9 @@ impl Formatter {
                     | CommandView::Whereis
                     | CommandView::History
                     | CommandView::HistoryCounts
-                    | CommandView::Markdown
-                    | CommandView::Config
-                    | CommandView::Dotenv
-                    | CommandView::Gitignore
-                    | CommandView::GitleaksIgnore
-                    | CommandView::Delimited(_)
-                    | CommandView::Sql
+                    | CommandView::File(_)
+                    | CommandView::Nl(_)
                     | CommandView::SqlResult
-                    | CommandView::JsonLines
-                    | CommandView::Code(_)
                     | CommandView::Git(_)
                     | CommandView::DiskutilInfo
                     | CommandView::Ping
@@ -1289,6 +1329,16 @@ enum CommandView {
     Pmset,
     Man,
     ManIndex,
+    File(FileView),
+    Nl(NlView),
+    SqlResult,
+    Git(linefmt::GitView),
+    NetworkSetup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileView {
+    Html,
     Markdown,
     Config,
     Dotenv,
@@ -1296,11 +1346,24 @@ enum CommandView {
     GitleaksIgnore,
     Delimited(u8),
     Sql,
-    SqlResult,
+    Json,
     JsonLines,
     Code(linefmt::CodeLanguage),
-    Git(linefmt::GitView),
-    NetworkSetup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NlView {
+    file: Option<FileView>,
+    width: usize,
+    separator_len: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NlGutter {
+    number_start: usize,
+    number_end: usize,
+    field_end: usize,
+    payload_start: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1388,6 +1451,7 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "diskutil" => diskutil_command_view(cmd),
         "xattr" => xattr_command_view(cmd),
         "history" => history_command_view(cmd),
+        "nl" => nl_command_view(cmd),
         "man" => man_command_view(cmd),
         "apropos" | "whatis" => Some(CommandView::ManIndex),
         "git" => git_command_view(cmd),
@@ -1707,8 +1771,184 @@ fn git_args_request_stat(args: &[&str]) -> bool {
     })
 }
 
+fn nl_command_view(command: &[u8]) -> Option<CommandView> {
+    let stages = shell_pipeline_words(command)?;
+    let first = stages.first()?;
+    if stage_name(first) != Some("nl") {
+        return None;
+    }
+    if stages.iter().skip(1).any(|stage| {
+        !matches!(
+            stage_name(stage),
+            Some("head" | "tail" | "sort" | "grep" | "egrep" | "fgrep" | "rg" | "uniq")
+        )
+    }) {
+        return None;
+    }
+
+    let mut width = 6usize;
+    let mut separator_len = 1usize;
+    let mut operands = Vec::new();
+    let mut options = true;
+    let mut index = 1;
+    while index < first.len() {
+        let arg = std::str::from_utf8(&first[index]).ok()?;
+        if options && arg == "--" {
+            options = false;
+            index += 1;
+            continue;
+        }
+        if !options || arg == "-" || !arg.starts_with('-') {
+            operands.push(arg);
+            index += 1;
+            continue;
+        }
+        if matches!(arg, "--help" | "--version") {
+            return Some(CommandView::Man);
+        }
+        if let Some(value) = arg.strip_prefix("--number-width=") {
+            width = parse_nl_width(value)?;
+            index += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--separator=") {
+            separator_len = value.len();
+            index += 1;
+            continue;
+        }
+        if matches!(arg, "--number-width" | "--separator") {
+            let value = std::str::from_utf8(first.get(index + 1)?).ok()?;
+            if arg == "--number-width" {
+                width = parse_nl_width(value)?;
+            } else {
+                separator_len = value.len();
+            }
+            index += 2;
+            continue;
+        }
+        if matches!(
+            arg,
+            "--body-numbering"
+                | "--section-delimiter"
+                | "--footer-numbering"
+                | "--header-numbering"
+                | "--line-increment"
+                | "--join-blank-lines"
+                | "--number-format"
+                | "--starting-line-number"
+        ) {
+            index += 2;
+            if index > first.len() {
+                return None;
+            }
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("-w") {
+            let value = if rest.is_empty() {
+                index += 1;
+                std::str::from_utf8(first.get(index)?).ok()?
+            } else {
+                rest
+            };
+            width = parse_nl_width(value)?;
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("-s") {
+            let value = if rest.is_empty() {
+                index += 1;
+                std::str::from_utf8(first.get(index)?).ok()?
+            } else {
+                rest
+            };
+            separator_len = value.len();
+            index += 1;
+            continue;
+        }
+        if arg.len() >= 2
+            && matches!(
+                arg.as_bytes()[1],
+                b'b' | b'd' | b'f' | b'h' | b'i' | b'l' | b'n' | b'v'
+            )
+        {
+            if arg.len() == 2 {
+                index += 1;
+                first.get(index)?;
+            }
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+
+    let mut file = None;
+    let mut unknown_file = false;
+    for operand in operands.into_iter().filter(|operand| *operand != "-") {
+        match nl_file_view_for_word(operand) {
+            Some(candidate) if file.is_none() => file = Some(candidate),
+            Some(candidate) if file == Some(candidate) => {}
+            Some(_) | None => unknown_file = true,
+        }
+    }
+    if unknown_file {
+        file = None;
+    }
+    Some(CommandView::Nl(NlView {
+        file,
+        width,
+        separator_len,
+    }))
+}
+
+fn parse_nl_width(value: &str) -> Option<usize> {
+    value.parse::<usize>().ok().map(|width| width.min(4096))
+}
+
+fn parse_nl_gutter(content: &[u8], width: usize, separator_len: usize) -> Option<NlGutter> {
+    if content.len() < width.saturating_add(separator_len) {
+        return None;
+    }
+    if width > 0 && content[..width].iter().all(|byte| *byte == b' ') {
+        return Some(NlGutter {
+            number_start: width,
+            number_end: width,
+            field_end: width,
+            payload_start: width + separator_len,
+        });
+    }
+
+    let number_start = content
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())?;
+    if !content[number_start].is_ascii_digit()
+        || content[..number_start].iter().any(|byte| *byte != b' ')
+    {
+        return None;
+    }
+    let number_end = content[number_start..]
+        .iter()
+        .position(|byte| !byte.is_ascii_digit())
+        .map(|offset| number_start + offset)
+        .unwrap_or(content.len());
+    let field_end = width.max(number_end);
+    let payload_start = field_end.checked_add(separator_len)?;
+    if payload_start > content.len()
+        || content[number_end..field_end]
+            .iter()
+            .any(|byte| *byte != b' ')
+    {
+        return None;
+    }
+    Some(NlGutter {
+        number_start,
+        number_end,
+        field_end,
+        payload_start,
+    })
+}
+
 fn file_content_view(command_name: &str, command: &[u8]) -> Option<CommandView> {
-    if !matches!(command_name, "cat" | "head" | "tail" | "sed") {
+    if !matches!(command_name, "cat" | "head" | "tail" | "sed" | "more") {
         return None;
     }
     let text = std::str::from_utf8(command).ok()?;
@@ -1716,6 +1956,7 @@ fn file_content_view(command_name: &str, command: &[u8]) -> Option<CommandView> 
         .filter(|word| !word.starts_with('-') && !shell_operator_word(word))
         .rev()
         .find_map(file_view_for_word)
+        .map(CommandView::File)
 }
 
 fn shell_operator_word(word: &str) -> bool {
@@ -1725,21 +1966,16 @@ fn shell_operator_word(word: &str) -> bool {
     )
 }
 
-fn file_view_for_word(word: &str) -> Option<CommandView> {
-    let clean = word
-        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | ',' | ':' | ';' | ')' | '('))
-        .rsplit('/')
-        .next()
-        .unwrap_or(word)
-        .to_ascii_lowercase();
+fn file_view_for_word(word: &str) -> Option<FileView> {
+    let clean = clean_file_name(word);
     if clean.is_empty() {
         return None;
     }
     if clean == ".gitleaksignore" {
-        return Some(CommandView::GitleaksIgnore);
+        return Some(FileView::GitleaksIgnore);
     }
     if clean == ".gitignore" {
-        return Some(CommandView::Gitignore);
+        return Some(FileView::Gitignore);
     }
     if matches!(
         clean.as_str(),
@@ -1748,10 +1984,10 @@ fn file_view_for_word(word: &str) -> Option<CommandView> {
         || clean.ends_with(".markdown")
         || clean.ends_with(".mdown")
     {
-        return Some(CommandView::Markdown);
+        return Some(FileView::Markdown);
     }
     if is_dotenv_file_name(&clean) {
-        return Some(CommandView::Dotenv);
+        return Some(FileView::Dotenv);
     }
     if matches!(clean.as_str(), ".glimpsrc")
         || clean.ends_with(".yml")
@@ -1761,24 +1997,49 @@ fn file_view_for_word(word: &str) -> Option<CommandView> {
         || clean.ends_with(".conf")
         || clean.ends_with(".cfg")
     {
-        return Some(CommandView::Config);
+        return Some(FileView::Config);
     }
     if clean.ends_with(".csv") {
-        return Some(CommandView::Delimited(b','));
+        return Some(FileView::Delimited(b','));
     }
     if clean.ends_with(".tsv") || clean.ends_with(".tab") {
-        return Some(CommandView::Delimited(b'\t'));
+        return Some(FileView::Delimited(b'\t'));
     }
     if clean.ends_with(".sql") {
-        return Some(CommandView::Sql);
+        return Some(FileView::Sql);
     }
     if clean.ends_with(".jsonl") || clean.ends_with(".ndjson") {
-        return Some(CommandView::JsonLines);
+        return Some(FileView::JsonLines);
     }
     if let Some(lang) = code_language_for_file(&clean) {
-        return Some(CommandView::Code(lang));
+        return Some(FileView::Code(lang));
     }
     None
+}
+
+fn nl_file_view_for_word(word: &str) -> Option<FileView> {
+    if let Some(view) = file_view_for_word(word) {
+        return Some(view);
+    }
+    let clean = clean_file_name(word);
+    if clean.ends_with(".json") {
+        return Some(FileView::Json);
+    }
+    if matches!(
+        extension(&clean),
+        Some("html" | "htm" | "xhtml" | "xml" | "svg")
+    ) {
+        return Some(FileView::Html);
+    }
+    None
+}
+
+fn clean_file_name(word: &str) -> String {
+    word.trim_matches(|c| matches!(c, '"' | '\'' | '`' | ',' | ':' | ';' | ')' | '('))
+        .rsplit('/')
+        .next()
+        .unwrap_or(word)
+        .to_ascii_lowercase()
 }
 
 fn is_dotenv_file_name(name: &str) -> bool {

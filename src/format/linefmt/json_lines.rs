@@ -24,6 +24,21 @@ pub fn colorize_json_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Color one line from a known JSON document without requiring that line to be
+/// a complete standalone value. Numbering tools such as `nl` split a pretty
+/// document into fragments (`"key": 1,`, braces, array items), so the command's
+/// trusted filename supplies the content-type gate instead of per-line parsing.
+pub fn colorize_json_fragment_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    let (content, ending) = split_line(line);
+    if content.is_empty() || theme.reset.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(line.len() + 64);
+    colorize_json_tokens(&mut out, content, theme);
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
 /// Whether a complete line is one JSON object/array. Used by the formatter core
 /// to avoid buffering JSON-lines streams as one impossible giant JSON document.
 pub fn is_json_line(line: &[u8]) -> bool {

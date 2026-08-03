@@ -9,6 +9,9 @@ use super::cmdline;
 pub(super) enum CommandTrust {
     Normal,
     InteractiveBypass,
+    /// Line-oriented pager output: completed file lines may be styled, while
+    /// unterminated interaction prompts stay live and failure pinning stays off.
+    PagerText,
     /// Deliberately displayed sensitive text (currently dotenv files): allow
     /// byte-preserving line coloring, but never inspect/copy it into error pins.
     SensitiveText,
@@ -39,6 +42,8 @@ pub(super) fn classify(
         .is_some_and(|name| bypass_names.iter().any(|bypass| bypass == name))
     {
         CommandTrust::InteractiveBypass
+    } else if name.as_deref() == Some("more") {
+        CommandTrust::PagerText
     } else {
         CommandTrust::Normal
     };
@@ -144,7 +149,7 @@ fn is_builtin_sensitive(command: &[u8]) -> bool {
             "aws" => sensitive_aws_args(args),
             "gcloud" => sensitive_gcloud_args(args),
             "doppler" => sensitive_doppler_args(args),
-            "cat" | "head" | "tail" | "sed" => args
+            "cat" | "head" | "tail" | "sed" | "more" => args
                 .iter()
                 .any(|arg| std::str::from_utf8(arg).is_ok_and(secret_file_argument)),
             _ => false,
@@ -161,7 +166,7 @@ fn contains_sensitive_file_reader_loose(command: &[u8]) -> bool {
         let clean = token.trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')'));
         matches!(
             clean.rsplit('/').next(),
-            Some("cat" | "head" | "tail" | "sed")
+            Some("cat" | "head" | "tail" | "sed" | "more")
         )
     });
     has_reader && tokens.iter().any(|token| secret_file_argument(token))
@@ -186,7 +191,7 @@ fn reads_dotenv_file(command: &[u8]) -> bool {
         };
         if !matches!(
             name.rsplit('/').next(),
-            Some("cat" | "head" | "tail" | "sed")
+            Some("cat" | "head" | "tail" | "sed" | "more")
         ) {
             return false;
         }

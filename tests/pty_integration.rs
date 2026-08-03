@@ -54,6 +54,19 @@ impl Session {
         contains(&self.snapshot(), needle)
     }
 
+    fn wait_for_any(&self, needles: &[&[u8]], timeout: Duration) -> bool {
+        let end = Instant::now() + timeout;
+        while Instant::now() < end {
+            let snapshot = self.snapshot();
+            if needles.iter().any(|needle| contains(&snapshot, needle)) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let snapshot = self.snapshot();
+        needles.iter().any(|needle| contains(&snapshot, needle))
+    }
+
     /// Poll until the child process has exited, or the timeout elapses.
     fn wait_exit(&mut self, timeout: Duration) -> bool {
         let end = Instant::now() + timeout;
@@ -170,6 +183,19 @@ fn zsh_path() -> Option<String> {
 fn bash_path() -> Option<String> {
     let out = std::process::Command::new("sh")
         .args(["-c", "command -v bash"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+/// Resolve `more` for the pager-liveness regression, or skip where unavailable.
+fn more_path() -> Option<String> {
+    let out = std::process::Command::new("sh")
+        .args(["-c", "command -v more"])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -605,6 +631,48 @@ fn no_newline_interactive_prompt_is_visible_before_reply() {
     assert!(
         s.wait_for(b"done exit 0", FORMAT_BUDGET),
         "shell did not resume after answering the visible prompt"
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
+fn more_formats_file_lines_without_hiding_the_live_pager_prompt() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let Some(more) = more_path() else {
+        eprintln!("skipping: more not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let fixture = (0..80)
+        .map(|line| format!("# GLIMPS_MORE_LINE_{line:03}\n"))
+        .collect::<String>();
+    std::fs::write(zdot.path().join("more-fixture.md"), fixture).expect("write more fixture");
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+
+    s.write(format!("{more} \"$HOME/more-fixture.md\"\n").as_bytes());
+    assert!(
+        s.wait_for(b"# GLIMPS_MORE_LINE_000\x1b[0m", FORMAT_BUDGET),
+        "more's completed Markdown lines were not formatted: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        s.wait_for_any(&[b"--More--", b"\x1b[7m"], FORMAT_BUDGET),
+        "more's no-newline pager prompt stayed hidden: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+
+    s.write(b"q");
+    thread::sleep(Duration::from_millis(100));
+    s.write(b"printf 'MORE_%s\\n' 'SHELL_RESUMED'\n");
+    assert!(
+        s.wait_for(b"MORE_SHELL_RESUMED", FORMAT_BUDGET),
+        "shell did not resume after quitting more: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
     );
     s.write(b"exit\n");
     let _ = s.wait_exit(EXIT_BUDGET);

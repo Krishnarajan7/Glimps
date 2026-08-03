@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -75,14 +75,15 @@ pub(crate) struct MetadataReader {
 impl MetadataReader {
     /// Read and parse all complete records currently available. Shell hooks finish
     /// each append before emitting the corresponding OSC boundary, so this call is
-    /// synchronous and non-blocking on a normal file.
+    /// synchronous and non-blocking on a normal file. Keep the file append-only:
+    /// truncating after a read can erase a fast command's concurrently appended
+    /// result. The reader's file cursor advances incrementally, and the temporary
+    /// channel is removed when the supervised session ends.
     pub(crate) fn drain(&mut self) -> Vec<MetadataEvent> {
         let mut bytes = Vec::new();
         if self.file.read_to_end(&mut bytes).is_err() {
             return Vec::new();
         }
-        let _ = self.file.set_len(0);
-        let _ = self.file.seek(SeekFrom::Start(0));
         if bytes.len() > MAX_RECORD_BYTES {
             return Vec::new();
         }
@@ -196,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_drains_and_truncates_between_commands() {
+    fn channel_drains_incrementally_between_commands() {
         let mut channel = MetadataChannel::create().unwrap();
         let mut writer = OpenOptions::new()
             .append(true)
@@ -215,5 +216,34 @@ mod tests {
             reader.drain(),
             vec![MetadataEvent::Command(b"echo two".to_vec())]
         );
+    }
+
+    #[test]
+    fn draining_never_truncates_a_concurrent_writers_channel() {
+        let mut channel = MetadataChannel::create().unwrap();
+        let path = channel.path().to_path_buf();
+        let mut writer = OpenOptions::new().append(true).open(&path).unwrap();
+        writer.write_all(b"C\0echo fast\0").unwrap();
+        writer.flush().unwrap();
+
+        let mut reader = channel.take_reader().unwrap();
+        assert_eq!(
+            reader.drain(),
+            vec![MetadataEvent::Command(b"echo fast".to_vec())]
+        );
+        let first_len = std::fs::metadata(&path).unwrap().len();
+        assert!(first_len > 0, "drain must not truncate the shared file");
+
+        writer.write_all(b"R\x000\x00/tmp\x001\x00").unwrap();
+        writer.flush().unwrap();
+        assert_eq!(
+            reader.drain(),
+            vec![MetadataEvent::Result {
+                pipeline_statuses: vec![0],
+                cwd: b"/tmp".to_vec(),
+                exit_code: 1,
+            }]
+        );
+        assert!(std::fs::metadata(path).unwrap().len() > first_len);
     }
 }

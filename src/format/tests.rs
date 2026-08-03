@@ -995,6 +995,114 @@ fn command_diagnostics_override_find_path_coloring() {
     assert!(s.contains("\n\x1b[36m0\x1b[0m\n"));
 }
 
+/// macOS reports TCC-protected directories (~/Desktop, ~/Documents, iCloud)
+/// as EPERM, not EACCES. The diagnostic pass must claim the line first — the
+/// `find` path view would otherwise paint it in the filename color, making a
+/// hard failure read like a result.
+#[test]
+fn find_eperm_diagnostic_is_not_colored_like_a_path() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"find . -name '*.mov'")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"find: .: Operation not permitted\n"));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        s.contains("\x1b[31mfind: .: Operation not permitted\x1b[0m\n"),
+        "EPERM line not painted as an error: {s:?}"
+    );
+    assert!(
+        !s.contains("\x1b[36mfind: .: Operation not permitted"),
+        "EPERM line painted in the filename color: {s:?}"
+    );
+}
+
+/// ENOTDIR / EISDIR are the other two errno strings a user meets constantly
+/// (`cd` onto a file, `cat` onto a directory). Both carry a real path, so the
+/// `find` view's parent/leaf split would happily color them as results.
+#[test]
+fn directory_errno_diagnostics_are_colored_as_errors() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"find src/main.rs -name '*.rs'")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"find: src/main.rs: Not a directory\n"));
+    out.extend_from_slice(&f.process(b"cat: src/format: Is a directory\n"));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        s.contains("\x1b[31mfind: src/main.rs: Not a directory\x1b[0m\n"),
+        "ENOTDIR line not painted as an error: {s:?}"
+    );
+    assert!(
+        s.contains("\x1b[31mcat: src/format: Is a directory\x1b[0m\n"),
+        "EISDIR line not painted as an error: {s:?}"
+    );
+}
+
+/// The new fragments must not turn prose red. The `tool:` slot is what makes a
+/// line a diagnostic; without it the wording alone proves nothing, and a false
+/// positive mangles real output (invariant #2).
+#[test]
+fn errno_wording_without_a_tool_prefix_is_left_alone() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat notes.txt")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"The last attempt failed: Operation not permitted\n"));
+    out.extend_from_slice(&f.process(b"note that /etc is a directory, not a file\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        !s.contains("\x1b[31mThe last attempt failed"),
+        "prose painted as a diagnostic: {s:?}"
+    );
+    assert!(
+        !s.contains("\x1b[31mnote that /etc"),
+        "prose painted as a diagnostic: {s:?}"
+    );
+}
+
+/// `is_cli_error_line` also gates pin candidate selection, so the EPERM miss
+/// cost the failure footer its pinned error too — invisible in a two-line
+/// failure, but the whole point of the pin when the error scrolled away.
+#[test]
+fn eperm_error_is_pinned_when_it_scrolled_away() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"find . -name '*.mov'")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"find: ./Library: Operation not permitted\n"));
+    out.extend_from_slice(&f.process(b"./clip-one.mov\n"));
+    out.extend_from_slice(&f.process(b"./clip-two.mov\n"));
+    out.extend_from_slice(&f.process(b"./clip-three.mov\n"));
+    out.extend_from_slice(&f.process(b"./clip-four.mov\n"));
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        s.contains("\u{21b3} find: ./Library: Operation not permitted"),
+        "EPERM error was not pinned: {s:?}"
+    );
+    assert!(
+        s.contains("(\u{2191} 4 lines up)"),
+        "wrong pin distance: {s:?}"
+    );
+}
+
 #[test]
 fn pipeline_stage_failure_warns_even_when_final_exit_is_zero() {
     let mut f = Formatter::new();
@@ -1463,6 +1571,190 @@ fn cat_markdown_gets_project_doc_coloring() {
     assert!(s.contains("GLIMPS"));
     assert!(s.contains("zsh"));
     assert!(s.contains("\x1b[2m# start a raw shell\x1b[0m"));
+}
+
+#[test]
+fn nl_markdown_colors_the_gutter_and_reuses_the_document_formatter() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "     1\t<p align=\"center\">\n",
+        "     2\t**Readable terminal output.**\n",
+        "      \t\n",
+        "     3\t```bash\n",
+        "     4\tgit status --short\n",
+        "     5\t```\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"nl README.md")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("     \x1b[2m1\x1b[0m\x1b[2m\t\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;224;82;125mp\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117m**Readable terminal output.**\x1b[0m"));
+    assert!(s.contains("\x1b[35m```bash\x1b[0m"));
+    assert!(s.contains("\x1b[36mgit\x1b[0m status \x1b[38;5;220m--short\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn nl_flags_and_safe_pipelines_keep_numbered_code_semantics() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = b"001 | pub fn main() {\n002 |     let answer = 42;\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(
+        b"nl -ba -w3 -nrz -s ' | ' src/main.rs | head -2",
+    )));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[2m001\x1b[0m\x1b[2m | \x1b[0m"));
+    assert!(s.contains("\x1b[35mpub\x1b[0m \x1b[35mfn\x1b[0m \x1b[36mmain\x1b[0m"));
+    assert!(s.contains("\x1b[35mlet\x1b[0m answer \x1b[2m=\x1b[0m \x1b[38;5;220m42\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body));
+
+    let mut left_aligned = Formatter::new();
+    let left_body = b"7   ::# Heading\n";
+    let mut left_out = Vec::new();
+    left_out.extend_from_slice(&left_aligned.process(&cmd_marker(
+        b"nl -ba -w 4 -n ln -s :: -v 7 -i 2 -l 1 README.md",
+    )));
+    left_out.extend_from_slice(&left_aligned.process(C));
+    left_out.extend_from_slice(&left_aligned.process(left_body));
+    left_out.extend_from_slice(&left_aligned.process(D0));
+    let left_text = String::from_utf8_lossy(&left_out);
+    assert!(left_text.contains("\x1b[2m7\x1b[0m   \x1b[2m::\x1b[0m"));
+    assert!(left_text.contains("\x1b[36m# Heading\x1b[0m"));
+    assert!(strip_sgr(&left_out)
+        .windows(left_body.len())
+        .any(|window| window == left_body));
+}
+
+#[test]
+fn nl_without_a_known_file_only_styles_its_metadata_gutter() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = b"  7::plain stdin text\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"nl --number-width=3 --separator='::' -")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("  \x1b[2m7\x1b[0m\x1b[2m::\x1b[0mplain stdin text"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body));
+}
+
+#[test]
+fn nl_known_json_and_html_files_keep_content_aware_coloring() {
+    let mut json = Formatter::new();
+    if !json.is_enabled() {
+        return;
+    }
+    let json_body = b" 1\t{\n 2\t  \"status\": \"error\",\n 3\t  \"retry\": false\n 4\t}\n";
+    let mut json_out = Vec::new();
+    json_out.extend_from_slice(&json.process(&cmd_marker(b"nl -w2 response.json")));
+    json_out.extend_from_slice(&json.process(C));
+    json_out.extend_from_slice(&json.process(json_body));
+    json_out.extend_from_slice(&json.process(D0));
+    let json_text = String::from_utf8_lossy(&json_out);
+    assert!(json_text.contains("\x1b[36m\"status\"\x1b[0m"));
+    assert!(json_text.contains("\x1b[38;5;117m\"error\"\x1b[0m"));
+    assert!(json_text.contains("\x1b[35mfalse\x1b[0m"));
+    assert!(strip_sgr(&json_out)
+        .windows(json_body.len())
+        .any(|window| window == json_body));
+
+    let mut html = Formatter::new();
+    let html_body = b" 1\t<div class=\"notice\">Ready</div>\n";
+    let mut html_out = Vec::new();
+    html_out.extend_from_slice(&html.process(&cmd_marker(b"nl -w2 page.html")));
+    html_out.extend_from_slice(&html.process(C));
+    html_out.extend_from_slice(&html.process(html_body));
+    html_out.extend_from_slice(&html.process(D0));
+    let html_text = String::from_utf8_lossy(&html_out);
+    assert!(html_text.contains("\x1b[38;2;224;82;125mdiv\x1b[0m"));
+    assert!(html_text.contains("\x1b[38;5;220mclass\x1b[0m"));
+    assert!(strip_sgr(&html_out)
+        .windows(html_body.len())
+        .any(|window| window == html_body));
+}
+
+#[test]
+fn more_formats_complete_file_lines_but_keeps_pager_prompts_live() {
+    let cfg = Config::default();
+    assert_eq!(
+        command::classify(b"more README.md", &cfg.bypass, &cfg.sensitive_commands).trust,
+        CommandTrust::PagerText
+    );
+    assert_eq!(
+        command::classify(b"more .env", &cfg.bypass, &cfg.sensitive_commands).trust,
+        CommandTrust::SensitiveText
+    );
+    assert_eq!(
+        command::classify(b"more id_ed25519", &cfg.bypass, &cfg.sensitive_commands).trust,
+        CommandTrust::Sensitive
+    );
+
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"more README.md")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"<p align=\"center\">\n**Readable output**\n"));
+    let prompt = b"--More--(10%)";
+    assert!(
+        f.process(prompt).is_empty(),
+        "partial prompt should await the liveness flush"
+    );
+    assert_eq!(f.flush_stalled_output(), prompt);
+
+    let prompt_erase_and_line = b"\r             \rfirst line after prompt\n";
+    assert_eq!(
+        f.process(prompt_erase_and_line).as_ref(),
+        prompt_erase_and_line
+    );
+    out.extend_from_slice(&f.process(b"# Formatting resumes\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[38;2;224;82;125mp\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117m**Readable output**\x1b[0m"));
+    assert!(s.contains("\x1b[36m# Formatting resumes\x1b[0m"));
+}
+
+#[test]
+fn an_explicit_more_bypass_still_wins_over_pager_formatting() {
+    let cfg = Config::default();
+    assert_eq!(
+        command::classify(
+            b"more README.md",
+            &["more".to_string()],
+            &cfg.sensitive_commands,
+        )
+        .trust,
+        CommandTrust::InteractiveBypass
+    );
 }
 
 #[test]
@@ -3621,6 +3913,54 @@ proptest::proptest! {
         let mut out = f.process(&stream).into_owned();
         out.extend_from_slice(&f.flush());
         proptest::prop_assert_eq!(out, stream);
+    }
+
+    /// The CLI-diagnostic colorizer never panics on arbitrary input, and when
+    /// it claims a line it only *wraps* it: stripping SGR recovers the input
+    /// byte-for-byte, so nothing is dropped, reordered, or truncated and no
+    /// invalid UTF-8 can be introduced (invariant #4). ESC is filtered out of
+    /// the generated body so the generator cannot smuggle in a sequence that
+    /// `strip_sgr` would then remove from the payload itself.
+    #[test]
+    fn prop_cli_diagnostic_line_is_byte_safe(
+        body in proptest::collection::vec(0u8..=255, 0..200)
+    ) {
+        let clean: Vec<u8> = body.iter().copied().filter(|&b| b != 0x1b).collect();
+        let theme = Theme::default_colored();
+        if let Some(out) = linefmt::colorize_cli_diagnostic_line(&clean, &theme) {
+            proptest::prop_assert_eq!(strip_sgr(&out), clean);
+        }
+    }
+
+    /// The same byte-safety guarantee for inputs shaped like real diagnostics,
+    /// so the property actually exercises the matching path instead of bailing
+    /// out on `None` for nearly every generated case.
+    #[test]
+    fn prop_diagnostic_shaped_line_is_byte_safe(
+        tool in proptest::collection::vec(
+            proptest::prop_oneof![Just(b'.'), Just(b'-'), Just(b'/'), 0x61u8..0x7b], 0..12),
+        fragment in proptest::sample::select(vec![
+            &b"Operation not permitted"[..],
+            &b"Not a directory"[..],
+            &b"Is a directory"[..],
+            &b"No such file or directory"[..],
+            &b"Permission denied"[..],
+            &b"illegal option -- m"[..],
+            &b"perfectly ordinary output"[..],
+        ]),
+        path in proptest::collection::vec(0x20u8..0x7f, 0..24),
+        ending in proptest::sample::select(vec![&b""[..], &b"\n"[..], &b"\r\n"[..]]),
+    ) {
+        let mut line = tool;
+        line.extend_from_slice(b": ");
+        line.extend_from_slice(&path);
+        line.extend_from_slice(b": ");
+        line.extend_from_slice(fragment);
+        line.extend_from_slice(ending);
+        let theme = Theme::default_colored();
+        if let Some(out) = linefmt::colorize_cli_diagnostic_line(&line, &theme) {
+            proptest::prop_assert_eq!(strip_sgr(&out), line);
+        }
     }
 
     /// The EOF-flush path preserves non-JSON user bytes even when the stream
