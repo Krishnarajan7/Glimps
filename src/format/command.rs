@@ -76,12 +76,19 @@ pub(super) fn silent_breadcrumb(command: &[u8]) -> Option<Vec<u8>> {
 
     let mut out = Vec::new();
     match (name, targets.len()) {
-        ("touch", 1) | ("mkdir", 1) | ("rm", 1) => {
+        ("touch", 1) => {
+            out.extend_from_slice(b"touch processed path: ");
+            out.extend_from_slice(&cmdline::sanitize_display(&targets[0]));
+        }
+        ("mkdir", 1) | ("rm", 1) => {
             out.extend_from_slice(name.as_bytes());
             out.extend_from_slice(b" completed for ");
             out.extend_from_slice(&cmdline::sanitize_display(&targets[0]));
         }
-        ("touch", n) | ("mkdir", n) | ("rm", n) => {
+        ("touch", n) => {
+            push_target_summary(&mut out, b"touch processed", n, b"path arguments", &targets);
+        }
+        ("mkdir", n) | ("rm", n) => {
             let mut verb = name.as_bytes().to_vec();
             verb.extend_from_slice(b" completed for");
             push_target_summary(&mut out, &verb, n, b"targets", &targets);
@@ -104,9 +111,86 @@ pub(super) fn silent_breadcrumb(command: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Return the destination of a simple `cat > file` / `cat >> file` command
+/// that will read interactively from the terminal. Commands that also name an
+/// input file, contain another shell operator, or have multiple redirections
+/// decline the hint rather than guessing about their stdin behavior.
+pub(super) fn cat_stdin_redirect_target(command: &[u8]) -> Option<Vec<u8>> {
+    let (left, right) = split_simple_stdout_redirect(command)?;
+    let command_words = shell_words(left)?;
+    let executable = command_words.first()?.rsplit(|byte| *byte == b'/').next()?;
+    if executable != b"cat"
+        || command_words[1..]
+            .iter()
+            .any(|arg| !cat_stdin_argument(arg))
+    {
+        return None;
+    }
+
+    let target_words = shell_words(right)?;
+    (target_words.len() == 1).then(|| target_words[0].clone())
+}
+
+fn cat_stdin_argument(argument: &[u8]) -> bool {
+    if matches!(argument, b"-" | b"--") {
+        return true;
+    }
+    let Some(flags) = argument.strip_prefix(b"-") else {
+        return false;
+    };
+    !flags.is_empty() && flags.iter().all(|flag| b"AETbenstuv".contains(flag))
+}
+
+fn split_simple_stdout_redirect(command: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut redirect = None;
+    let mut i = 0;
+    while i < command.len() {
+        let byte = command[i];
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if delimiter == b'"' && byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+        } else if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+        } else if byte == b'>' {
+            if redirect.is_some() {
+                return None;
+            }
+            let width = if command.get(i + 1) == Some(&b'>') {
+                2
+            } else {
+                1
+            };
+            redirect = Some((i, width));
+            i += width - 1;
+        } else if matches!(byte, b'|' | b'&' | b';' | b'<' | b'(' | b')') {
+            return None;
+        }
+        i += 1;
+    }
+    if quote.is_some() || escaped {
+        return None;
+    }
+    let (at, width) = redirect?;
+    Some((
+        command[..at].trim_ascii(),
+        command[at + width..].trim_ascii(),
+    ))
+}
+
 pub(super) fn breadcrumb_path_start(message: &[u8]) -> Option<usize> {
     const SINGULAR_PREFIXES: &[&[u8]] = &[
-        b"touch completed for ",
+        b"touch processed path: ",
         b"mkdir completed for ",
         b"rm completed for ",
         b"killall completed for ",

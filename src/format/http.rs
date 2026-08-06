@@ -38,7 +38,9 @@ fn looks_like_headers(bytes: &[u8]) -> bool {
 
 pub fn try_format(bytes: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(bytes).ok()?;
-    let text = text.trim_matches(|c| c == '\r' || c == '\n');
+    // Keep the trailing blank line: for a HEAD response it is the header/body
+    // separator, even though there is intentionally no body after it.
+    let text = text.trim_start_matches(['\r', '\n']);
     if !text.starts_with("HTTP/") {
         return None;
     }
@@ -105,12 +107,12 @@ fn render_status(out: &mut String, line: &str, theme: &Theme) {
     let reason = parts.next().unwrap_or("").trim_start();
     let color = status_color(code.as_bytes(), theme);
 
-    paint(out, theme.comment, theme.reset, version);
+    paint(out, theme.muted, theme.reset, version);
     out.push(' ');
     paint(out, color, theme.reset, code);
     if !reason.is_empty() {
         out.push(' ');
-        paint(out, color, theme.reset, reason);
+        out.push_str(reason);
     }
     out.push('\n');
 }
@@ -158,24 +160,22 @@ fn status_color(code: &[u8], theme: &Theme) -> &'static str {
 }
 
 fn header_name_color(name: &str, theme: &Theme) -> &'static str {
-    if eq(name, "location") {
-        theme.keyword
-    } else if eq(name, "set-cookie") {
-        theme.warn
-    } else if eq(name, "content-type") || eq(name, "content-length") {
-        theme.info
-    } else {
-        theme.key
-    }
+    let _ = name;
+    theme.muted
 }
 
 fn header_value_color(name: &str, theme: &Theme) -> &'static str {
-    if eq(name, "location") {
-        theme.keyword
-    } else if eq(name, "set-cookie") {
-        theme.warn
-    } else {
+    if eq(name, "content-type") || eq(name, "location") {
         theme.string
+    } else if eq(name, "date") || eq(name, "last-modified") || eq(name, "expires") {
+        theme.debug
+    } else if eq(name, "content-length") || eq(name, "retry-after") || eq(name, "age") {
+        theme.number
+    } else {
+        // Long CSP, cache and vary policies are already dense. Keeping their
+        // values neutral makes the colored field name useful without creating
+        // a wall of one accent color.
+        ""
     }
 }
 
@@ -200,6 +200,16 @@ mod tests {
         assert_eq!(
             out,
             "HTTP/1.1 200 OK\nContent-Type: application/json\nX-Trace: abc\n\nJSON body\n{\n  \"ok\": true\n}"
+        );
+    }
+
+    #[test]
+    fn formats_headers_only_response() {
+        let input = b"HTTP/2 200\r\nContent-Type: text/html\r\nContent-Length: 559\r\n\r\n";
+        let out = String::from_utf8(try_format(input, &Theme::plain()).unwrap()).unwrap();
+        assert_eq!(
+            out,
+            "HTTP/2 200\nContent-Type: text/html\nContent-Length: 559\n"
         );
     }
 

@@ -93,8 +93,11 @@ impl Theme {
             folder: "\x1b[38;2;122;162;247m",   // #7aa2f7 visible folders
             error: "\x1b[31m",                  // red    (ERROR / 5xx)
             warn: "\x1b[38;5;220m",             // bright gold (WARN / 4xx)
-            info: "\x1b[32m",                   // green  (INFO / 2xx)
-            debug: "\x1b[2m",                   // dim    (DEBUG/TRACE / 3xx)
+            // Website brand green: --syn-string oklch(0.55 0.15 145),
+            // converted to sRGB #278733. Keep one semantic green across CLI
+            // success states, additions, INFO logs, and 2xx responses.
+            info: "\x1b[38;2;39;135;51m",
+            debug: "\x1b[2m", // dim    (DEBUG/TRACE / 3xx)
             reset: "\x1b[0m",
         }
     }

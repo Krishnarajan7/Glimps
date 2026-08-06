@@ -10,6 +10,7 @@ const SEVERITY_WINDOW: usize = 48;
 
 const LEVELS: &[(&[u8], Severity)] = &[
     (b"ERROR", Severity::Error),
+    (b"EXCEPTION", Severity::Error),
     (b"FATAL", Severity::Error),
     (b"CRITICAL", Severity::Error),
     (b"WARNING", Severity::Warn),
@@ -56,6 +57,10 @@ impl StreamingFormatter for Logs {
     fn line_color(&self, content: &[u8], theme: &Theme) -> Option<&'static str> {
         severity_color(content, theme)
     }
+
+    fn format_line(&self, content: &[u8], ending: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+        colorize_log_line(content, ending, theme)
+    }
 }
 
 impl StreamingFormatter for StackTrace {
@@ -75,16 +80,9 @@ pub fn colorize_line(
     if content.is_empty() {
         return None;
     }
-    let color = formatters
+    formatters
         .iter()
-        .find_map(|formatter| formatter.line_color(content, theme))?;
-
-    let mut out = Vec::with_capacity(line.len() + color.len() + theme.reset.len());
-    out.extend_from_slice(color.as_bytes());
-    out.extend_from_slice(content);
-    out.extend_from_slice(theme.reset.as_bytes());
-    out.extend_from_slice(ending);
-    Some(out)
+        .find_map(|formatter| formatter.format_line(content, ending, theme))
 }
 
 fn split_line(line: &[u8]) -> (&[u8], &[u8]) {
@@ -122,8 +120,34 @@ fn http_status_color(content: &[u8], theme: &Theme) -> Option<&'static str> {
 fn severity_color(content: &[u8], theme: &Theme) -> Option<&'static str> {
     let content = ltrim(content);
     let window = &content[..content.len().min(SEVERITY_WINDOW)];
+    severity_match(window).map(|(_, _, severity)| severity.color(theme))
+}
+
+fn colorize_log_line(content: &[u8], ending: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    let trimmed = ltrim(content);
+    let leading = content.len() - trimmed.len();
+    let window = &trimmed[..trimmed.len().min(SEVERITY_WINDOW)];
+    let (start, len, severity) = severity_match(window)?;
+    let level_start = leading + start;
+    let level_end = level_start + len;
+
+    let mut out = Vec::with_capacity(content.len() + ending.len() + 3 * theme.reset.len() + 32);
+    if level_start > 0 {
+        out.extend_from_slice(theme.debug.as_bytes());
+        out.extend_from_slice(&content[..level_start]);
+        out.extend_from_slice(theme.reset.as_bytes());
+    }
+    out.extend_from_slice(severity.color(theme).as_bytes());
+    out.extend_from_slice(&content[level_start..level_end]);
+    out.extend_from_slice(theme.reset.as_bytes());
+    out.extend_from_slice(&content[level_end..]);
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+fn severity_match(window: &[u8]) -> Option<(usize, usize, Severity)> {
     LEVELS.iter().find_map(|(token, severity)| {
-        contains_delimited(window, token).then(|| severity.color(theme))
+        find_severity(window, token).map(|start| (start, token.len(), *severity))
     })
 }
 
@@ -148,7 +172,7 @@ pub(crate) fn is_error_log_line(content: &[u8]) -> bool {
     LEVELS
         .iter()
         .filter(|(_, severity)| matches!(severity, Severity::Error))
-        .any(|(token, _)| contains_delimited(window, token))
+        .any(|(token, _)| find_severity(window, token).is_some())
 }
 
 /// Whether `content` is a precise Python-style exception line.
@@ -183,22 +207,49 @@ fn window_contains(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
-fn contains_delimited(haystack: &[u8], token: &[u8]) -> bool {
+/// Match conventional uppercase levels everywhere in the leading log window,
+/// while accepting title/lowercase variants only in a structured level slot.
+/// This recognizes `2026-08-05 09:00:09 Error ...` and `[error] ...` without
+/// painting ordinary prose such as `an error occurred`.
+fn find_severity(haystack: &[u8], token: &[u8]) -> Option<usize> {
     if token.is_empty() || token.len() > haystack.len() {
-        return false;
+        return None;
     }
     for start in 0..=haystack.len() - token.len() {
-        if &haystack[start..start + token.len()] != token {
+        let candidate = &haystack[start..start + token.len()];
+        if !candidate.eq_ignore_ascii_case(token) {
             continue;
         }
         let before_ok = start == 0 || !is_word(haystack[start - 1]);
         let after = start + token.len();
         let after_ok = after == haystack.len() || !is_word(haystack[after]);
-        if before_ok && after_ok {
-            return true;
+        if !before_ok || !after_ok {
+            continue;
+        }
+        if candidate == token || structured_severity_prefix(&haystack[..start]) {
+            return Some(start);
         }
     }
-    false
+    None
+}
+
+fn structured_severity_prefix(prefix: &[u8]) -> bool {
+    let prefix = ltrim(prefix);
+    if prefix.is_empty() {
+        return true;
+    }
+
+    // T and Z are permitted in an ISO-8601 timestamp, but arbitrary words are
+    // not. Requiring a digit keeps prose like `The Error ...` out.
+    let has_alpha = prefix.iter().any(u8::is_ascii_alphabetic);
+    if !has_alpha {
+        return true;
+    }
+    let has_digit = prefix.iter().any(u8::is_ascii_digit);
+    has_digit
+        && prefix
+            .iter()
+            .all(|byte| !byte.is_ascii_alphabetic() || matches!(byte, b'T' | b't' | b'Z' | b'z'))
 }
 
 fn is_word(byte: u8) -> bool {

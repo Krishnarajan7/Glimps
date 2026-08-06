@@ -32,10 +32,12 @@ mod streaming;
 mod tables;
 
 pub use code::{colorize_code_line, CodeLanguage};
+pub(crate) use command_views::PsColumnRole;
 pub use command_views::{
-    colorize_df_line, colorize_du_line, colorize_find_line, colorize_getfileinfo_line,
-    colorize_history_count_line, colorize_history_line, colorize_kubectl_pods_line,
-    colorize_ls_line, colorize_ps_line, colorize_whereis_line, colorize_xattr_line,
+    colorize_curl_header_line, colorize_curl_progress_line, colorize_df_line, colorize_du_line,
+    colorize_find_line, colorize_getfileinfo_line, colorize_history_count_line,
+    colorize_history_line, colorize_kubectl_pods_line, colorize_ls_line, colorize_ps_line,
+    colorize_whereis_line, colorize_xattr_line,
 };
 pub(crate) use common::{
     colorize_size_path_line, colorize_words, contains_ascii, paint_bytes, paint_span, paint_whole,
@@ -76,33 +78,42 @@ mod tests {
     }
 
     #[test]
-    fn colors_uppercase_severity_lines() {
+    fn colors_severity_lines_without_case_inconsistency() {
         assert!(colored(b"ERROR: boom\n").unwrap().starts_with("\x1b[31m"));
         assert!(colored(b"[WARN] low disk\n")
             .unwrap()
-            .starts_with("\x1b[38;5;220m"));
+            .contains("\x1b[38;5;220mWARN\x1b[0m"));
         assert!(colored(b"2026-01-01 INFO started\n")
             .unwrap()
-            .starts_with("\x1b[32m"));
+            .contains("\x1b[38;2;39;135;51mINFO\x1b[0m started"));
         assert!(colored(b"DEBUG x=1\n").unwrap().starts_with("\x1b[2m"));
+        assert!(colored(b"2026-08-05 09:00:09 Error invalid password\n")
+            .unwrap()
+            .contains("\x1b[31mError\x1b[0m invalid password"));
+        assert!(colored(b"2026-08-05 09:00:15 Exception unavailable\n")
+            .unwrap()
+            .contains("\x1b[31mException\x1b[0m unavailable"));
+        assert!(colored(b"[error] background sync failed\n")
+            .unwrap()
+            .contains("\x1b[31merror\x1b[0m] background sync failed"));
     }
 
     #[test]
     fn preserves_content_and_line_ending() {
         let out = colorize_line(b"ERROR: boom\r\n", &Theme::default_colored(), &all()).unwrap();
-        assert_eq!(out, b"\x1b[31mERROR: boom\x1b[0m\r\n");
+        assert_eq!(out, b"\x1b[31mERROR\x1b[0m: boom\r\n");
         let out = colorize_line(b"ERROR: boom\n", &Theme::default_colored(), &all()).unwrap();
-        assert_eq!(out, b"\x1b[31mERROR: boom\x1b[0m\n");
+        assert_eq!(out, b"\x1b[31mERROR\x1b[0m: boom\n");
         // No trailing newline is fine too.
         let out = colorize_line(b"ERROR: boom", &Theme::default_colored(), &all()).unwrap();
-        assert_eq!(out, b"\x1b[31mERROR: boom\x1b[0m");
+        assert_eq!(out, b"\x1b[31mERROR\x1b[0m: boom");
     }
 
     #[test]
     fn http_status_lines_color_by_class() {
         assert!(colored(b"HTTP/1.1 200 OK\n")
             .unwrap()
-            .starts_with("\x1b[32m"));
+            .starts_with("\x1b[38;2;39;135;51m"));
         assert!(colored(b"HTTP/2 301 Moved\n")
             .unwrap()
             .starts_with("\x1b[2m"));
@@ -115,8 +126,9 @@ mod tests {
     }
 
     #[test]
-    fn does_not_color_prose_or_lowercase() {
-        // Lowercase and mid-sentence words must NOT trigger (precision).
+    fn does_not_color_prose_or_embedded_level_words() {
+        // Case variants are supported in a log-level slot, but mid-sentence
+        // words must NOT trigger (precision).
         assert!(colored(b"an error occurred while connecting\n").is_none());
         assert!(colored(b"No errors found.\n").is_none());
         // Level beyond the SEVERITY_WINDOW (50-char prefix, then ERROR) is ignored.
@@ -189,12 +201,14 @@ mod tests {
         assert!(colored(b"TODO: refactor this later\n").is_none());
         assert!(colored(b"Summary: 3 passed\n").is_none());
         assert!(colored(b"at the store I bought milk\n").is_none());
-        // "error: ..." lowercase is a cargo/compiler style, handled by logs not here;
-        // it must not be caught as an exception line (lowercase class).
-        assert!(colored(b"error: could not compile\n").is_none());
-        // Leading/trailing dot tokens are not valid exception identifiers.
-        assert!(colored(b".Error: leading dot\n").is_none());
-        assert!(colored(b"Error.: trailing dot\n").is_none());
+        // A lowercase severity at the start is a valid log-level shape.
+        assert!(colored(b"error: could not compile\n")
+            .unwrap()
+            .contains("\x1b[31merror\x1b[0m: could not compile"));
+        // Leading/trailing dot tokens are not Python exception identifiers,
+        // even though the Logs formatter may independently recognize Error.
+        assert!(!is_exception_line(b".Error: leading dot"));
+        assert!(!is_exception_line(b"Error.: trailing dot"));
     }
 
     #[test]

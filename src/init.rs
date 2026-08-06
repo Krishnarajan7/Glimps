@@ -62,6 +62,16 @@ if [[ "$GLIMPS" != "0" ]]; then
     # they produced output and get a separator. GLIMPS owns the command/output
     # boundary now, so turn that indicator off.
     unsetopt prompt_sp prompt_cr 2>/dev/null
+    # curl styles HTTP headers itself whenever stdout is a terminal. Those SGR
+    # escapes split field names away from their values before GLIMPS can apply
+    # semantic HTTP formatting. Disable only curl's native header styling, only
+    # when `curl` is the ordinary external command; never replace a user's alias
+    # or function. --no-styled-output has existed since curl 7.61.0, and the
+    # help probe keeps older/custom curl builds untouched.
+    if (( ! $+functions[curl] && ! $+aliases[curl] )) && \
+       command curl --help all 2>/dev/null | command grep -q -- '--styled-output'; then
+      curl() { command curl --no-styled-output "$@"; }
+    fi
     autoload -Uz add-zsh-hook
     __glimps_precmd() {
       local __glimps_exit=$? __glimps_pipeline="${(j: :)pipestatus}"
@@ -134,6 +144,12 @@ if [ "$GLIMPS" != "0" ]; then
     __glimps_armed=""
     __glimps_debug_exit=0
     __glimps_debug_pipeline=0
+    # Let GLIMPS own curl's HTTP-header presentation. Preserve user-defined curl
+    # aliases/functions and decline the wrapper on curl builds without support.
+    if [ "$(type -t curl 2>/dev/null)" = "file" ] && \
+       command curl --help all 2>/dev/null | command grep -q -- '--styled-output'; then
+      curl() { command curl --no-styled-output "$@"; }
+    fi
     # Preserve any DEBUG trap set before us (mcfly, a hand-rolled trap, …) so we
     # chain it instead of clobbering it. Tools loaded AFTER us that build on
     # bash-preexec chain us the same way; a tool that installs a raw DEBUG trap
@@ -282,6 +298,13 @@ mod tests {
     }
 
     #[test]
+    fn zsh_snippet_yields_curl_header_styling_to_glimps() {
+        assert!(ZSH_INIT.contains("curl --no-styled-output"));
+        assert!(ZSH_INIT.contains("! $+functions[curl] && ! $+aliases[curl]"));
+        assert!(ZSH_INIT.contains("--help all"));
+    }
+
+    #[test]
     fn zsh_snippet_guards_nesting_and_off_switch() {
         assert!(
             ZSH_INIT.contains("GLIMPS_ACTIVE"),
@@ -343,6 +366,13 @@ mod tests {
         // to it is the standard, safe bash mechanism and does not change PS1.)
         assert!(!BASH_INIT.contains("PS1"));
         assert!(!BASH_INIT.contains(r"\033]133;B\007"));
+    }
+
+    #[test]
+    fn bash_snippet_yields_external_curl_header_styling_to_glimps() {
+        assert!(BASH_INIT.contains("curl --no-styled-output"));
+        assert!(BASH_INIT.contains("type -t curl"));
+        assert!(BASH_INIT.contains("--help all"));
     }
 
     #[test]

@@ -93,7 +93,211 @@ pub fn colorize_history_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
 
 /// Color an aggregated history-frequency row such as `uniq -c` emits.
 pub fn colorize_history_count_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
-    colorize_numbered_command_line(line, theme)
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let number_start = content
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())?;
+    let number_end = content[number_start..]
+        .iter()
+        .position(|byte| !byte.is_ascii_digit())
+        .map(|offset| number_start + offset)
+        .unwrap_or(content.len());
+    if number_start == number_end || number_end == content.len() {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(line.len() + theme.number.len() + theme.reset.len());
+    out.extend_from_slice(&content[..number_start]);
+    paint_bytes(
+        &mut out,
+        theme.number,
+        &content[number_start..number_end],
+        theme.reset,
+    );
+    // The command is a data value in this report, not command syntax. Keeping
+    // it neutral prevents the cyan structural accent from filling a column.
+    out.extend_from_slice(&content[number_end..]);
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+/// Color curl's built-in transfer meter without turning it into a rainbow.
+/// Headers and time estimates are subdued, percentage fields carry numeric
+/// meaning, completion is green, and current speed is readable content.
+pub fn colorize_curl_progress_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    if content.contains(&b'\r') {
+        let mut out = Vec::with_capacity(line.len() + 96);
+        let mut start = 0;
+        let mut matched = false;
+        for (index, byte) in content.iter().copied().enumerate() {
+            if byte != b'\r' {
+                continue;
+            }
+            let segment = &content[start..index];
+            if let Some(formatted) = colorize_curl_progress_segment(segment, b"", theme) {
+                out.extend_from_slice(&formatted);
+                matched = true;
+            } else {
+                out.extend_from_slice(segment);
+            }
+            out.push(b'\r');
+            start = index + 1;
+        }
+        let segment = &content[start..];
+        if let Some(formatted) = colorize_curl_progress_segment(segment, ending, theme) {
+            out.extend_from_slice(&formatted);
+            matched = true;
+        } else {
+            out.extend_from_slice(segment);
+            out.extend_from_slice(ending);
+        }
+        return matched.then_some(out);
+    }
+    colorize_curl_progress_segment(content, ending, theme)
+}
+
+/// Format the metadata returned by `curl -I` / `curl --head`. Only the status
+/// code and genuinely useful value types receive strong colors; header names
+/// use a quiet blue-gray and long policy values remain neutral.
+pub fn colorize_curl_header_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let leading = content
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())?;
+    let visible = &content[leading..];
+
+    if visible.starts_with(b"HTTP/") {
+        let spans = word_spans(visible);
+        let (version_start, version_end) = *spans.first()?;
+        let (code_start, code_end) = *spans.get(1)?;
+        let code = &visible[code_start..code_end];
+        if code.len() != 3 || !code.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let status_color = match code[0] {
+            b'2' => theme.info,
+            b'3' => theme.debug,
+            b'4' => theme.warn,
+            b'5' => theme.error,
+            _ => theme.muted,
+        };
+        let mut out = Vec::with_capacity(line.len() + 32);
+        out.extend_from_slice(&content[..leading + version_start]);
+        paint_bytes(
+            &mut out,
+            theme.muted,
+            &visible[version_start..version_end],
+            theme.reset,
+        );
+        out.extend_from_slice(&visible[version_end..code_start]);
+        paint_bytes(&mut out, status_color, code, theme.reset);
+        // The reason phrase is readable content, not another status badge.
+        out.extend_from_slice(&visible[code_end..]);
+        out.extend_from_slice(ending);
+        return Some(out);
+    }
+
+    let colon = visible.iter().position(|byte| *byte == b':')?;
+    let name = &visible[..colon];
+    if name.is_empty()
+        || !name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    {
+        return None;
+    }
+
+    let value_start = colon
+        + 1
+        + visible[colon + 1..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_whitespace())
+            .count();
+    let value = &visible[value_start..];
+    let value_color =
+        if name.eq_ignore_ascii_case(b"content-type") || name.eq_ignore_ascii_case(b"location") {
+            Some(theme.string)
+        } else if name.eq_ignore_ascii_case(b"date")
+            || name.eq_ignore_ascii_case(b"last-modified")
+            || name.eq_ignore_ascii_case(b"expires")
+        {
+            Some(theme.debug)
+        } else if !value.is_empty()
+            && value
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || byte.is_ascii_whitespace())
+        {
+            Some(theme.number)
+        } else {
+            None
+        };
+
+    let mut out = Vec::with_capacity(line.len() + 32);
+    out.extend_from_slice(&content[..leading]);
+    paint_bytes(&mut out, theme.muted, name, theme.reset);
+    paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+    out.extend_from_slice(&visible[colon + 1..value_start]);
+    if let Some(color) = value_color {
+        paint_bytes(&mut out, color, value, theme.reset);
+    } else {
+        out.extend_from_slice(value);
+    }
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+fn colorize_curl_progress_segment(content: &[u8], ending: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    let spans = word_spans(content);
+    let words = spans
+        .iter()
+        .map(|(start, end)| &content[*start..*end])
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        return None;
+    }
+
+    let first_header = words.first() == Some(&b"%".as_slice())
+        && words.contains(&b"Total".as_slice())
+        && words.contains(&b"Received".as_slice())
+        && words.contains(&b"Speed".as_slice());
+    let second_header = words.first() == Some(&b"Dload".as_slice())
+        && words.contains(&b"Upload".as_slice())
+        && words.contains(&b"Spent".as_slice())
+        && words.contains(&b"Left".as_slice());
+    if first_header || second_header {
+        return Some(paint_whole(content, ending, theme.debug, theme.reset));
+    }
+
+    if words.len() < 12
+        || !words[0].iter().all(u8::is_ascii_digit)
+        || !words[2].iter().all(u8::is_ascii_digit)
+        || !words[4].iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+
+    Some(colorize_words(
+        content,
+        ending,
+        theme,
+        |index, word| match index {
+            0 if word == b"100" => Some(theme.info),
+            0 | 2 | 4 => Some(theme.number),
+            8..=10 => Some(theme.debug),
+            11 => Some(theme.string),
+            _ => None,
+        },
+    ))
 }
 
 fn colorize_numbered_command_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
@@ -466,9 +670,32 @@ fn storage_pressure_color(percent: f64, theme: &Theme) -> &'static str {
     }
 }
 
-/// Color `ps` output: header dimmed, ids/resources highlighted, expensive rows
-/// warned.
-pub fn colorize_ps_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+/// Semantic roles learned from the header emitted by this particular `ps`
+/// invocation. BSD `ps`, `ps aux`, POSIX `ps -ef`, and custom `-o` layouts all
+/// use different column orders, so fixed numeric positions are not reliable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PsColumnRole {
+    User,
+    Id,
+    Cpu,
+    Memory,
+    Size,
+    Tty,
+    State,
+    Start,
+    Time,
+    Priority,
+    Command,
+    Unknown,
+}
+
+/// Color `ps` output using the roles declared by its header. The discovered
+/// layout is retained by `Formatter` for the remaining rows of this command.
+pub fn colorize_ps_line(
+    line: &[u8],
+    theme: &Theme,
+    columns: &mut Vec<PsColumnRole>,
+) -> Option<Vec<u8>> {
     if theme.reset.is_empty() {
         return None;
     }
@@ -477,10 +704,26 @@ pub fn colorize_ps_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     if words.is_empty() {
         return None;
     }
-    let first = &content[words[0].0..words[0].1];
-    if matches!(first, b"USER" | b"UID") {
-        return Some(paint_whole(content, ending, theme.debug, theme.reset));
+    if let Some(header) = ps_header_roles(content, &words) {
+        *columns = header;
+        return Some(colorize_words(content, ending, theme, |idx, _| {
+            Some(ps_role_color(
+                columns.get(idx).copied().unwrap_or(PsColumnRole::Unknown),
+                b"",
+                theme,
+            ))
+        }));
     }
+
+    if !columns.is_empty() {
+        return Some(colorize_words(content, ending, theme, |idx, word| {
+            let role = columns.get(idx).copied().unwrap_or(PsColumnRole::Unknown);
+            Some(ps_role_color(role, word, theme))
+        }));
+    }
+
+    // Headerless output (`ps -o pid=,...`) cannot declare a trustworthy schema.
+    // Retain the conservative legacy fallback rather than guessing from values.
     Some(colorize_words(
         content,
         ending,
@@ -496,6 +739,52 @@ pub fn colorize_ps_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
             _ => Some(theme.muted),
         },
     ))
+}
+
+fn ps_header_roles(content: &[u8], words: &[(usize, usize)]) -> Option<Vec<PsColumnRole>> {
+    let roles = words
+        .iter()
+        .map(|(start, end)| ps_header_role(&content[*start..*end]))
+        .collect::<Vec<_>>();
+    let recognized = roles
+        .iter()
+        .filter(|role| **role != PsColumnRole::Unknown)
+        .count();
+    (recognized >= 2 && roles.contains(&PsColumnRole::Id)).then_some(roles)
+}
+
+fn ps_header_role(word: &[u8]) -> PsColumnRole {
+    match word {
+        b"USER" | b"UID" | b"RUSER" | b"EUSER" | b"LOGNAME" => PsColumnRole::User,
+        b"PID" | b"PPID" | b"PGID" | b"SID" | b"TPGID" | b"LWP" | b"NLWP" => PsColumnRole::Id,
+        b"%CPU" | b"CPU" | b"C" | b"CP" => PsColumnRole::Cpu,
+        b"%MEM" | b"MEM" => PsColumnRole::Memory,
+        b"VSZ" | b"VIRT" | b"RSS" | b"RSZ" | b"SZ" => PsColumnRole::Size,
+        b"TTY" | b"TT" => PsColumnRole::Tty,
+        b"STAT" | b"STATE" | b"S" => PsColumnRole::State,
+        b"START" | b"STARTED" | b"LSTART" | b"STIME" => PsColumnRole::Start,
+        b"TIME" | b"ETIME" | b"ELAPSED" | b"TIME+" => PsColumnRole::Time,
+        b"PRI" | b"NI" | b"NICE" | b"RTPRIO" | b"PSR" => PsColumnRole::Priority,
+        b"COMMAND" | b"CMD" | b"COMM" | b"ARGS" | b"COMMAND_NAME" => PsColumnRole::Command,
+        _ => PsColumnRole::Unknown,
+    }
+}
+
+fn ps_role_color(role: PsColumnRole, word: &[u8], theme: &Theme) -> &'static str {
+    match role {
+        PsColumnRole::User => theme.string,
+        PsColumnRole::Id | PsColumnRole::Size => theme.number,
+        PsColumnRole::Cpu | PsColumnRole::Memory => match float_value(word) {
+            Some(value) if value >= 50.0 => theme.error,
+            Some(value) if value >= 10.0 => theme.warn,
+            _ => theme.muted,
+        },
+        PsColumnRole::Tty => theme.path,
+        PsColumnRole::State => theme.keyword,
+        PsColumnRole::Start | PsColumnRole::Time | PsColumnRole::Priority => theme.comment,
+        PsColumnRole::Command => theme.folder,
+        PsColumnRole::Unknown => theme.muted,
+    }
 }
 
 fn looks_like_mode(word: &[u8]) -> bool {

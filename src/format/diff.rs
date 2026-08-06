@@ -186,7 +186,7 @@ mod tests {
         let out = try_format(SAMPLE, &Theme::default_colored()).expect("should detect diff");
         let s = String::from_utf8(out).unwrap();
         assert!(
-            s.contains("\x1b[32m+added line\x1b[0m\n"),
+            s.contains("\x1b[38;2;39;135;51m+added line\x1b[0m\n"),
             "addition not green"
         );
         assert!(
@@ -258,7 +258,7 @@ mod tests {
         assert!(s.contains("\x1b[2m--- a/x.rs\x1b[0m\n"));
         assert!(s.contains("\x1b[2m+++ b/x.rs\x1b[0m\n"));
         assert!(!s.contains("\x1b[31m--- a/x.rs"));
-        assert!(!s.contains("\x1b[32m+++ b/x.rs"));
+        assert!(!s.contains("\x1b[38;2;39;135;51m+++ b/x.rs"));
     }
 
     proptest::proptest! {

@@ -637,6 +637,49 @@ fn no_newline_interactive_prompt_is_visible_before_reply() {
 }
 
 #[test]
+fn cat_redirect_hint_is_visible_before_input_and_never_enters_the_file() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+
+    s.write(b"cat > \"$HOME/glimps-stdin-note.txt\"\n");
+    assert!(
+        s.wait_for(b"writing to ", FORMAT_BUDGET)
+            && s.wait_for(b"$HOME/glimps-stdin-note.txt", FORMAT_BUDGET),
+        "cat's stdin-writing state was not explained before input: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        s.wait_for(b"Enter starts a new line; Ctrl-D finishes", FORMAT_BUDGET),
+        "cat's completion instruction was missing"
+    );
+
+    s.write(b"GLIMPS_CAT_STDIN_PAYLOAD\n\x04");
+    assert!(
+        s.wait_for(b"done exit 0", FORMAT_BUDGET),
+        "cat did not finish after Ctrl-D: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"cat \"$HOME/glimps-stdin-note.txt\"\n");
+    assert!(
+        s.wait_for(b"GLIMPS_CAT_STDIN_PAYLOAD", FORMAT_BUDGET),
+        "cat input was not written to the destination file"
+    );
+    let saved = std::fs::read_to_string(zdot.path().join("glimps-stdin-note.txt"))
+        .expect("read cat destination");
+    assert_eq!(saved, "GLIMPS_CAT_STDIN_PAYLOAD\n");
+    assert!(!saved.contains("writing to"));
+    assert!(!saved.contains("Ctrl-D"));
+
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
 fn more_formats_file_lines_without_hiding_the_live_pager_prompt() {
     let Some(zsh) = zsh_path() else {
         eprintln!("skipping: zsh not available");

@@ -51,8 +51,8 @@ use crate::metadata::{MetadataEvent, MetadataReader};
 #[cfg(test)]
 use command::is_sensitive as is_sensitive_command;
 use command::{
-    breadcrumb_path_start, shell_words, silent_breadcrumb as silent_command_breadcrumb,
-    CommandTrust,
+    breadcrumb_path_start, cat_stdin_redirect_target, shell_words,
+    silent_breadcrumb as silent_command_breadcrumb, CommandTrust,
 };
 use exitcode::ExitClass;
 use osc133::{Osc133Scanner, Seg};
@@ -134,6 +134,17 @@ trait BufferedFormatter {
 /// content in, or `None` to leave the line untouched.
 trait StreamingFormatter {
     fn line_color(&self, content: &[u8], theme: &Theme) -> Option<&'static str>;
+
+    fn format_line(&self, content: &[u8], ending: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+        let color = self.line_color(content, theme)?;
+        let mut out =
+            Vec::with_capacity(content.len() + ending.len() + color.len() + theme.reset.len());
+        out.extend_from_slice(color.as_bytes());
+        out.extend_from_slice(content);
+        out.extend_from_slice(theme.reset.as_bytes());
+        out.extend_from_slice(ending);
+        Some(out)
+    }
 }
 
 /// The buffered formatters enabled by `fmts`, in priority order (more specific
@@ -210,6 +221,9 @@ pub struct Formatter {
     /// Complete output lines seen for this command. Used by command-aware
     /// project-file formatters that treat the first row as a header.
     command_output_line_count: usize,
+    /// Column roles learned from the current `ps` header. `ps` changes its
+    /// schema across platforms and flags, so rows cannot use fixed positions.
+    ps_columns: Vec<linefmt::PsColumnRole>,
     /// Read-only error-line observer for the failure footer (F3). Fed the
     /// output zone's bytes — including in-zone Pass escapes, which is where
     /// colored compiler errors live — and never emits a byte itself.
@@ -283,6 +297,7 @@ impl Formatter {
             command_started_at: None,
             command_had_visible_output: false,
             command_output_line_count: 0,
+            ps_columns: Vec::new(),
             pin: pin::ErrorPin::new(),
             pin_armed: false,
             markdown_fence: None,
@@ -397,6 +412,7 @@ impl Formatter {
                     self.command_started_at = Some(Instant::now());
                     self.command_had_visible_output = false;
                     self.command_output_line_count = 0;
+                    self.ps_columns.clear();
                     self.markdown_fence = None;
                     let trust = self
                         .pending_command
@@ -422,6 +438,7 @@ impl Formatter {
                     self.pin_armed = trust == CommandTrust::Normal
                         && self.config.failures.enabled
                         && self.config.failures.pin_errors;
+                    self.emit_stdin_capture_hint(&mut out);
                 }
                 // The output ended: flush, and drop an unfulfilled header/command.
                 Seg::OutputEnd => {
@@ -434,6 +451,7 @@ impl Formatter {
                     self.command_started_at = None;
                     self.command_had_visible_output = false;
                     self.command_output_line_count = 0;
+                    self.ps_columns.clear();
                     self.pin.reset();
                     self.pin_armed = false;
                     self.markdown_fence = None;
@@ -633,6 +651,33 @@ impl Formatter {
         // forged `7338` could otherwise inject escapes into our chrome).
         line.extend_from_slice(&cmdline::sanitize_display(&cwd));
         line.extend_from_slice(reset.as_bytes());
+        line.push(b'\n');
+        push_crlf(out, &line);
+    }
+
+    /// `cat > file` has no prompt of its own, so a user sees an apparently
+    /// frozen cursor until their first keystroke is echoed. Explain that live
+    /// stdin state immediately without sending any bytes back into the PTY (the
+    /// hint is display-only and can never become part of the destination file).
+    fn emit_stdin_capture_hint(&mut self, out: &mut Vec<u8>) {
+        let Some(target) = self
+            .pending_command
+            .as_deref()
+            .and_then(cat_stdin_redirect_target)
+        else {
+            return;
+        };
+        self.emit_header(out);
+
+        let mut line = Vec::new();
+        line.extend_from_slice(self.theme.action.as_bytes());
+        line.extend_from_slice(b"writing to ");
+        line.extend_from_slice(self.theme.path.as_bytes());
+        line.extend_from_slice(&cmdline::sanitize_display(&target));
+        line.extend_from_slice(self.theme.reset.as_bytes());
+        line.extend_from_slice(self.theme.muted.as_bytes());
+        line.extend_from_slice(b" -- Enter starts a new line; Ctrl-D finishes");
+        line.extend_from_slice(self.theme.reset.as_bytes());
         line.push(b'\n');
         push_crlf(out, &line);
     }
@@ -971,16 +1016,22 @@ impl Formatter {
                 format_pwd_line(line, &self.theme)
             }
             CommandView::Pwd => None,
+            CommandView::CdPrevious if self.command_output_line_count == 0 => {
+                format_cd_previous_line(line, &self.theme)
+            }
+            CommandView::CdPrevious => None,
             CommandView::Find => linefmt::colorize_find_line(line, &self.theme),
             CommandView::Whereis => linefmt::colorize_whereis_line(line, &self.theme),
             CommandView::History => linefmt::colorize_history_line(line, &self.theme),
             CommandView::HistoryCounts => linefmt::colorize_history_count_line(line, &self.theme),
+            CommandView::CurlProgress => linefmt::colorize_curl_progress_line(line, &self.theme),
+            CommandView::CurlHeaders => linefmt::colorize_curl_header_line(line, &self.theme),
             CommandView::Ls => linefmt::colorize_ls_line(line, &self.theme),
             CommandView::Du => linefmt::colorize_du_line(line, &self.theme),
             CommandView::GetFileInfo => linefmt::colorize_getfileinfo_line(line, &self.theme),
             CommandView::Xattr => linefmt::colorize_xattr_line(line, &self.theme),
             CommandView::Df => linefmt::colorize_df_line(line, &self.theme),
-            CommandView::Ps => linefmt::colorize_ps_line(line, &self.theme),
+            CommandView::Ps => linefmt::colorize_ps_line(line, &self.theme, &mut self.ps_columns),
             CommandView::Dns => linefmt::colorize_dns_line(line, &self.theme),
             CommandView::Ping => linefmt::colorize_ping_line(line, &self.theme),
             CommandView::DiskutilInfo => linefmt::colorize_diskutil_info_line(line, &self.theme),
@@ -1293,6 +1344,33 @@ fn format_pwd_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// zsh prints the destination of the exact `cd -` command as its only output.
+/// Turn that otherwise context-free path into the same breadcrumb language used
+/// for silent `cd` commands. Stay conservative so diagnostics and compound
+/// commands continue through the normal formatter unchanged.
+fn format_cd_previous_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    let (content, ending) = split_line_ending(line);
+    let path_shaped = content.starts_with(b"/")
+        || content == b"~"
+        || content.starts_with(b"~/")
+        || content
+            .strip_prefix(b"~")
+            .is_some_and(|rest| rest.contains(&b'/'));
+    if content.is_empty() || !path_shaped || looks_binary(content) {
+        return None;
+    }
+    std::str::from_utf8(content).ok()?;
+
+    let mut out = Vec::with_capacity(line.len() + "moved to ".len() + 24);
+    out.extend_from_slice(theme.action.as_bytes());
+    out.extend_from_slice(b"moved to ");
+    out.extend_from_slice(theme.path.as_bytes());
+    out.extend_from_slice(&cmdline::sanitize_display(content));
+    out.extend_from_slice(theme.reset.as_bytes());
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
 fn split_line_ending(line: &[u8]) -> (&[u8], &[u8]) {
     if let Some(content) = line.strip_suffix(b"\r\n") {
         (content, &line[line.len() - 2..])
@@ -1306,10 +1384,13 @@ fn split_line_ending(line: &[u8]) -> (&[u8], &[u8]) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandView {
     Pwd,
+    CdPrevious,
     Find,
     Whereis,
     History,
     HistoryCounts,
+    CurlProgress,
+    CurlHeaders,
     Ls,
     Du,
     GetFileInfo,
@@ -1440,6 +1521,8 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         return Some(view);
     }
     match name.as_str() {
+        "curl" => curl_command_view(cmd),
+        "cd" => cd_command_view(cmd),
         "kubectl" => kubectl_command_view(cmd),
         "scutil" => scutil_command_view(cmd),
         "route" => route_command_view(cmd),
@@ -1458,6 +1541,29 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         _ if command_requests_help(cmd) => Some(CommandView::Man),
         _ => None,
     }
+}
+
+fn curl_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    let headers_only = words.iter().skip(1).any(|word| {
+        let Ok(argument) = std::str::from_utf8(word) else {
+            return false;
+        };
+        argument == "--head"
+            || argument
+                .strip_prefix('-')
+                .is_some_and(|flags| !flags.starts_with('-') && flags.contains('I'))
+    });
+    Some(if headers_only {
+        CommandView::CurlHeaders
+    } else {
+        CommandView::CurlProgress
+    })
+}
+
+fn cd_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    (words.len() == 2 && words[0] == b"cd" && words[1] == b"-").then_some(CommandView::CdPrevious)
 }
 
 fn history_command_view(command: &[u8]) -> Option<CommandView> {
