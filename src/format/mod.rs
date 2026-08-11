@@ -1070,6 +1070,7 @@ impl Formatter {
                 self.command_output_line_count <= 1,
             ),
             CommandView::Git(view) => linefmt::colorize_git_line(line, &self.theme, view),
+            CommandView::Grep(view) => linefmt::colorize_grep_line(line, &self.theme, view),
         }
     }
 
@@ -1450,6 +1451,7 @@ enum CommandView {
     Nl(NlView),
     SqlResult,
     Git(linefmt::GitView),
+    Grep(linefmt::GrepView),
     NetworkSetup,
 }
 
@@ -1578,6 +1580,7 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "man" => man_command_view(cmd),
         "apropos" | "whatis" => Some(CommandView::ManIndex),
         "git" => git_command_view(cmd),
+        "rg" | "grep" | "egrep" | "fgrep" => grep_command_view(cmd, &name),
         _ if cmdline::contains_command(cmd, b"ps") => Some(CommandView::Ps),
         _ if command_requests_help(cmd) => Some(CommandView::Man),
         _ => None,
@@ -1893,6 +1896,135 @@ fn git_command_view(command: &[u8]) -> Option<CommandView> {
         "branch" => Some(CommandView::Git(linefmt::GitView::Branch)),
         _ => None,
     }
+}
+
+/// Search commands (`rg`, `grep`, `egrep`, `fgrep`) emit `path:line:text`
+/// match lines only when line numbers were requested, so the view activates
+/// only on an explicit `-n` / `--line-number` (alone or inside a combined
+/// short cluster such as `-rn` / `-nH`), or on ripgrep's `--column` /
+/// `--vimgrep`, which imply them. Plain `grep needle notes.txt` output can
+/// legitimately read `notes.txt:12:ordinary content` — without the flag,
+/// `12` is match text, not a line number, and the view must stay off.
+/// Parsing is shell-aware (a quoted pattern containing `-n` is one word and
+/// never an option), tokens after `--` are patterns/files, option values are
+/// skipped (`grep -e -n file` searches for `-n`), and later flags win, so
+/// ripgrep's `-N` / `--no-line-number` disable the view again. `-h` is help
+/// for ripgrep but "hide filenames" for the grep family, so it only disables
+/// the view for `rg`.
+fn grep_command_view(command: &[u8], name: &str) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    let mut line_numbers = false;
+    let mut column = false;
+    let mut skip_value = false;
+    for word in words.iter().skip(1) {
+        let Ok(word) = std::str::from_utf8(word) else {
+            continue;
+        };
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        match word {
+            // `--` ends option parsing; a pipeline separator ends this stage.
+            "--" | "|" | "&&" | "||" | ";" => break,
+            "--help" => return None,
+            "--line-number" => line_numbers = true,
+            "--no-line-number" => {
+                line_numbers = false;
+                column = false;
+            }
+            "--column" | "--vimgrep" => {
+                column = true;
+                line_numbers = true;
+            }
+            "--no-column" => column = false,
+            _ if grep_option_takes_separate_value(word, name) => skip_value = true,
+            _ => {
+                let Some(cluster) = word.strip_prefix('-') else {
+                    continue;
+                };
+                if cluster.starts_with('-') {
+                    continue; // some other long option
+                }
+                for flag in cluster.chars() {
+                    match flag {
+                        'n' => line_numbers = true,
+                        'N' if name == "rg" => {
+                            line_numbers = false;
+                            column = false;
+                        }
+                        'h' if name == "rg" => return None,
+                        // The rest of the cluster is this option's attached
+                        // argument (e.g. `-C3`), not more flags.
+                        _ if grep_flag_takes_attached_value(flag, name) => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    if !line_numbers {
+        return None;
+    }
+    Some(CommandView::Grep(if column {
+        linefmt::GrepView::ColumnMatches
+    } else {
+        linefmt::GrepView::Matches
+    }))
+}
+
+/// Options whose value arrives as the *next* shell word. The value must never
+/// be read as a flag: `grep -e -n file` searches for the pattern `-n`.
+/// (GNU `--color[=WHEN]` takes its value only attached, so it is not here.)
+fn grep_option_takes_separate_value(word: &str, name: &str) -> bool {
+    matches!(
+        word,
+        "-e" | "-f"
+            | "-m"
+            | "-A"
+            | "-B"
+            | "-C"
+            | "-d"
+            | "-D"
+            | "--regexp"
+            | "--file"
+            | "--max-count"
+            | "--include"
+            | "--exclude"
+            | "--exclude-dir"
+            | "--after-context"
+            | "--before-context"
+            | "--context"
+    ) || (name == "rg"
+        && matches!(
+            word,
+            "-g" | "-t"
+                | "-T"
+                | "-j"
+                | "-M"
+                | "-r"
+                | "-E"
+                | "--glob"
+                | "--type"
+                | "--type-not"
+                | "--threads"
+                | "--max-columns"
+                | "--max-depth"
+                | "--max-filesize"
+                | "--replace"
+                | "--encoding"
+                | "--color"
+                | "--colors"
+                | "--sort"
+                | "--sortr"
+        ))
+}
+
+/// Short options that consume the rest of their cluster as an attached
+/// argument (`-C3`, ripgrep's `-tpy`).
+fn grep_flag_takes_attached_value(flag: char, name: &str) -> bool {
+    matches!(flag, 'e' | 'f' | 'm' | 'A' | 'B' | 'C' | 'd' | 'D')
+        || (name == "rg" && matches!(flag, 'g' | 't' | 'T' | 'j' | 'M' | 'r' | 'E'))
 }
 
 fn kubectl_command_view(command: &[u8]) -> Option<CommandView> {

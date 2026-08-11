@@ -38,6 +38,79 @@ pub fn colorize_find_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Which line shape a `grep`-family command was asked to produce. ripgrep's
+/// `--column` / `--vimgrep` flags insert a column field after the line number,
+/// which changes where the match text begins, so the view must record it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrepView {
+    Matches,
+    ColumnMatches,
+}
+
+/// Color one search-result line shaped `path:line:text` (or
+/// `path:line:column:text` under [`GrepView::ColumnMatches`]).
+///
+/// The proof of shape is strict: the path field must be non-empty, contain no
+/// whitespace, and not be all digits, and the line (and column) fields must be
+/// all digits with no padding. Lines that fail any of these — tool warnings,
+/// `Binary file ... matches` notices, ripgrep's `--heading` layout, and
+/// colon-heavy prose such as timestamps — pass through unchanged. Match text is
+/// deliberately left unpainted so the user's content stays exactly as printed.
+pub fn colorize_grep_line(line: &[u8], theme: &Theme, view: GrepView) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let first = content.iter().position(|&byte| byte == b':')?;
+    let path = &content[..first];
+    if path.is_empty()
+        || path.iter().any(u8::is_ascii_whitespace)
+        || path.iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    let after_path = &content[first + 1..];
+    let second = after_path.iter().position(|&byte| byte == b':')?;
+    let line_field = &after_path[..second];
+    if !is_all_digits(line_field) {
+        return None;
+    }
+    let mut text = &after_path[second + 1..];
+    let mut column_field = None;
+    if view == GrepView::ColumnMatches {
+        let third = text.iter().position(|&byte| byte == b':')?;
+        let column = &text[..third];
+        if !is_all_digits(column) {
+            return None;
+        }
+        column_field = Some(column);
+        text = &text[third + 1..];
+    }
+
+    let mut out = Vec::with_capacity(line.len() + 96);
+    match path.iter().rposition(|&byte| byte == b'/') {
+        Some(slash) => {
+            paint_bytes(&mut out, theme.debug, &path[..slash + 1], theme.reset);
+            paint_bytes(&mut out, theme.key, &path[slash + 1..], theme.reset);
+        }
+        None => paint_bytes(&mut out, theme.key, path, theme.reset),
+    }
+    paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+    paint_bytes(&mut out, theme.number, line_field, theme.reset);
+    paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+    if let Some(column) = column_field {
+        paint_bytes(&mut out, theme.muted, column, theme.reset);
+        paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+    }
+    out.extend_from_slice(text);
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+fn is_all_digits(field: &[u8]) -> bool {
+    !field.is_empty() && field.iter().all(u8::is_ascii_digit)
+}
+
 /// Color `whereis` results as a command label followed by typed locations.
 /// Manual-page locations are distinguished from executable/source paths while
 /// preserving the command's spacing and line ending exactly.
