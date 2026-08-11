@@ -80,6 +80,152 @@ pub fn colorize_whereis_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Color one WHOIS record line without painting long registry prose.
+///
+/// WHOIS clients and registries expose many flag combinations, but their
+/// useful output converges on a stable `field: value` shape.  Formatting that
+/// shape keeps full responses and filtered pipelines consistent while leaving
+/// organization names, remarks, and postal addresses neutral and readable.
+pub fn colorize_whois_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with(b"%") || trimmed.starts_with(b"#") || trimmed.starts_with(b">>>") {
+        return Some(paint_whole(content, ending, theme.comment, theme.reset));
+    }
+
+    let colon = trimmed.iter().position(|byte| *byte == b':')?;
+    let field = &trimmed[..colon];
+    if field.is_empty()
+        || field.first().is_some_and(u8::is_ascii_whitespace)
+        || field.last().is_some_and(u8::is_ascii_whitespace)
+        || !field.iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.' | b'/' | b' ')
+        })
+    {
+        return None;
+    }
+
+    let value_offset = colon
+        + 1
+        + trimmed[colon + 1..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_whitespace())
+            .count();
+    let value = &trimmed[value_offset..];
+    let value_color = whois_value_color(field, value, theme);
+
+    let leading_len = content.len() - trimmed.len();
+    let mut out = Vec::with_capacity(line.len() + 64);
+    out.extend_from_slice(&content[..leading_len]);
+    // Labels are scaffolding, not the content the user came to inspect. Keep
+    // the whole left column quiet so repeated WHOIS records remain scannable.
+    paint_bytes(&mut out, theme.comment, field, theme.reset);
+    paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+    out.extend_from_slice(&trimmed[colon + 1..value_offset]);
+    if let Some(color) = value_color {
+        paint_bytes(&mut out, color, value, theme.reset);
+    } else {
+        out.extend_from_slice(value);
+    }
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+const WHOIS_CONTACT_FIELDS: &[&[u8]] = &[b"abuse-mailbox", b"abuse-email", b"e-mail", b"email"];
+
+const WHOIS_NETWORK_FIELDS: &[&[u8]] = &[
+    b"inetnum",
+    b"inet6num",
+    b"netrange",
+    b"cidr",
+    b"netname",
+    b"route",
+    b"route6",
+    b"origin",
+    b"aut-num",
+    b"as-name",
+    b"nserver",
+    b"name server",
+    b"whois",
+    b"referralserver",
+    b"registrar whois server",
+];
+
+const WHOIS_IDENTITY_FIELDS: &[&[u8]] = &[b"orgname", b"org-name", b"organization", b"registrar"];
+
+const WHOIS_DATE_FIELDS: &[&[u8]] = &[
+    b"created",
+    b"creation date",
+    b"regdate",
+    b"updated",
+    b"updated date",
+    b"changed",
+    b"last-modified",
+    b"expires",
+    b"expiry date",
+    b"registry expiry date",
+    b"registrar registration expiration date",
+    b"registration time",
+    b"expiration time",
+];
+
+fn whois_value_color<'a>(field: &[u8], value: &[u8], theme: &'a Theme) -> Option<&'a str> {
+    if whois_field_is(field, WHOIS_CONTACT_FIELDS)
+        || whois_field_is(field, WHOIS_NETWORK_FIELDS)
+        || whois_field_is(field, WHOIS_IDENTITY_FIELDS)
+    {
+        return Some(theme.string);
+    }
+    if whois_field_is(field, WHOIS_DATE_FIELDS) {
+        return Some(theme.debug);
+    }
+    if field.eq_ignore_ascii_case(b"country") {
+        return Some(theme.muted);
+    }
+    if field.eq_ignore_ascii_case(b"status") {
+        if whois_contains_ignore_ascii_case(value, b"revoked")
+            || whois_contains_ignore_ascii_case(value, b"blocked")
+            || whois_contains_ignore_ascii_case(value, b"denied")
+        {
+            return Some(theme.error);
+        }
+        if whois_contains_ignore_ascii_case(value, b"reserved")
+            || whois_contains_ignore_ascii_case(value, b"inactive")
+            || whois_contains_ignore_ascii_case(value, b"pending")
+        {
+            return Some(theme.warn);
+        }
+        if whois_contains_ignore_ascii_case(value, b"active")
+            || whois_contains_ignore_ascii_case(value, b"allocated")
+            || whois_contains_ignore_ascii_case(value, b"assigned")
+            || whois_contains_ignore_ascii_case(value, b"ok")
+        {
+            return Some(theme.info);
+        }
+        return Some(theme.string);
+    }
+    None
+}
+
+fn whois_field_is(field: &[u8], candidates: &[&[u8]]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| field.eq_ignore_ascii_case(candidate))
+}
+
+fn whois_contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 fn is_manual_page_path(path: &[u8]) -> bool {
     path.windows(4)
         .any(|window| window.eq_ignore_ascii_case(b"/man"))
@@ -591,10 +737,37 @@ fn parse_u16(bytes: &[u8]) -> Option<u16> {
     std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
-/// Color `df` output by storage meaning rather than treating every number alike.
-/// The capacity column anchors the schema, so multi-word filesystem names such
-/// as macOS `map auto_home` do not shift the remaining columns.
-pub fn colorize_df_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DfColumn {
+    start: usize,
+    role: DfColumnRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DfColumnRole {
+    Filesystem,
+    Type,
+    Total,
+    Used,
+    Available,
+    Capacity,
+    Inodes,
+    InodesUsed,
+    InodesFree,
+    InodesCapacity,
+    Mount,
+}
+
+/// Color `df` using the schema printed by this invocation. This covers BSD and
+/// GNU layouts and remains correct when `-h`, `-H`, `-k`, `-m`, `-i`, `-P`,
+/// `-T`, or compatible combined/custom-output flags add, remove or reorder
+/// columns. Byte positions—not whitespace token counts—also preserve macOS's
+/// multi-word `map auto_home` filesystem name.
+pub fn colorize_df_line(
+    line: &[u8],
+    theme: &Theme,
+    columns: &mut Vec<DfColumn>,
+) -> Option<Vec<u8>> {
     if theme.reset.is_empty() {
         return None;
     }
@@ -603,23 +776,126 @@ pub fn colorize_df_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     if words.is_empty() {
         return None;
     }
-    let first = &content[words[0].0..words[0].1];
-    if first == b"Filesystem" {
-        return Some(colorize_words(
-            content,
-            ending,
-            theme,
-            |_idx, word| match word {
-                b"Filesystem" => Some(theme.key),
-                b"Used" | b"iused" => Some(theme.warn),
-                b"Avail" | b"Available" | b"ifree" => Some(theme.info),
-                b"Capacity" | b"Use%" | b"%iused" => Some(theme.keyword),
-                b"Mounted" | b"on" => Some(theme.path),
-                _ => Some(theme.muted),
-            },
-        ));
+    if let Some(schema) = df_header_schema(content, &words) {
+        *columns = schema;
+        return Some(colorize_words(content, ending, theme, |_idx, word| {
+            df_header_color(word, theme)
+        }));
     }
 
+    if columns.len() >= 2 {
+        return colorize_df_row(content, ending, theme, columns);
+    }
+
+    // Conservative fallback for a row received without its header (or a
+    // localized/unknown header). This retains the previous useful behavior.
+    colorize_df_row_by_percentages(content, ending, theme, &words)
+}
+
+fn df_header_schema(content: &[u8], words: &[(usize, usize)]) -> Option<Vec<DfColumn>> {
+    let first = words.first().map(|(start, end)| &content[*start..*end])?;
+    if !matches!(first, b"Filesystem" | b"Source") {
+        return None;
+    }
+    let mut columns = Vec::new();
+    for (start, end) in words.iter().copied() {
+        let word = &content[start..end];
+        let role = match word {
+            b"Filesystem" | b"Source" => DfColumnRole::Filesystem,
+            b"Type" | b"Fstype" => DfColumnRole::Type,
+            b"Size" | b"512-blocks" | b"1024-blocks" | b"1K-blocks" | b"1M-blocks" => {
+                DfColumnRole::Total
+            }
+            b"Used" => DfColumnRole::Used,
+            b"Avail" | b"Available" => DfColumnRole::Available,
+            b"Capacity" | b"Use%" | b"Pcent" => DfColumnRole::Capacity,
+            b"Inodes" => DfColumnRole::Inodes,
+            b"iused" | b"IUsed" => DfColumnRole::InodesUsed,
+            b"ifree" | b"IFree" => DfColumnRole::InodesFree,
+            b"%iused" | b"IUse%" | b"IPcent" => DfColumnRole::InodesCapacity,
+            b"Mounted" | b"File" | b"Target" => DfColumnRole::Mount,
+            // `on` is the second word of the single `Mounted on` label.
+            _ => continue,
+        };
+        columns.push(DfColumn { start, role });
+    }
+    (columns.len() >= 2
+        && columns
+            .iter()
+            .any(|column| column.role == DfColumnRole::Mount))
+    .then_some(columns)
+}
+
+fn df_header_color(word: &[u8], theme: &Theme) -> Option<&'static str> {
+    match word {
+        b"Filesystem" | b"Source" => Some(theme.muted),
+        b"Type" | b"Fstype" => Some(theme.keyword),
+        b"Used" | b"iused" | b"IUsed" => Some(theme.warn),
+        b"Avail" | b"Available" | b"ifree" | b"IFree" => Some(theme.info),
+        b"Capacity" | b"Use%" | b"Pcent" | b"%iused" | b"IUse%" | b"IPcent" => Some(theme.keyword),
+        b"Mounted" | b"on" | b"File" | b"Target" => Some(theme.path),
+        _ => Some(theme.muted),
+    }
+}
+
+fn colorize_df_row(
+    content: &[u8],
+    ending: &[u8],
+    theme: &Theme,
+    columns: &[DfColumn],
+) -> Option<Vec<u8>> {
+    let words = word_spans(content);
+    let mount_start = columns
+        .iter()
+        .find(|column| column.role == DfColumnRole::Mount)?
+        .start;
+    let mount_word = words.iter().position(|(start, _)| *start >= mount_start)?;
+    let middle_roles = columns
+        .iter()
+        .filter_map(|column| {
+            (!matches!(column.role, DfColumnRole::Filesystem | DfColumnRole::Mount))
+                .then_some(column.role)
+        })
+        .collect::<Vec<_>>();
+    if mount_word <= middle_roles.len() {
+        return None;
+    }
+    // Work backwards from the mount column. Unlike header byte boundaries,
+    // token order remains stable when a large right-aligned number extends to
+    // the left of its short label (`ifree` is the common macOS example).
+    let first_middle_word = mount_word - middle_roles.len();
+    Some(colorize_words(content, ending, theme, |index, word| {
+        let role = if index < first_middle_word {
+            DfColumnRole::Filesystem
+        } else if index < mount_word {
+            middle_roles[index - first_middle_word]
+        } else {
+            DfColumnRole::Mount
+        };
+        Some(df_value_color(role, word, theme))
+    }))
+}
+
+fn df_value_color(role: DfColumnRole, value: &[u8], theme: &Theme) -> &'static str {
+    match role {
+        DfColumnRole::Filesystem => theme.muted,
+        DfColumnRole::Type => theme.keyword,
+        DfColumnRole::Total | DfColumnRole::Inodes => theme.muted,
+        DfColumnRole::Used | DfColumnRole::InodesUsed => theme.warn,
+        DfColumnRole::Available | DfColumnRole::InodesFree => theme.info,
+        DfColumnRole::Capacity | DfColumnRole::InodesCapacity => percent_value(value)
+            .map(|percent| storage_pressure_color(percent, theme))
+            .unwrap_or(theme.muted),
+        DfColumnRole::Mount => theme.path,
+    }
+}
+
+fn colorize_df_row_by_percentages(
+    content: &[u8],
+    ending: &[u8],
+    theme: &Theme,
+    words: &[(usize, usize)],
+) -> Option<Vec<u8>> {
     let percentages = words
         .iter()
         .enumerate()
@@ -704,6 +980,9 @@ pub fn colorize_ps_line(
     if words.is_empty() {
         return None;
     }
+    if let Some(separator) = colorize_ps_section_separator(content, ending, theme) {
+        return Some(separator);
+    }
     if let Some(header) = ps_header_roles(content, &words) {
         *columns = header;
         return Some(colorize_words(content, ending, theme, |idx, _| {
@@ -716,8 +995,9 @@ pub fn colorize_ps_line(
     }
 
     if !columns.is_empty() {
+        let roles = ps_row_roles(content, &words, columns)?;
         return Some(colorize_words(content, ending, theme, |idx, word| {
-            let role = columns.get(idx).copied().unwrap_or(PsColumnRole::Unknown);
+            let role = roles.get(idx).copied().unwrap_or(PsColumnRole::Unknown);
             Some(ps_role_color(role, word, theme))
         }));
     }
@@ -739,6 +1019,71 @@ pub fn colorize_ps_line(
             _ => Some(theme.muted),
         },
     ))
+}
+
+fn colorize_ps_section_separator(content: &[u8], ending: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    let trimmed = content.trim_ascii();
+    let middle = trimmed
+        .strip_prefix(b"=====")?
+        .strip_suffix(b"=====")?
+        .trim_ascii();
+    if middle.is_empty() || !middle.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(colorize_words(content, ending, theme, |idx, _| match idx {
+        1 => Some(theme.number),
+        _ => Some(theme.comment),
+    }))
+}
+
+fn ps_row_roles(
+    content: &[u8],
+    words: &[(usize, usize)],
+    columns: &[PsColumnRole],
+) -> Option<Vec<PsColumnRole>> {
+    let first_id = columns.iter().position(|role| *role == PsColumnRole::Id)?;
+    let id_word = words
+        .get(first_id)
+        .map(|(start, end)| &content[*start..*end])?;
+    if !id_word.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    let mut roles = Vec::with_capacity(words.len());
+    let mut word_index = 0;
+    for (column_index, role) in columns.iter().copied().enumerate() {
+        if word_index >= words.len() {
+            return None;
+        }
+        if role == PsColumnRole::Command && column_index + 1 == columns.len() {
+            roles.push(PsColumnRole::Command);
+            roles.resize(words.len(), PsColumnRole::Unknown);
+            break;
+        }
+        if role == PsColumnRole::Start && looks_like_ps_long_start(content, words, word_index) {
+            roles.extend(std::iter::repeat_n(PsColumnRole::Start, 5));
+            word_index += 5;
+        } else {
+            roles.push(role);
+            word_index += 1;
+        }
+    }
+    (roles.len() == words.len()).then_some(roles)
+}
+
+fn looks_like_ps_long_start(content: &[u8], words: &[(usize, usize)], start: usize) -> bool {
+    let Some(parts) = words.get(start..start + 5) else {
+        return false;
+    };
+    let part = |index: usize| &content[parts[index].0..parts[index].1];
+    part(0).len() == 3
+        && part(0).iter().all(u8::is_ascii_alphabetic)
+        && part(1).len() == 3
+        && part(1).iter().all(u8::is_ascii_alphabetic)
+        && part(2).iter().all(u8::is_ascii_digit)
+        && part(3).contains(&b':')
+        && part(4).len() == 4
+        && part(4).iter().all(u8::is_ascii_digit)
 }
 
 fn ps_header_roles(content: &[u8], words: &[(usize, usize)]) -> Option<Vec<PsColumnRole>> {

@@ -129,6 +129,106 @@ pub fn first_word(cmd: &[u8]) -> Option<String> {
     None
 }
 
+/// Whether `name` appears in a shell command position anywhere in `cmd`.
+///
+/// Unlike a substring search, this ignores quoted arguments and ordinary
+/// argument words (`echo ps`), while recognizing commands after shell control
+/// operators and reserved words (`for ...; do ps ...; done`). This is a small,
+/// deliberately conservative lexer rather than a shell parser: it exists only
+/// to select an output formatter, never to execute or rewrite the command.
+pub(crate) fn contains_command(cmd: &[u8], name: &[u8]) -> bool {
+    let mut index = 0;
+    let mut expect_command = true;
+
+    while index < cmd.len() {
+        let byte = cmd[index];
+        if byte.is_ascii_whitespace() {
+            if matches!(byte, b'\n' | b'\r') {
+                expect_command = true;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            let quote = byte;
+            index += 1;
+            while index < cmd.len() && cmd[index] != quote {
+                if quote == b'"' && cmd[index] == b'\\' && index + 1 < cmd.len() {
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            index += usize::from(index < cmd.len());
+            if expect_command {
+                expect_command = false;
+            }
+            continue;
+        }
+        if is_operator(byte) {
+            while index < cmd.len() && is_operator(cmd[index]) {
+                index += 1;
+            }
+            expect_command = true;
+            continue;
+        }
+
+        let start = index;
+        while index < cmd.len() {
+            if cmd[index] == b'\\' && index + 1 < cmd.len() {
+                index += 2;
+                continue;
+            }
+            if cmd[index].is_ascii_whitespace()
+                || cmd[index] == b'\''
+                || cmd[index] == b'"'
+                || is_operator(cmd[index])
+            {
+                break;
+            }
+            index += 1;
+        }
+        let word = &cmd[start..index];
+        if !expect_command {
+            continue;
+        }
+
+        let base = word.rsplit(|byte| *byte == b'/').next().unwrap_or(word);
+        if base == name {
+            return true;
+        }
+        if is_command_prefix(base) || is_env_assignment_bytes(word) {
+            continue;
+        }
+        // These reserved words introduce a command list; the following word is
+        // still in command position. Other words consume that position.
+        expect_command = matches!(
+            base,
+            b"do" | b"then" | b"else" | b"elif" | b"if" | b"while" | b"until"
+        );
+    }
+    false
+}
+
+fn is_command_prefix(word: &[u8]) -> bool {
+    WRAPPERS.iter().any(|wrapper| word == wrapper.as_bytes())
+        || word == b"!"
+        || word.first() == Some(&b'-')
+}
+
+fn is_env_assignment_bytes(word: &[u8]) -> bool {
+    let Some(equals) = word.iter().position(|byte| *byte == b'=') else {
+        return false;
+    };
+    let name = &word[..equals];
+    !name.is_empty()
+        && !name.contains(&b'/')
+        && !name[0].is_ascii_digit()
+        && name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
 /// Whether the captured shell command begins with the `!` reserved word.
 ///
 /// This deliberately requires whitespace after `!`: `! command` is shell
@@ -247,6 +347,19 @@ mod tests {
         assert_eq!(first_word(b"  git   status ").as_deref(), Some("git"));
         assert_eq!(first_word(b"").as_deref(), None);
         assert_eq!(first_word(b"sudo").as_deref(), None); // only a wrapper
+    }
+
+    #[test]
+    fn finds_commands_inside_shell_lists_without_matching_arguments() {
+        assert!(contains_command(
+            b"for pid in 1 2; do\n echo \"===== $pid =====\"\n /bin/ps -p \"$pid\" -o pid,command\ndone",
+            b"ps"
+        ));
+        assert!(contains_command(b"echo ready && sudo -n ps aux", b"ps"));
+        assert!(!contains_command(b"echo ps -p 42", b"ps"));
+        assert!(!contains_command(b"printf '%s' 'ps aux'", b"ps"));
+        assert!(!contains_command(b"echo \"ps aux\"", b"ps"));
+        assert!(!contains_command(b"echo foo\\; ps aux", b"ps"));
     }
 
     #[test]

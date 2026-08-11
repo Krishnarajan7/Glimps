@@ -65,7 +65,7 @@ $ curl -s api.example.com/user
 The `▌` line is GLIMPS marking where output begins. Logs get severity coloring
 as they stream. HTTP responses are split into status, headers, cookies,
 redirects, and body. Long HTML becomes an indented tree. Diffs, stack traces,
-Git output, CSV/TSV, SQL, JSON-lines, source files, config files, and database
+Git output, CSV/TSV/PSV, SQL, JSON-lines, source files, config files, and database
 tables get focused formatting too.
 
 Just as important: output GLIMPS should not touch is left alone. Full-screen
@@ -82,6 +82,8 @@ printf '<!doctype html><html><head><title>Glimps</title></head><body><h1>Hello</
 printf 'Traceback (most recent call last):\n  File "app.py", line 7, in <module>\nValueError: broken config\n'
 printf 'name,age,active\nAda,37,true\n"Lovelace, Ada",12,false\n' > /tmp/glimps-users.csv
 cat /tmp/glimps-users.csv
+printf 'name|region|active\nAda|europe|true\n' > /tmp/glimps-users.psv
+cat /tmp/glimps-users.psv
 printf 'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\nSELECT * FROM users WHERE id = 42;\n' > /tmp/glimps-schema.sql
 cat /tmp/glimps-schema.sql
 sqlite3 -header -column :memory: 'CREATE TABLE users(id INTEGER, name TEXT, active TEXT); INSERT INTO users VALUES (1,"Ada","true"); SELECT * FROM users;'
@@ -307,7 +309,7 @@ new raw shell with `GLIMPS=0 zsh`.
   `networksetup`), macOS disk and file metadata (`diskutil info`, `GetFileInfo`, `xattr -l`), system status
   output (`launchctl list`, `pmset -g`),
   `man`/help output and manual-index searches (`whatis`, `apropos`, `man -k`, `man -f`), Markdown project files, YAML/TOML/INI/dotenv-style config
-  files, `.gitignore` patterns, `.gitleaksignore` fingerprints, CSV/TSV files, SQL query files,
+  files, `.gitignore` patterns, `.gitleaksignore` fingerprints, adaptive CSV/TSV/PSV tables, SQL query files,
   JSON-lines streams/files, common source-code extensions shown through reader
   commands, common database CLI result tables, and Git status/branch/log/stat
   output. It also displays

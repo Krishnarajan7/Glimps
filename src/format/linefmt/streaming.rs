@@ -60,6 +60,7 @@ impl StreamingFormatter for Logs {
 
     fn format_line(&self, content: &[u8], ending: &[u8], theme: &Theme) -> Option<Vec<u8>> {
         colorize_log_line(content, ending, theme)
+            .or_else(|| colorize_ssh_auth_line(content, ending, theme))
     }
 }
 
@@ -143,6 +144,253 @@ fn colorize_log_line(content: &[u8], ending: &[u8], theme: &Theme) -> Option<Vec
     out.extend_from_slice(&content[level_end..]);
     out.extend_from_slice(ending);
     Some(out)
+}
+
+#[derive(Clone, Copy)]
+struct ColorSpan {
+    start: usize,
+    end: usize,
+    color: &'static str,
+}
+
+/// Color conventional OpenSSH authentication records even though they do not
+/// carry an explicit `ERROR`/`INFO` level. The timestamp and `sshd[pid]:`
+/// envelope make this deliberately narrow; prose containing "Failed password"
+/// must not become an error log by accident.
+fn colorize_ssh_auth_line(content: &[u8], ending: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    let words = auth_word_spans(content);
+    let (timestamp_end, host_index, service_index) = auth_envelope(&words, content)?;
+    let (service_start, service_end) = words[service_index];
+    let service = &content[service_start..service_end];
+    let pid = sshd_pid_range(service)?;
+
+    let message_start = content[service_end..]
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())?
+        + service_end;
+    let message = &content[message_start..];
+    let (event_len, event_color) = ssh_auth_event(message, theme)?;
+
+    let mut spans = vec![
+        ColorSpan {
+            start: words[0].0,
+            end: timestamp_end,
+            color: theme.debug,
+        },
+        ColorSpan {
+            start: words[host_index].0,
+            end: words[host_index].1,
+            color: theme.muted,
+        },
+        ColorSpan {
+            start: service_start,
+            end: service_start + pid.0,
+            color: theme.debug,
+        },
+        ColorSpan {
+            start: service_start + pid.0,
+            end: service_start + pid.1,
+            color: theme.number,
+        },
+        ColorSpan {
+            start: service_start + pid.1,
+            end: service_end,
+            color: theme.debug,
+        },
+        ColorSpan {
+            start: message_start,
+            end: message_start + event_len,
+            color: event_color,
+        },
+    ];
+    add_ssh_auth_subject_spans(message, message_start, theme, &mut spans);
+    render_color_spans(content, ending, theme, &mut spans)
+}
+
+fn auth_envelope(words: &[(usize, usize)], content: &[u8]) -> Option<(usize, usize, usize)> {
+    if words.len() < 3 {
+        return None;
+    }
+    let word = |index: usize| &content[words[index].0..words[index].1];
+    if looks_like_iso_timestamp(word(0)) {
+        return Some((words[0].1, 1, 2));
+    }
+    if words.len() >= 5
+        && looks_like_syslog_month(word(0))
+        && word(1).iter().all(u8::is_ascii_digit)
+        && looks_like_clock(word(2))
+    {
+        return Some((words[2].1, 3, 4));
+    }
+    None
+}
+
+fn looks_like_iso_timestamp(word: &[u8]) -> bool {
+    word.len() >= 19
+        && word.get(4) == Some(&b'-')
+        && word.get(7) == Some(&b'-')
+        && matches!(word.get(10), Some(b'T' | b't' | b' '))
+        && word.get(13) == Some(&b':')
+        && word.get(16) == Some(&b':')
+        && [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
+            .iter()
+            .all(|index| word[*index].is_ascii_digit())
+}
+
+fn looks_like_syslog_month(word: &[u8]) -> bool {
+    const MONTHS: &[&[u8]] = &[
+        b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov",
+        b"Dec",
+    ];
+    MONTHS.contains(&word)
+}
+
+fn looks_like_clock(word: &[u8]) -> bool {
+    word.len() == 8
+        && word[2] == b':'
+        && word[5] == b':'
+        && word
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 2 | 5) || byte.is_ascii_digit())
+}
+
+fn sshd_pid_range(service: &[u8]) -> Option<(usize, usize)> {
+    let pid_start = b"sshd[".len();
+    let pid_end = service.strip_prefix(b"sshd[")?.strip_suffix(b"]:")?.len() + pid_start;
+    (pid_end > pid_start && service[pid_start..pid_end].iter().all(u8::is_ascii_digit))
+        .then_some((pid_start, pid_end))
+}
+
+fn ssh_auth_event(message: &[u8], theme: &Theme) -> Option<(usize, &'static str)> {
+    const FAILED: &[&[u8]] = &[
+        b"Failed password",
+        b"Failed publickey",
+        b"Invalid user",
+        b"authentication failure",
+    ];
+    const ACCEPTED: &[&[u8]] = &[
+        b"Accepted password",
+        b"Accepted publickey",
+        b"Accepted keyboard-interactive",
+    ];
+    if let Some(event) = FAILED.iter().find(|event| message.starts_with(event)) {
+        return Some((event.len(), theme.error));
+    }
+    ACCEPTED
+        .iter()
+        .find(|event| message.starts_with(event))
+        .map(|event| (event.len(), theme.info))
+}
+
+fn add_ssh_auth_subject_spans(
+    message: &[u8],
+    offset: usize,
+    theme: &Theme,
+    spans: &mut Vec<ColorSpan>,
+) {
+    let Some(from) = find_bytes(message, b" from ") else {
+        return;
+    };
+    let before_from = &message[..from];
+    let subject_start = if let Some(marker) = find_bytes(before_from, b" for invalid user ") {
+        let invalid_start = marker + b" for ".len();
+        let invalid_end = invalid_start + b"invalid user".len();
+        spans.push(ColorSpan {
+            start: offset + invalid_start,
+            end: offset + invalid_end,
+            color: theme.warn,
+        });
+        Some(marker + b" for invalid user ".len())
+    } else {
+        find_bytes(before_from, b" for ").map(|marker| marker + b" for ".len())
+    };
+    if let Some(subject_start) = subject_start {
+        if subject_start < from {
+            spans.push(ColorSpan {
+                start: offset + subject_start,
+                end: offset + from,
+                color: theme.string,
+            });
+        }
+    }
+
+    let address_start = from + b" from ".len();
+    let port = find_bytes(&message[address_start..], b" port ")
+        .map(|relative| address_start + relative)
+        .unwrap_or(message.len());
+    if address_start < port {
+        spans.push(ColorSpan {
+            start: offset + address_start,
+            end: offset + port,
+            color: theme.path,
+        });
+    }
+    if port < message.len() {
+        let port_start = port + b" port ".len();
+        let port_end = message[port_start..]
+            .iter()
+            .position(u8::is_ascii_whitespace)
+            .map(|relative| port_start + relative)
+            .unwrap_or(message.len());
+        if port_start < port_end && message[port_start..port_end].iter().all(u8::is_ascii_digit) {
+            spans.push(ColorSpan {
+                start: offset + port_start,
+                end: offset + port_end,
+                color: theme.number,
+            });
+        }
+    }
+}
+
+fn render_color_spans(
+    content: &[u8],
+    ending: &[u8],
+    theme: &Theme,
+    spans: &mut [ColorSpan],
+) -> Option<Vec<u8>> {
+    spans.sort_unstable_by_key(|span| span.start);
+    let mut cursor = 0;
+    let mut out = Vec::with_capacity(content.len() + ending.len() + spans.len() * 12);
+    for span in spans {
+        if span.start < cursor || span.start >= span.end || span.end > content.len() {
+            return None;
+        }
+        out.extend_from_slice(&content[cursor..span.start]);
+        out.extend_from_slice(span.color.as_bytes());
+        out.extend_from_slice(&content[span.start..span.end]);
+        out.extend_from_slice(theme.reset.as_bytes());
+        cursor = span.end;
+    }
+    out.extend_from_slice(&content[cursor..]);
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+fn auth_word_spans(content: &[u8]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < content.len() {
+        while index < content.len() && content[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let start = index;
+        while index < content.len() && !content[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if start < index {
+            spans.push((start, index));
+        }
+    }
+    spans
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    (!needle.is_empty() && needle.len() <= haystack.len()).then(|| {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    })?
 }
 
 fn severity_match(window: &[u8]) -> Option<(usize, usize, Severity)> {

@@ -224,6 +224,9 @@ pub struct Formatter {
     /// Column roles learned from the current `ps` header. `ps` changes its
     /// schema across platforms and flags, so rows cannot use fixed positions.
     ps_columns: Vec<linefmt::PsColumnRole>,
+    /// Column starts and roles learned from this `df` invocation. BSD/macOS,
+    /// GNU/Linux and flag combinations expose different schemas.
+    df_columns: Vec<linefmt::DfColumn>,
     /// Read-only error-line observer for the failure footer (F3). Fed the
     /// output zone's bytes — including in-zone Pass escapes, which is where
     /// colored compiler errors live — and never emits a byte itself.
@@ -298,6 +301,7 @@ impl Formatter {
             command_had_visible_output: false,
             command_output_line_count: 0,
             ps_columns: Vec::new(),
+            df_columns: Vec::new(),
             pin: pin::ErrorPin::new(),
             pin_armed: false,
             markdown_fence: None,
@@ -413,6 +417,7 @@ impl Formatter {
                     self.command_had_visible_output = false;
                     self.command_output_line_count = 0;
                     self.ps_columns.clear();
+                    self.df_columns.clear();
                     self.markdown_fence = None;
                     let trust = self
                         .pending_command
@@ -528,9 +533,11 @@ impl Formatter {
                 // leading bytes? Confirmation happens later in `recognize`; an
                 // unconfirmed candidate is emitted verbatim, so eagerness is safe.
                 acc.extend_from_slice(seg);
-                let buffer_candidate = !self.pending_command_prefers_text_lines()
-                    && !starts_with_complete_json_line(&acc)
-                    && self.buffered.iter().any(|f| f.could_start(&seg[pos..]));
+                let delimited_document = self.pending_delimited_document().is_some();
+                let buffer_candidate = delimited_document
+                    || (!self.pending_command_prefers_text_lines()
+                        && !starts_with_complete_json_line(&acc)
+                        && self.buffered.iter().any(|f| f.could_start(&seg[pos..])));
                 self.emit_header(out);
                 if buffer_candidate && acc.len() <= self.config.limits.buffer_cap {
                     Collect::Buffer(acc) // a formatting candidate; hold it
@@ -977,8 +984,16 @@ impl Formatter {
             }
             Collect::Stream(line, emitted_prefix) => Collect::Stream(line, emitted_prefix),
             Collect::Buffer(buf) if !buf.is_empty() => {
-                out.extend_from_slice(&buf);
-                Collect::Passthrough
+                if html::confident_document_prefix(&buf) {
+                    // A real document can arrive in bursts (remote HTTP
+                    // responses commonly pause for hundreds of milliseconds).
+                    // Keep it buffered for whole-document formatting. Ambiguous
+                    // tag-shaped prompts still take the pass-through branch.
+                    Collect::Buffer(buf)
+                } else {
+                    out.extend_from_slice(&buf);
+                    Collect::Passthrough
+                }
             }
             Collect::Sniff(acc) if !acc.is_empty() => {
                 self.emit_header(&mut out);
@@ -1022,6 +1037,7 @@ impl Formatter {
             CommandView::CdPrevious => None,
             CommandView::Find => linefmt::colorize_find_line(line, &self.theme),
             CommandView::Whereis => linefmt::colorize_whereis_line(line, &self.theme),
+            CommandView::Whois => linefmt::colorize_whois_line(line, &self.theme),
             CommandView::History => linefmt::colorize_history_line(line, &self.theme),
             CommandView::HistoryCounts => linefmt::colorize_history_count_line(line, &self.theme),
             CommandView::CurlProgress => linefmt::colorize_curl_progress_line(line, &self.theme),
@@ -1030,7 +1046,7 @@ impl Formatter {
             CommandView::Du => linefmt::colorize_du_line(line, &self.theme),
             CommandView::GetFileInfo => linefmt::colorize_getfileinfo_line(line, &self.theme),
             CommandView::Xattr => linefmt::colorize_xattr_line(line, &self.theme),
-            CommandView::Df => linefmt::colorize_df_line(line, &self.theme),
+            CommandView::Df => linefmt::colorize_df_line(line, &self.theme, &mut self.df_columns),
             CommandView::Ps => linefmt::colorize_ps_line(line, &self.theme, &mut self.ps_columns),
             CommandView::Dns => linefmt::colorize_dns_line(line, &self.theme),
             CommandView::Ping => linefmt::colorize_ping_line(line, &self.theme),
@@ -1172,6 +1188,13 @@ impl Formatter {
         )
     }
 
+    fn pending_delimited_document(&self) -> Option<u8> {
+        match command_view(&self.pending_command) {
+            Some(CommandView::File(FileView::Delimited(delimiter))) => Some(delimiter),
+            _ => None,
+        }
+    }
+
     /// Emit any output still held in the accumulator. **Must** be called once
     /// when the stream ends (PTY EOF): if a command's output was being buffered
     /// but never closed by an OSC-133 `D` marker — the shell exits, crashes, or
@@ -1191,7 +1214,19 @@ impl Formatter {
     fn finalize(&mut self, out: &mut Vec<u8>) {
         match std::mem::replace(&mut self.collect, Collect::Idle) {
             Collect::Buffer(buf) => {
-                match recognize(&self.buffered, &buf, &self.theme) {
+                let delimited = self.pending_delimited_document().and_then(|delimiter| {
+                    linefmt::format_delimited_document(&buf, &self.theme, delimiter).map(
+                        |formatted| {
+                            let label = match delimiter {
+                                b'\t' => "TSV",
+                                b'|' => "PSV",
+                                _ => "CSV",
+                            };
+                            (label, formatted, true)
+                        },
+                    )
+                });
+                match delimited.or_else(|| recognize(&self.buffered, &buf, &self.theme)) {
                     // Reformatted: tag it with a content-type badge, then emit the
                     // formatted bytes — CRLF-normalized only for formatters that say
                     // so (JSON/HTML regenerate `\n`; diff preserves the user's own).
@@ -1387,6 +1422,7 @@ enum CommandView {
     CdPrevious,
     Find,
     Whereis,
+    Whois,
     History,
     HistoryCounts,
     CurlProgress,
@@ -1467,6 +1503,10 @@ const COMMAND_VIEW_REGISTRY: &[CommandViewRegistration] = &[
         view: CommandView::Whereis,
     },
     CommandViewRegistration {
+        names: &["whois"],
+        view: CommandView::Whois,
+    },
+    CommandViewRegistration {
         names: &["ls"],
         view: CommandView::Ls,
     },
@@ -1538,6 +1578,7 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "man" => man_command_view(cmd),
         "apropos" | "whatis" => Some(CommandView::ManIndex),
         "git" => git_command_view(cmd),
+        _ if cmdline::contains_command(cmd, b"ps") => Some(CommandView::Ps),
         _ if command_requests_help(cmd) => Some(CommandView::Man),
         _ => None,
     }
@@ -2106,10 +2147,13 @@ fn file_view_for_word(word: &str) -> Option<FileView> {
         return Some(FileView::Config);
     }
     if clean.ends_with(".csv") {
-        return Some(FileView::Delimited(b','));
+        return Some(FileView::Delimited(linefmt::AUTO_DELIMITER));
     }
     if clean.ends_with(".tsv") || clean.ends_with(".tab") {
         return Some(FileView::Delimited(b'\t'));
+    }
+    if clean.ends_with(".psv") {
+        return Some(FileView::Delimited(b'|'));
     }
     if clean.ends_with(".sql") {
         return Some(FileView::Sql);

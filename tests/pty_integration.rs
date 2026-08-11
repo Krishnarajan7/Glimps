@@ -485,6 +485,35 @@ fn json_output_is_formatted_end_to_end() {
 }
 
 #[test]
+fn slow_html_chunks_are_formatted_end_to_end() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+
+    // The 150 ms pause is well beyond the supervisor's 40 ms interactive
+    // liveness window and models a remote server pausing between HTML chunks.
+    s.write(
+        b"printf '%s' '<!DOCTYPE html><html><head>'; sleep 0.15; printf '%s\\n' '<title>Slow page</title></head><body>Ready</body></html>'\n",
+    );
+    assert!(
+        s.wait_for(b"HTML", FORMAT_BUDGET),
+        "slow HTML response fell back to raw pass-through: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        s.wait_for(b"Slow page", FORMAT_BUDGET),
+        "formatted HTML content was lost"
+    );
+
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
 fn dotenv_file_is_colored_end_to_end() {
     let Some(zsh) = zsh_path() else {
         eprintln!("skipping: zsh not available");

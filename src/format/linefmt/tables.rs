@@ -1,7 +1,311 @@
 //! Delimited tables, database result tables, and SQL syntax views.
 
 use super::super::theme::Theme;
-use super::{paint_whole, split_line, trim_ascii};
+use super::{paint_bytes, paint_whole, split_line, trim_ascii};
+
+const DELIMITED_TABLE_WIDTH: usize = 100;
+pub(crate) const AUTO_DELIMITER: u8 = 0;
+
+/// Parse and reflow a complete CSV/TSV/PSV document.
+///
+/// Small datasets become aligned tables. Wide datasets become record blocks,
+/// because forcing ten or twenty columns onto one terminal line merely moves
+/// the original comma-separated wrapping problem into padded text. Every cell
+/// remains visible; malformed or inconsistent input is declined entirely.
+pub fn format_delimited_document(bytes: &[u8], theme: &Theme, delimiter: u8) -> Option<Vec<u8>> {
+    let delimiter = resolve_document_delimiter(bytes, delimiter)?;
+    let records = parse_delimited_document(bytes, delimiter)?;
+    let (header, rows) = records.split_first()?;
+    if header.len() < 2
+        || rows.is_empty()
+        || header.iter().any(|cell| trim_ascii(cell).is_empty())
+        || rows.iter().any(|row| row.len() != header.len())
+    {
+        return None;
+    }
+
+    let widths = delimited_column_widths(header, rows)?;
+    let total_width = widths.iter().sum::<usize>() + (widths.len() - 1) * 2;
+    if total_width <= DELIMITED_TABLE_WIDTH
+        && records
+            .iter()
+            .flatten()
+            .all(|cell| cell.is_ascii() && !cell.contains(&b'\n'))
+    {
+        Some(render_delimited_table(header, rows, &widths, theme))
+    } else {
+        Some(render_delimited_records(header, rows, theme))
+    }
+}
+
+fn resolve_document_delimiter(bytes: &[u8], requested: u8) -> Option<u8> {
+    if requested != AUTO_DELIMITER {
+        return matches!(requested, b',' | b';' | b'\t' | b'|').then_some(requested);
+    }
+
+    [b',', b';', b'\t']
+        .into_iter()
+        .filter_map(|candidate| {
+            let records = parse_delimited_document(bytes, candidate)?;
+            let (header, rows) = records.split_first()?;
+            let valid = header.len() >= 2
+                && !rows.is_empty()
+                && header.iter().all(|cell| plausible_header_cell(cell))
+                && rows.iter().all(|row| row.len() == header.len());
+            valid.then_some((candidate, header.len()))
+        })
+        .max_by_key(|(_, columns)| *columns)
+        .map(|(delimiter, _)| delimiter)
+}
+
+fn plausible_header_cell(cell: &[u8]) -> bool {
+    let cell = trim_ascii(cell);
+    !cell.is_empty()
+        && cell.iter().any(u8::is_ascii_alphabetic)
+        && cell.iter().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || byte.is_ascii_whitespace()
+                || matches!(*byte, b'_' | b'-' | b'.' | b'/' | b'(' | b')')
+        })
+}
+
+fn parse_delimited_document(bytes: &[u8], delimiter: u8) -> Option<Vec<Vec<Vec<u8>>>> {
+    if !matches!(delimiter, b',' | b';' | b'\t' | b'|') || bytes.is_empty() {
+        return None;
+    }
+    let mut records = Vec::new();
+    let mut record = Vec::new();
+    let mut field = Vec::new();
+    let mut in_quotes = false;
+    let mut quoted_field = false;
+    let mut closed_quote = false;
+    let mut record_started = false;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'"' {
+            if in_quotes {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    field.push(b'"');
+                    i += 2;
+                    record_started = true;
+                    continue;
+                }
+                in_quotes = false;
+                closed_quote = true;
+                i += 1;
+                continue;
+            }
+            if field.is_empty() && !quoted_field {
+                in_quotes = true;
+                quoted_field = true;
+                record_started = true;
+                i += 1;
+                continue;
+            }
+            // A quote in an unquoted field is not RFC 4180 CSV. Decline the
+            // whole transform instead of presenting a subtly altered record.
+            return None;
+        }
+        if !in_quotes && byte == delimiter {
+            record.push(std::mem::take(&mut field));
+            quoted_field = false;
+            closed_quote = false;
+            record_started = true;
+            i += 1;
+            continue;
+        }
+        if !in_quotes && matches!(byte, b'\r' | b'\n') {
+            if byte == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+                i += 1;
+            }
+            if record_started || !field.is_empty() || !record.is_empty() {
+                record.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut record));
+            }
+            quoted_field = false;
+            closed_quote = false;
+            record_started = false;
+            i += 1;
+            continue;
+        }
+        if closed_quote {
+            // After a quoted field closes, only its delimiter, record ending,
+            // or EOF is valid. Refuse permissive repair that could hide damage.
+            return None;
+        }
+        field.push(byte);
+        record_started = true;
+        i += 1;
+    }
+
+    if in_quotes {
+        return None;
+    }
+    if record_started || !field.is_empty() || !record.is_empty() {
+        record.push(field);
+        records.push(record);
+    }
+    (records.len() >= 2).then_some(records)
+}
+
+fn delimited_column_widths(header: &[Vec<u8>], rows: &[Vec<Vec<u8>>]) -> Option<Vec<usize>> {
+    let mut widths = header
+        .iter()
+        .map(|cell| {
+            std::str::from_utf8(cell)
+                .ok()
+                .map(str::chars)
+                .map(Iterator::count)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    for row in rows {
+        for (index, cell) in row.iter().enumerate() {
+            let width = std::str::from_utf8(cell).ok()?.chars().count();
+            widths[index] = widths[index].max(width);
+        }
+    }
+    Some(widths)
+}
+
+fn render_delimited_table(
+    header: &[Vec<u8>],
+    rows: &[Vec<Vec<u8>>],
+    widths: &[usize],
+    theme: &Theme,
+) -> Vec<u8> {
+    let numeric = (0..header.len())
+        .map(|column| {
+            rows.iter().all(|row| {
+                let value = trim_ascii(&row[column]);
+                value.is_empty() || looks_numeric(value)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut out = Vec::new();
+    render_delimited_table_row(&mut out, header, widths, &numeric, theme, true);
+    for (index, width) in widths.iter().copied().enumerate() {
+        if index > 0 {
+            out.extend_from_slice(b"  ");
+        }
+        paint_bytes(
+            &mut out,
+            theme.comment,
+            "─".repeat(width).as_bytes(),
+            theme.reset,
+        );
+    }
+    out.push(b'\n');
+    for row in rows {
+        render_delimited_table_row(&mut out, row, widths, &numeric, theme, false);
+    }
+    out
+}
+
+fn render_delimited_table_row(
+    out: &mut Vec<u8>,
+    cells: &[Vec<u8>],
+    widths: &[usize],
+    numeric: &[bool],
+    theme: &Theme,
+    header: bool,
+) {
+    for (index, cell) in cells.iter().enumerate() {
+        if index > 0 {
+            out.extend_from_slice(b"  ");
+        }
+        let width = std::str::from_utf8(cell)
+            .map(|text| text.chars().count())
+            .unwrap_or(cell.len());
+        let padding = widths[index].saturating_sub(width);
+        if !header && numeric[index] {
+            out.extend(std::iter::repeat_n(b' ', padding));
+        }
+        paint_delimited_value(out, cell, theme, header);
+        if header || !numeric[index] {
+            out.extend(std::iter::repeat_n(b' ', padding));
+        }
+    }
+    out.push(b'\n');
+}
+
+fn render_delimited_records(header: &[Vec<u8>], rows: &[Vec<Vec<u8>>], theme: &Theme) -> Vec<u8> {
+    let label_width = header.iter().map(Vec::len).max().unwrap_or(0);
+    let mut out = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        if row_index > 0 {
+            out.push(b'\n');
+        }
+        paint_bytes(&mut out, theme.comment, b"record ", theme.reset);
+        paint_bytes(
+            &mut out,
+            theme.muted,
+            (row_index + 1).to_string().as_bytes(),
+            theme.reset,
+        );
+        out.push(b'\n');
+        for (label, value) in header.iter().zip(row) {
+            out.extend_from_slice(b"  ");
+            paint_bytes(&mut out, theme.muted, label, theme.reset);
+            out.extend(std::iter::repeat_n(
+                b' ',
+                label_width.saturating_sub(label.len()) + 2,
+            ));
+            if value.is_empty() {
+                paint_bytes(&mut out, theme.comment, "—".as_bytes(), theme.reset);
+                out.push(b'\n');
+                continue;
+            }
+            let mut lines = value.split(|byte| *byte == b'\n');
+            if let Some(first) = lines.next() {
+                paint_delimited_value(&mut out, first, theme, false);
+            }
+            for continuation in lines {
+                out.push(b'\n');
+                out.extend(std::iter::repeat_n(b' ', label_width + 4));
+                paint_delimited_value(&mut out, continuation, theme, false);
+            }
+            out.push(b'\n');
+        }
+    }
+    out
+}
+
+fn paint_delimited_value(out: &mut Vec<u8>, cell: &[u8], theme: &Theme, header: bool) {
+    let trimmed = trim_ascii(cell);
+    let color = if header {
+        Some(theme.muted)
+    } else if trimmed.is_empty() {
+        Some(theme.comment)
+    } else if looks_numeric(trimmed) {
+        Some(theme.number)
+    } else if matches!(
+        lower_ascii(trimmed).as_slice(),
+        b"true" | b"false" | b"null" | b"nil" | b"na" | b"n/a"
+    ) {
+        Some(theme.keyword)
+    } else if looks_like_delimited_link(trimmed) {
+        Some(theme.string)
+    } else {
+        None
+    };
+    if let Some(color) = color {
+        paint_bytes(out, color, cell, theme.reset);
+    } else {
+        out.extend_from_slice(cell);
+    }
+}
+
+fn looks_like_delimited_link(cell: &[u8]) -> bool {
+    cell.starts_with(b"http://")
+        || cell.starts_with(b"https://")
+        || (cell.contains(&b'.')
+            && !cell.contains(&b' ')
+            && cell.iter().all(|byte| {
+                byte.is_ascii_alphanumeric() || b"-._~:/?#[]@!$&'()*+;=".contains(byte)
+            }))
+}
 
 /// Color one delimiter-separated row without changing its layout.
 pub fn colorize_delimited_line(

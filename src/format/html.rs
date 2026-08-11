@@ -8,10 +8,10 @@
 //! Safety:
 //! * [`detect`] is high-precision: first non-ws `<`, last non-ws `>`, and a clear
 //!   HTML signal (`</`, `/>`, or `<!`).
-//! * [`try_format`] returns `None` (→ pass-through) on invalid UTF-8 or any
-//!   unterminated construct (a `<` with no `>`, an open comment, an unclosed
-//!   raw-text element). It never drops text or tag bytes — it only changes the
-//!   surrounding whitespace — and never panics.
+//! * [`try_format`] returns `None` (→ pass-through) on invalid UTF-8 or when an
+//!   incomplete construct has no confidently-recognized HTML before it. For a
+//!   truncated document, complete prefix tokens are rendered and the unfinished
+//!   tail is copied verbatim. It never invents closing tags or drops tail bytes.
 //! * Content inside raw-text elements (`script`, `style`, `pre`, `textarea`,
 //!   `title`) is preserved verbatim, so we don't mangle preformatted or
 //!   code/style content. The narrow exception is a valid JSON document inside
@@ -43,23 +43,66 @@ pub fn detect(bytes: &[u8]) -> bool {
     t.starts_with(b"<!") || contains_sub(t, b"</") || contains_sub(t, b"/>")
 }
 
-/// Re-indent `bytes` as HTML, returning `Some` only when it both [`detect`]s and
-/// tokenizes cleanly. `None` means "pass the bytes through unchanged".
+/// Whether an in-progress buffer has a document-level HTML/XML root strong
+/// enough to survive a quiet network interval. This deliberately rejects
+/// generic tag-shaped text such as an interactive `<choose a value>` prompt.
+pub(crate) fn confident_document_prefix(bytes: &[u8]) -> bool {
+    let bytes = trim_ascii_ws_start(bytes);
+    markup_name_prefix(bytes, b"!doctype")
+        || markup_name_prefix(bytes, b"?xml")
+        || markup_name_prefix(bytes, b"html")
+        || markup_name_prefix(bytes, b"svg")
+}
+
+fn markup_name_prefix(bytes: &[u8], name: &[u8]) -> bool {
+    let Some(candidate) = bytes.get(1..1 + name.len()) else {
+        return false;
+    };
+    candidate.eq_ignore_ascii_case(name)
+        && bytes
+            .get(1 + name.len())
+            .is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/' | b'?'))
+}
+
+/// Re-indent `bytes` as HTML. Complete documents must [`detect`] and tokenize
+/// cleanly; truncated documents may retain one unfinished tail verbatim after a
+/// confidently detected, fully-tokenized prefix. `None` means pass-through.
 pub fn try_format(bytes: &[u8], theme: &Theme) -> Option<Vec<u8>> {
-    if !detect(bytes) {
-        return None;
-    }
     // Tag/text splitting works on bytes, but raw-text capture and rendering read
     // text as UTF-8; reject non-UTF-8 outright (HTML output is text).
     if std::str::from_utf8(bytes).is_err() {
         return None;
     }
-    let tokens = tokenize(bytes)?;
+
+    let (tokens, incomplete_at) = tokenize_prefix(bytes);
+    if incomplete_at.is_none() {
+        if !detect(bytes) {
+            return None;
+        }
+        let mut out = String::with_capacity(bytes.len() + bytes.len() / 4);
+        render(&tokens, bytes, theme, &mut out);
+        if out.ends_with('\n') {
+            out.pop();
+        }
+        return Some(out.into_bytes());
+    }
+
+    // Commands such as `curl ... | head -60` commonly stop in the middle of a
+    // multi-line tag. Require the complete prefix to independently pass our
+    // high-precision detector; this keeps arbitrary `<`-containing text out.
+    let incomplete_at = incomplete_at?;
+    if !detect(&bytes[..incomplete_at]) {
+        return None;
+    }
+
     let mut out = String::with_capacity(bytes.len() + bytes.len() / 4);
     render(&tokens, bytes, theme, &mut out);
-    if out.ends_with('\n') {
-        out.pop();
-    }
+
+    // Preserve indentation immediately before the unfinished construct too.
+    // `render` deliberately leaves its final newline here so the raw tail does
+    // not become attached to the previous rendered element.
+    let tail_start = incomplete_line_start(bytes, incomplete_at);
+    out.push_str(std::str::from_utf8(&bytes[tail_start..]).ok()?);
     Some(out.into_bytes())
 }
 
@@ -186,6 +229,13 @@ enum Token {
 }
 
 fn tokenize(bytes: &[u8]) -> Option<Vec<Token>> {
+    let (tokens, incomplete_at) = tokenize_prefix(bytes);
+    incomplete_at.is_none().then_some(tokens)
+}
+
+/// Tokenize every complete construct and report where an unfinished trailing
+/// construct begins. The returned tokens never include any part of that tail.
+fn tokenize_prefix(bytes: &[u8]) -> (Vec<Token>, Option<usize>) {
     let n = bytes.len();
     let mut toks = Vec::new();
     let mut i = 0;
@@ -201,16 +251,22 @@ fn tokenize(bytes: &[u8]) -> Option<Vec<Token>> {
 
         if bytes[i..].starts_with(b"<!--") {
             // Comment up to and including `-->`.
-            let close = find_sub(bytes, i + 4, b"-->")?;
+            let Some(close) = find_sub(bytes, i + 4, b"-->") else {
+                return (toks, Some(i));
+            };
             let end = close + 3;
             toks.push(Token::Comment(i, end));
             i = end;
         } else if bytes[i..].starts_with(b"<!") || bytes[i..].starts_with(b"<?") {
-            let end = find_byte(bytes, i, b'>')? + 1;
+            let Some(end) = find_byte(bytes, i, b'>').map(|end| end + 1) else {
+                return (toks, Some(i));
+            };
             toks.push(Token::Decl(i, end));
             i = end;
         } else if bytes.get(i + 1) == Some(&b'/') {
-            let end = scan_tag_end(bytes, i)?;
+            let Some(end) = scan_tag_end(bytes, i) else {
+                return (toks, Some(i));
+            };
             let name = tag_name(&bytes[i + 1..end - 1]);
             toks.push(Token::Close {
                 start: i,
@@ -219,11 +275,16 @@ fn tokenize(bytes: &[u8]) -> Option<Vec<Token>> {
             });
             i = end;
         } else {
-            let end = scan_tag_end(bytes, i)?;
+            let Some(end) = scan_tag_end(bytes, i) else {
+                return (toks, Some(i));
+            };
             let self_close = end >= 2 && bytes[end - 2] == b'/';
             let name = tag_name(&bytes[i + 1..end - 1]);
             if !self_close && RAW_ELEMENTS.contains(&name.as_str()) {
-                let (inner_start, close_start, close_end) = find_raw_close(bytes, end, &name)?;
+                let Some((inner_start, close_start, close_end)) = find_raw_close(bytes, end, &name)
+                else {
+                    return (toks, Some(i));
+                };
                 toks.push(Token::Raw {
                     open: (i, end),
                     inner: (inner_start, close_start),
@@ -241,7 +302,24 @@ fn tokenize(bytes: &[u8]) -> Option<Vec<Token>> {
             }
         }
     }
-    Some(toks)
+    (toks, None)
+}
+
+/// Include only the horizontal indentation before an incomplete construct in
+/// its verbatim tail. The preceding newline remains renderer-owned.
+fn incomplete_line_start(bytes: &[u8], incomplete_at: usize) -> usize {
+    let line_start = bytes[..incomplete_at]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    if bytes[line_start..incomplete_at]
+        .iter()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
+    {
+        line_start
+    } else {
+        incomplete_at
+    }
 }
 
 /// Scan from a `<` at `start` to the matching unquoted `>`; returns the index
@@ -629,15 +707,20 @@ fn collapse_ws(bytes: &[u8]) -> String {
 // ---- small byte helpers ---------------------------------------------------
 
 fn trim_ascii_ws(mut bytes: &[u8]) -> &[u8] {
-    while let [first, rest @ ..] = bytes {
-        if first.is_ascii_whitespace() {
+    bytes = trim_ascii_ws_start(bytes);
+    while let [rest @ .., last] = bytes {
+        if last.is_ascii_whitespace() {
             bytes = rest;
         } else {
             break;
         }
     }
-    while let [rest @ .., last] = bytes {
-        if last.is_ascii_whitespace() {
+    bytes
+}
+
+fn trim_ascii_ws_start(mut bytes: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = bytes {
+        if first.is_ascii_whitespace() {
             bytes = rest;
         } else {
             break;
@@ -695,6 +778,27 @@ mod tests {
         assert!(!detect(b"{\"a\":1}"));
         assert!(!detect(b"plain text"));
         assert!(!detect(b""));
+    }
+
+    #[test]
+    fn document_prefix_confidence_rejects_prompt_shaped_markup() {
+        for prefix in [
+            b"<!DOCTYPE html>".as_slice(),
+            b"  <HTML lang=\"en\">",
+            b"<?xml version=\"1.0\"?>",
+            b"<svg viewBox=\"0 0 10 10\">",
+        ] {
+            assert!(confident_document_prefix(prefix));
+        }
+
+        for prompt in [
+            b"<choose a value> ".as_slice(),
+            b"<htmlish> ",
+            b"<svg-icon> ",
+            b"plain text",
+        ] {
+            assert!(!confident_document_prefix(prompt));
+        }
     }
 
     #[test]
@@ -825,6 +929,44 @@ mod tests {
         assert!(try_format(b"<div>oops", &Theme::plain()).is_none()); // unterminated tag
         assert!(try_format(b"<!-- open", &Theme::plain()).is_none()); // unterminated comment
         assert!(try_format(b"<script>x", &Theme::plain()).is_none()); // unclosed raw element
+    }
+
+    #[test]
+    fn truncated_document_formats_complete_prefix_and_preserves_tail() {
+        let input = b"<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"UTF-8\">\n<meta\n  property=\"og:description\"";
+        let out = try_format(input, &Theme::plain()).expect("recognized partial HTML");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "<!DOCTYPE html>\n<html>\n  <head>\n    <meta charset=\"UTF-8\">\n<meta\n  property=\"og:description\""
+        );
+    }
+
+    #[test]
+    fn truncated_tail_is_not_colored_or_completed() {
+        let tail = b"  <meta name=\"description";
+        let mut input = b"<!DOCTYPE html>\n<html>\n  <head>\n".to_vec();
+        input.extend_from_slice(tail);
+
+        let out = try_format(&input, &Theme::default_colored())
+            .expect("recognized partial HTML with colored prefix");
+        assert!(out.ends_with(tail), "unfinished bytes must remain verbatim");
+        assert!(!out.ends_with(b">"), "must not invent a closing delimiter");
+        let tail_at = out.len() - tail.len();
+        assert!(
+            !out[tail_at..].contains(&0x1b),
+            "unfinished tail must not receive speculative color"
+        );
+    }
+
+    #[test]
+    fn truncated_raw_element_is_preserved_from_its_open_tag() {
+        let tail = b"<script>const comparison = a < b;";
+        let mut input = b"<!DOCTYPE html><html><head>".to_vec();
+        input.extend_from_slice(tail);
+
+        let out = try_format(&input, &Theme::plain()).expect("recognized partial HTML");
+        assert!(out.ends_with(tail));
+        assert!(!String::from_utf8(out).unwrap().contains("</script>"));
     }
 
     proptest::proptest! {

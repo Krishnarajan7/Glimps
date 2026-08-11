@@ -606,6 +606,40 @@ fn stalled_buffer_candidate_declines_formatting_for_prompt_liveness() {
 }
 
 #[test]
+fn confident_html_document_survives_slow_network_gaps() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"curl -s https://example.com/")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"<!DOCTYPE html>\n<html><head>\n"));
+
+    assert!(
+        f.flush_stalled_output().is_empty(),
+        "a confident document must remain buffered across a network pause"
+    );
+
+    out.extend_from_slice(&f.process(b"<title>Example</title></head>\n"));
+    assert!(
+        f.flush_stalled_output().is_empty(),
+        "repeated network pauses must not disable document formatting"
+    );
+
+    out.extend_from_slice(&f.process(b"<body>Hello</body></html>"));
+    out.extend_from_slice(&f.process(D0));
+    let plain = strip_sgr(&out);
+    assert!(plain
+        .windows(b" HTML \r\n".len())
+        .any(|window| window == b" HTML \r\n"));
+    assert!(plain
+        .windows(b"    <title>\r\n      Example\r\n    </title>".len())
+        .any(|window| window == b"    <title>\r\n      Example\r\n    </title>"));
+}
+
+#[test]
 fn http_status_split_across_chunks_is_colored_whole() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -2252,7 +2286,7 @@ fn piped_diskutil_info_keeps_the_report_view_but_plist_declines_it() {
 }
 
 #[test]
-fn cat_csv_gets_header_and_cell_coloring() {
+fn cat_csv_becomes_an_aligned_table_and_decodes_quoted_cells() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
         return;
@@ -2265,10 +2299,13 @@ fn cat_csv_gets_header_and_cell_coloring() {
     );
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
-    assert!(s.contains("\x1b[36mname\x1b[0m\x1b[2m,\x1b[0m\x1b[36mage\x1b[0m"));
-    assert!(s.contains("\x1b[38;5;117mAda\x1b[0m\x1b[2m,\x1b[0m\x1b[38;5;220m37\x1b[0m"));
+    assert!(s.contains("CSV"));
+    assert!(s.contains("\x1b[38;5;153mname\x1b[0m"));
+    assert!(s.contains("Ada"));
+    assert!(s.contains("\x1b[38;5;220m37\x1b[0m"));
     assert!(s.contains("\x1b[35mtrue\x1b[0m"));
-    assert!(s.contains("\x1b[38;5;117m\"Lovelace, Ada\"\x1b[0m"));
+    assert!(s.contains("Lovelace, Ada"));
+    assert!(!s.contains("\"Lovelace, Ada\""));
 }
 
 #[test]
@@ -2283,8 +2320,141 @@ fn cat_tsv_gets_tabular_coloring() {
     out.extend_from_slice(&f.process(b"service\tlatency_ms\tok\napi\t42\ttrue\n"));
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
-    assert!(s.contains("\x1b[36mservice\x1b[0m\x1b[2m\t\x1b[0m\x1b[36mlatency_ms\x1b[0m"));
-    assert!(s.contains("\x1b[38;5;117mapi\x1b[0m\x1b[2m\t\x1b[0m\x1b[38;5;220m42\x1b[0m"));
+    assert!(s.contains("TSV"));
+    assert!(s.contains("\x1b[38;5;153mservice\x1b[0m"));
+    assert!(s.contains("api"));
+    assert!(s.contains("\x1b[38;5;220m42\x1b[0m"));
+    assert!(s.contains("\x1b[35mtrue\x1b[0m"));
+}
+
+#[test]
+fn csv_auto_detects_semicolon_and_tab_delimiters() {
+    for (name, body, expected) in [
+        (
+            "regional.csv",
+            b"name;country;note\nAda;UK;\"compiler; pioneer\"\n".as_slice(),
+            "compiler; pioneer",
+        ),
+        (
+            "tab-export.csv",
+            b"name\tcountry\tactive\nAda\tUK\ttrue\n".as_slice(),
+            "\x1b[35mtrue\x1b[0m",
+        ),
+    ] {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        let command = format!("cat {name}");
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(&cmd_marker(command.as_bytes())));
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(body));
+        out.extend_from_slice(&f.process(D0));
+        let text = String::from_utf8_lossy(&out);
+
+        assert!(text.contains("CSV"), "{name}: {text:?}");
+        assert!(text.contains(expected), "{name}: {text:?}");
+        assert!(!text.contains("name;country;note"), "{name}: {text:?}");
+        assert!(!text.contains("name\tcountry\tactive"), "{name}: {text:?}");
+    }
+}
+
+#[test]
+fn psv_files_get_the_same_adaptive_table_view() {
+    let body = b"name|region|note\nAda|europe|\"compiler|pioneer\"\n";
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat people.psv")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8_lossy(&out);
+
+    assert!(text.contains("PSV"));
+    assert!(text.contains("compiler|pioneer"));
+    assert!(!text.contains("name|region|note"));
+}
+
+#[test]
+fn arbitrary_delimiter_like_text_files_remain_unclassified() {
+    assert_eq!(file_view_for_word("notes.txt"), None);
+    assert_eq!(file_view_for_word("README"), Some(FileView::Markdown));
+    assert_eq!(
+        file_view_for_word("export.csv"),
+        Some(FileView::Delimited(linefmt::AUTO_DELIMITER))
+    );
+    assert_eq!(
+        file_view_for_word("export.psv"),
+        Some(FileView::Delimited(b'|'))
+    );
+}
+
+#[test]
+fn wide_csv_becomes_complete_readable_records_without_truncation() {
+    let body = concat!(
+        "row_num,created_at,business_name,business_country_name,business_number_of_employees_range,business_yearly_revenue_range,business_website,business_region,business_naics_description,business_id\n",
+        "1,2026-08-10T09:12:53.668Z,Engineering Design & Testing Corp. (EDT),united states,[51-200],[25M-75M],edtengineers.com,south carolina,Engineering Services,3e3cdc001c0e317bc0196671cbaf4cee\n",
+        "2,2026-08-10T09:12:53.668Z,\"Kracon, a division of Yamaha Marine Systems Company, Inc.\",united states,[51-200],[10M-25M],,wisconsin,All Other Plastics Product Manufacturing,2a51b79d73bdd0eff03d8796ba26948d\n",
+    );
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat leads.csv")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8_lossy(&out);
+
+    assert!(text.contains("CSV"));
+    assert!(text.contains("record \x1b[0m\x1b[38;5;153m1\x1b[0m"));
+    assert!(text.contains("business_name"));
+    assert!(text.contains("Engineering Design & Testing Corp. (EDT)"));
+    assert!(text.contains("Kracon, a division of Yamaha Marine Systems Company, Inc."));
+    assert!(text.contains("All Other Plastics Product Manufacturing"));
+    assert!(text.contains("\x1b[2m—\x1b[0m"));
+    assert!(!text.contains("business_name,business_country_name"));
+}
+
+#[test]
+fn csv_records_preserve_multiline_values_and_escaped_quotes() {
+    let body = b"id,note,empty\n1,\"line one\nline \"\"two\"\"\",\n";
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat notes.csv")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8_lossy(&out);
+
+    assert!(text.contains("line one"));
+    assert!(text.contains("line \"two\""));
+    assert!(text.contains("\x1b[2m—\x1b[0m"));
+}
+
+#[test]
+fn malformed_csv_falls_back_to_the_original_bytes() {
+    let body = b"id,note\n1,\"unterminated\n";
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat broken.csv")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D0));
+
+    assert!(out.windows(body.len()).any(|window| window == body));
+    assert!(!String::from_utf8_lossy(&out).contains("record 1"));
 }
 
 #[test]
@@ -2803,7 +2973,7 @@ fn df_uses_semantic_storage_colors_and_handles_multiword_filesystems() {
     }
     let body = concat!(
         "Filesystem        Size Used Avail Capacity iused ifree %iused Mounted on\n",
-        "/dev/disk3s1s1    245G  13G   49G      21%  459k  483M      0% /\n",
+        "/dev/disk3s1s1    245G  13G   49G      21%  459k  423118440  0% /\n",
         "/dev/disk3s5      245G 173G   49G      78%  2.8M  483M      1% /System/Volumes/Data\n",
         "map auto_home       0B   0B    0B     100%     0     0       - /System/Volumes/Data/home\n",
         "/dev/disk5s1       18G  18G  466M      98%  627k  4.6M     12% /Library/Developer\n",
@@ -2815,10 +2985,11 @@ fn df_uses_semantic_storage_colors_and_handles_multiword_filesystems() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
 
-    assert!(s.contains("\x1b[36mmap\x1b[0m \x1b[36mauto_home\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;153mmap\x1b[0m \x1b[38;5;153mauto_home\x1b[0m"));
     assert!(s.contains("\x1b[38;5;153m245G\x1b[0m"));
     assert!(s.contains("\x1b[38;5;220m173G\x1b[0m"));
     assert!(s.contains("\x1b[38;2;39;135;51m466M\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;39;135;51m423118440\x1b[0m"));
     assert!(s.contains("\x1b[38;2;39;135;51m21%\x1b[0m"));
     assert!(s.contains("\x1b[38;5;220m78%\x1b[0m"));
     assert!(s.contains("\x1b[31m98%\x1b[0m"));
@@ -2826,6 +2997,159 @@ fn df_uses_semantic_storage_colors_and_handles_multiword_filesystems() {
     assert!(strip_sgr(&out)
         .windows(body.len())
         .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn df_flag_variants_share_the_schema_aware_view() {
+    for command in [
+        &b"df"[..],
+        b"df -h",
+        b"df -H",
+        b"df -k",
+        b"df -m",
+        b"df -i",
+        b"df -P",
+        b"df -T",
+        b"df -aTh",
+        b"df --output=source,fstype,size,used,avail,pcent,target",
+    ] {
+        assert_eq!(
+            command_view(&Some(command.to_vec())),
+            Some(CommandView::Df),
+            "command: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn whois_filtered_pipeline_uses_restrained_field_colors() {
+    let command =
+        b"whois $IP | grep -iE 'netname|orgname|org-name|descr|country|address|abuse-mailbox'";
+    let body = concat!(
+        "NetName:        APNIC\n",
+        "OrgName:        Asia Pacific Network Information Centre\n",
+        "Address:        PO Box 3646\n",
+        "Country:        AU\n",
+        "netname:        TATAPLAYBROADBAND-IN\n",
+        "descr:          TSBB pool2\n",
+        "abuse-mailbox:  abuse@example.com\n",
+    );
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(command)));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8_lossy(&out);
+
+    assert!(text.contains("\x1b[2mNetName\x1b[0m"));
+    assert!(text.contains("\x1b[38;5;117mAPNIC\x1b[0m"));
+    assert!(text.contains("\x1b[38;5;117mAsia Pacific Network Information Centre\x1b[0m"));
+    assert!(text.contains("\x1b[38;5;153mAU\x1b[0m"));
+    assert!(text.contains("\x1b[2mabuse-mailbox\x1b[0m"));
+    assert!(text.contains("\x1b[38;5;117mabuse@example.com\x1b[0m"));
+    assert!(!text.contains("\x1b[38;5;220mAU"));
+    assert!(!text.contains("\x1b[38;5;220mabuse-mailbox"));
+    assert!(!text.contains("\x1b[38;5;117mPO Box 3646"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn whois_full_output_colors_network_status_dates_and_comments() {
+    let command = b"whois -h whois.apnic.net -p 43 45.119.28.64";
+    let body = concat!(
+        "% Information related to '45.119.28.0 - 45.119.31.255'\n",
+        "inetnum:        45.119.28.0 - 45.119.31.255\n",
+        "CIDR:           45.119.28.0/22\n",
+        "status:         ALLOCATED PORTABLE\n",
+        "last-modified:  2026-08-10T13:15:11Z\n",
+        "Registrar WHOIS Server: whois.example.test\n",
+        "Creation Date:  2020-04-01T10:20:30Z\n",
+        "remarks:        Network operations contact\n",
+    );
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(command)));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8_lossy(&out);
+
+    assert!(text.contains("\x1b[2m% Information related"));
+    assert!(text.contains("\x1b[38;5;117m45.119.28.0 - 45.119.31.255\x1b[0m"));
+    assert!(text.contains("\x1b[38;5;117m45.119.28.0/22\x1b[0m"));
+    assert!(text.contains("\x1b[38;2;39;135;51mALLOCATED PORTABLE\x1b[0m"));
+    assert!(text.contains("\x1b[2m2026-08-10T13:15:11Z\x1b[0m"));
+    assert!(text.contains("\x1b[38;5;117mwhois.example.test\x1b[0m"));
+    assert!(text.contains("\x1b[2m2020-04-01T10:20:30Z\x1b[0m"));
+    assert!(!text.contains("\x1b[36mNetwork operations contact"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn whois_flags_and_filtered_pipelines_share_one_view() {
+    for command in [
+        &b"whois 45.119.28.64"[..],
+        b"whois -h whois.apnic.net -p 43 45.119.28.64",
+        b"whois --host whois.apnic.net 45.119.28.64",
+        b"whois $IP | grep -iE 'netname|country'",
+    ] {
+        assert_eq!(
+            command_view(&Some(command.to_vec())),
+            Some(CommandView::Whois),
+            "command: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn df_learns_gnu_type_and_inode_flag_layouts() {
+    let mut typed = Formatter::new();
+    if !typed.is_enabled() {
+        return;
+    }
+    let typed_body = b"Filesystem     Type  Size  Used Avail Use% Mounted on\n/dev/sda1      ext4    100G  75G   25G  75% /data\n";
+    let mut typed_out = Vec::new();
+    typed_out.extend_from_slice(&typed.process(&cmd_marker(b"df -Th")));
+    typed_out.extend_from_slice(&typed.process(C));
+    typed_out.extend_from_slice(&typed.process(typed_body));
+    typed_out.extend_from_slice(&typed.process(D0));
+    let typed_text = String::from_utf8_lossy(&typed_out);
+    assert!(typed_text.contains("\x1b[35mext4\x1b[0m"));
+    assert!(typed_text.contains("\x1b[38;5;220m75G\x1b[0m"));
+    assert!(typed_text.contains("\x1b[38;2;39;135;51m25G\x1b[0m"));
+    assert!(typed_text.contains("\x1b[38;5;220m75%\x1b[0m"));
+    assert!(typed_text.contains("\x1b[38;2;142;202;230m/data\x1b[0m"));
+    assert!(strip_sgr(&typed_out)
+        .windows(typed_body.len())
+        .any(|window| window == typed_body));
+
+    let mut inodes = Formatter::new();
+    let inode_body = b"Filesystem     Inodes IUsed IFree IUse% Mounted on\n/dev/sda1       100000 10000 90000   10% /data\n";
+    let mut inode_out = Vec::new();
+    inode_out.extend_from_slice(&inodes.process(&cmd_marker(b"df -i")));
+    inode_out.extend_from_slice(&inodes.process(C));
+    inode_out.extend_from_slice(&inodes.process(inode_body));
+    inode_out.extend_from_slice(&inodes.process(D0));
+    let inode_text = String::from_utf8_lossy(&inode_out);
+    assert!(inode_text.contains("\x1b[38;5;220m10000\x1b[0m"));
+    assert!(inode_text.contains("\x1b[38;2;39;135;51m90000\x1b[0m"));
+    assert!(inode_text.contains("\x1b[38;2;39;135;51m10%\x1b[0m"));
+    assert!(strip_sgr(&inode_out)
+        .windows(inode_body.len())
+        .any(|window| window == inode_body));
 }
 
 #[test]
@@ -2903,6 +3227,64 @@ fn ps_custom_columns_follow_the_declared_header_order() {
     assert!(strip_sgr(&out)
         .windows(body.len())
         .any(|window| window == body));
+}
+
+#[test]
+fn ps_tables_inside_shell_loops_are_detected_and_keep_long_start_aligned() {
+    let command = concat!(
+        "for pid in 28162 35703; do\n",
+        "  echo \"===== $pid =====\"\n",
+        "  ps -p \"$pid\" -o pid,ppid,lstart,etime,%cpu,%mem,command\n",
+        "done",
+    );
+    assert_eq!(
+        command_view(&Some(command.as_bytes().to_vec())),
+        Some(CommandView::Ps)
+    );
+
+    let body = concat!(
+        "===== 28162 =====\n",
+        "  PID  PPID STARTED                       ELAPSED  %CPU %MEM COMMAND\n",
+        "28162 86321 Wed Aug  5 15:15:14 2026 05-18:57:34   3.4  1.1 claude\n",
+        "===== 35703 =====\n",
+        "  PID  PPID STARTED                       ELAPSED  %CPU %MEM COMMAND\n",
+        "35703 35374 Mon Aug 10 17:10:00 2026    17:02:48   0.0  0.7 claude --resume\n",
+    );
+    let mut formatter = Formatter::new();
+    if !formatter.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&formatter.process(&cmd_marker(command.as_bytes())));
+    out.extend_from_slice(&formatter.process(C));
+    out.extend_from_slice(&formatter.process(body.as_bytes()));
+    out.extend_from_slice(&formatter.process(D0));
+    let text = String::from_utf8_lossy(&out);
+
+    assert!(text.contains("\x1b[38;5;220m28162\x1b[0m"));
+    assert!(text.contains("\x1b[2mWed\x1b[0m \x1b[2mAug\x1b[0m"));
+    assert!(text.contains("\x1b[2m05-18:57:34\x1b[0m"));
+    assert!(text.contains("\x1b[38;2;122;162;247mclaude\x1b[0m"));
+    assert!(text.contains("\x1b[38;5;153m--resume\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn ps_text_used_as_an_argument_does_not_select_the_process_view() {
+    for command in [
+        &b"echo ps -p 42"[..],
+        b"printf '%s' 'ps aux'",
+        b"echo \"ps -o pid,command\"",
+    ] {
+        assert_ne!(
+            command_view(&Some(command.to_vec())),
+            Some(CommandView::Ps),
+            "command: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
 }
 
 #[test]
@@ -3817,6 +4199,39 @@ fn html_output_is_indented_with_badge() {
 }
 
 #[test]
+fn curl_head_truncated_html_formats_verified_prefix_and_keeps_tail() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    f.theme = Theme::plain();
+    let body = b"<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"UTF-8\">\n<meta\n  property=\"og:description\"";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"curl -s https://example.com/ | head -60")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D0));
+
+    let formatted = crlf(
+        b"<!DOCTYPE html>\n<html>\n  <head>\n    <meta charset=\"UTF-8\">\n<meta\n  property=\"og:description\"",
+    );
+    let plain = strip_sgr(&out);
+    assert!(
+        plain
+            .windows(b" HTML \r\n".len())
+            .any(|w| w == b" HTML \r\n"),
+        "HTML badge missing from: {}",
+        String::from_utf8_lossy(&plain)
+    );
+    assert!(
+        plain.windows(formatted.len()).any(|w| w == formatted),
+        "formatted partial HTML missing from: {}",
+        String::from_utf8_lossy(&plain)
+    );
+    assert!(!plain.windows(b"</meta>".len()).any(|w| w == b"</meta>"));
+}
+
+#[test]
 fn diff_output_is_badged_and_preserves_crlf_without_doubling() {
     // A unified diff as it arrives off a PTY (CRLF line endings). It gets a
     // DIFF badge and (plain theme) is otherwise byte-identical — crucially the
@@ -4333,14 +4748,16 @@ proptest::proptest! {
     /// Byte-safety invariant #4 for the COLORED command-view family. The other
     /// process-level byte-preservation proptests all run with `Theme::plain()`
     /// AND no captured command, so the colored command-view colorizers
-    /// (`colorize_git_*`, `colorize_delimited_*`, `colorize_sql*`, markdown,
+    /// (`colorize_git_*`, `colorize_sql*`, markdown,
     /// code, …) get ZERO coverage there: under a plain theme they early-return,
     /// and with no command `command_view()` is `None`. Here we inject the
     /// `7337;<cmd>` command marker (so `command_view` resolves) and the `133;C`
     /// output-start marker under a COLORED theme (so the colorizers actually
     /// paint), then prove that stripping the SGR color escapes back out recovers
-    /// the user's bytes EXACTLY — for git status, CSV, SQL, Markdown, and Rust
-    /// source — and that nothing ever panics. Regression guard for the
+    /// the user's bytes EXACTLY — for git status, SQL, Markdown, and Rust source
+    /// — and that nothing ever panics. CSV/TSV is intentionally excluded because
+    /// it is now a semantic document reflow like JSON/HTML, not a color-only view.
+    /// Regression guard for the
     /// `## …␠␠[ahead]` branch-meta whitespace-loss bug.
     #[test]
     fn prop_colored_command_views_preserve_every_byte(
@@ -4363,7 +4780,6 @@ proptest::proptest! {
             b"cat .gitignore",
             b"cat .gitleaksignore",
             b"cat .env.example",
-            b"cat data.csv",
             b"cat schema.sql",
             b"cat notes.md",
             b"cat main.rs",

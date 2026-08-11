@@ -32,13 +32,13 @@ mod streaming;
 mod tables;
 
 pub use code::{colorize_code_line, CodeLanguage};
-pub(crate) use command_views::PsColumnRole;
 pub use command_views::{
     colorize_curl_header_line, colorize_curl_progress_line, colorize_df_line, colorize_du_line,
     colorize_find_line, colorize_getfileinfo_line, colorize_history_count_line,
     colorize_history_line, colorize_kubectl_pods_line, colorize_ls_line, colorize_ps_line,
-    colorize_whereis_line, colorize_xattr_line,
+    colorize_whereis_line, colorize_whois_line, colorize_xattr_line,
 };
+pub(crate) use command_views::{DfColumn, PsColumnRole};
 pub(crate) use common::{
     colorize_size_path_line, colorize_words, contains_ascii, paint_bytes, paint_span, paint_whole,
     split_line, trim_ascii, trim_ascii_end, trim_ascii_start, word_spans,
@@ -60,7 +60,10 @@ pub use network::{
 };
 pub use streaming::{colorize_line, Http, Logs, StackTrace};
 pub(crate) use streaming::{is_error_log_line, is_exception_line, ltrim};
-pub use tables::{colorize_delimited_line, colorize_sql_line, colorize_sql_result_line};
+pub(crate) use tables::AUTO_DELIMITER;
+pub use tables::{
+    colorize_delimited_line, colorize_sql_line, colorize_sql_result_line, format_delimited_document,
+};
 pub(crate) use tables::{find_sql_block_comment_end, lower_ascii, split_unquoted};
 
 #[cfg(test)]
@@ -96,6 +99,36 @@ mod tests {
         assert!(colored(b"[error] background sync failed\n")
             .unwrap()
             .contains("\x1b[31merror\x1b[0m] background sync failed"));
+    }
+
+    #[test]
+    fn colors_openssh_authentication_records_by_event_semantics() {
+        let failed = colored(
+            b"2026-08-07T14:59:12.573694+00:00 server sshd[493736]: Failed password for invalid user centos from 172.182.10.105 port 61497 ssh2\n",
+        )
+        .unwrap();
+        assert!(failed.contains("\x1b[2m2026-08-07T14:59:12.573694+00:00\x1b[0m"));
+        assert!(failed.contains("\x1b[38;5;220m493736\x1b[0m"));
+        assert!(failed.contains("\x1b[31mFailed password\x1b[0m"));
+        assert!(failed.contains("\x1b[38;5;117mcentos\x1b[0m"));
+        assert!(failed.contains("\x1b[38;2;142;202;230m172.182.10.105\x1b[0m"));
+        assert!(failed.contains("port \x1b[38;5;220m61497\x1b[0m"));
+
+        let accepted = colored(
+            b"Aug  7 06:38:50 server sshd[208163]: Accepted publickey for root from 10.10.10.68 port 51501 ssh2\r\n",
+        )
+        .unwrap();
+        assert!(accepted.contains("\x1b[2mAug  7 06:38:50\x1b[0m"));
+        assert!(accepted.contains("\x1b[38;2;39;135;51mAccepted publickey\x1b[0m"));
+        assert!(accepted.ends_with("ssh2\r\n"));
+    }
+
+    #[test]
+    fn ssh_auth_formatter_rejects_unstructured_lookalikes() {
+        assert!(colored(b"Failed password for a test account\n").is_none());
+        assert!(colored(b"2026-08-07T14:59:12Z server app[42]: Failed password\n").is_none());
+        assert!(colored(b"server sshd[42]: Accepted password for root\n").is_none());
+        assert!(colored(b"2026-08-07T14:59:12Z server sshd[42]: session opened\n").is_none());
     }
 
     #[test]
@@ -171,6 +204,8 @@ mod tests {
         // a "matched" line reproduces the input exactly.
         let line = b"ERROR: boom\r\n";
         assert_eq!(colorize_line(line, &Theme::plain(), &all()).unwrap(), line);
+        let auth = b"2026-08-07T14:59:12Z server sshd[42]: Failed password for root from 10.0.0.1 port 22 ssh2\n";
+        assert_eq!(colorize_line(auth, &Theme::plain(), &all()).unwrap(), auth);
     }
 
     #[test]
