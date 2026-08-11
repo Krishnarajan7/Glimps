@@ -2721,6 +2721,103 @@ fn git_show_stat_keeps_commit_header_and_colors_stats() {
 }
 
 #[test]
+fn rg_matches_get_path_line_and_separator_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"rg -n TODO src")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"src/main.rs:12:    // TODO: fix startup\r\nCargo.toml:3:name = \"glimps\" # TODO\r\nsrc/pty.rs:400:8080: TODO port note\r\n",
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    // Parent dim, leaf cyan, separators dim, line number gold, match text untouched.
+    assert!(s.contains(
+        "\x1b[2msrc/\x1b[0m\x1b[36mmain.rs\x1b[0m\x1b[2m:\x1b[0m\x1b[38;5;220m12\x1b[0m\x1b[2m:\x1b[0m    // TODO: fix startup\r\n"
+    ));
+    // A path without a slash is painted entirely as the leaf.
+    assert!(s.contains(
+        "\x1b[36mCargo.toml\x1b[0m\x1b[2m:\x1b[0m\x1b[38;5;220m3\x1b[0m\x1b[2m:\x1b[0mname = \"glimps\" # TODO\r\n"
+    ));
+    // Without --column, digit-leading match text is content, never a column.
+    assert!(s.contains("\x1b[38;5;220m400\x1b[0m\x1b[2m:\x1b[0m8080: TODO port note\r\n"));
+}
+
+#[test]
+fn rg_column_matches_get_column_field_coloring() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"rg -n --column TODO src")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"src/main.rs:12:9:    // TODO: fix startup\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains(
+        "\x1b[38;5;220m12\x1b[0m\x1b[2m:\x1b[0m\x1b[38;5;153m9\x1b[0m\x1b[2m:\x1b[0m    // TODO: fix startup"
+    ));
+}
+
+#[test]
+fn grep_prose_warnings_and_counts_pass_through() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"grep -rn deploy notes")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"notes/plan.txt:deploy: staging: ready\nAug 11 12:30:45 deploy finished\n12:30:45\nrg: notes/archive: unsupported encoding\nBinary file notes/blob.bin matches\nnotes/plan.txt:3\n--\n",
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    // Match line without -n line numbers: second field is not numeric.
+    assert!(s.contains("notes/plan.txt:deploy: staging: ready"));
+    // Colon-heavy prose and bare timestamps: path field has spaces / is all digits.
+    assert!(s.contains("Aug 11 12:30:45 deploy finished"));
+    assert!(s.contains("12:30:45"));
+    // Tool warnings, binary notices, -c style counts, and context separators.
+    assert!(s.contains("rg: notes/archive: unsupported encoding"));
+    assert!(s.contains("Binary file notes/blob.bin matches"));
+    assert!(s.contains("notes/plan.txt:3\r\n") || s.contains("notes/plan.txt:3\n"));
+    assert!(!s.contains("\x1b[38;5;220m30\x1b[0m"));
+    assert!(!s.contains("\x1b[38;5;220m45\x1b[0m"));
+}
+
+#[test]
+fn grep_colorizer_declines_plain_theme_and_unshaped_lines() {
+    let plain = Theme::plain();
+    let colored = Theme::default_colored();
+    let matches = linefmt::GrepView::Matches;
+    // Plain theme: color-only formatter must decline so output is byte-identical.
+    assert_eq!(
+        linefmt::colorize_grep_line(b"src/main.rs:12:ok\n", &plain, matches),
+        None
+    );
+    // Zero-padded and empty numeric fields are accepted digits or rejected shape.
+    assert!(linefmt::colorize_grep_line(b"src/main.rs:12:\n", &colored, matches).is_some());
+    assert_eq!(
+        linefmt::colorize_grep_line(b"src/main.rs::ok\n", &colored, matches),
+        None
+    );
+    // --column view requires the column field to be numeric.
+    assert_eq!(
+        linefmt::colorize_grep_line(
+            b"src/main.rs:12:ok: fine\n",
+            &colored,
+            linefmt::GrepView::ColumnMatches
+        ),
+        None
+    );
+}
+
+#[test]
 fn cat_jsonl_gets_streaming_json_line_coloring() {
     let mut f = Formatter::new();
     if !f.is_enabled() {

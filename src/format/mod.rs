@@ -1070,6 +1070,7 @@ impl Formatter {
                 self.command_output_line_count <= 1,
             ),
             CommandView::Git(view) => linefmt::colorize_git_line(line, &self.theme, view),
+            CommandView::Grep(view) => linefmt::colorize_grep_line(line, &self.theme, view),
         }
     }
 
@@ -1450,6 +1451,7 @@ enum CommandView {
     Nl(NlView),
     SqlResult,
     Git(linefmt::GitView),
+    Grep(linefmt::GrepView),
     NetworkSetup,
 }
 
@@ -1578,6 +1580,7 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "man" => man_command_view(cmd),
         "apropos" | "whatis" => Some(CommandView::ManIndex),
         "git" => git_command_view(cmd),
+        "rg" | "grep" | "egrep" | "fgrep" => grep_command_view(cmd, &name),
         _ if cmdline::contains_command(cmd, b"ps") => Some(CommandView::Ps),
         _ if command_requests_help(cmd) => Some(CommandView::Man),
         _ => None,
@@ -1893,6 +1896,32 @@ fn git_command_view(command: &[u8]) -> Option<CommandView> {
         "branch" => Some(CommandView::Git(linefmt::GitView::Branch)),
         _ => None,
     }
+}
+
+/// Search commands (`rg`, `grep`, `egrep`, `fgrep`) emit `path:line:text`
+/// match lines, so the command name alone narrows the shape enough to try the
+/// grep colorizer; per-line shape checks still reject anything unexpected.
+/// ripgrep's `--column` / `--vimgrep` add a column field, which the view must
+/// know about so plain `-n` output with digit-leading match text is not
+/// misread as a column. `-h` is help for ripgrep but "hide filenames" for the
+/// grep family, so it only disables the view for `rg`.
+fn grep_command_view(command: &[u8], name: &str) -> Option<CommandView> {
+    let text = std::str::from_utf8(command).ok()?;
+    let mut column = false;
+    for word in text.split_whitespace() {
+        match word {
+            "--help" => return None,
+            "-h" if name == "rg" => return None,
+            "--column" | "--vimgrep" => column = true,
+            "--no-column" => column = false,
+            _ => {}
+        }
+    }
+    Some(CommandView::Grep(if column {
+        linefmt::GrepView::ColumnMatches
+    } else {
+        linefmt::GrepView::Matches
+    }))
 }
 
 fn kubectl_command_view(command: &[u8]) -> Option<CommandView> {

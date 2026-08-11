@@ -147,6 +147,7 @@ Try these commands:
   dig 360astra.io
   false
   find src -maxdepth 2 -type f
+  grep -rn 'GrepView' src/format | head -5
   git status --short
   git --no-pager log --oneline --decorate -5
   git branch -a
