@@ -2791,6 +2791,97 @@ fn grep_prose_warnings_and_counts_pass_through() {
 }
 
 #[test]
+fn plain_grep_without_line_numbers_is_left_alone() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    // The reviewer's repro: without -n the second field is match text that
+    // merely looks like a line number, and must stay uncolored.
+    out.extend_from_slice(&f.process(&cmd_marker(b"grep needle notes.txt")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"notes.txt:12:ordinary content\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("notes.txt:12:ordinary content"));
+    assert!(!s.contains("\x1b[38;5;220m12\x1b[0m"));
+    assert!(!s.contains("\x1b[36mnotes.txt\x1b[0m"));
+}
+
+#[test]
+fn grep_option_lookalikes_after_double_dash_do_not_activate() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    // `-n` here is the search pattern, not an option: everything after `--`
+    // is patterns/files.
+    out.extend_from_slice(&f.process(&cmd_marker(b"grep -- -n notes.txt")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"notes.txt:34:uses -n for dry runs\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("notes.txt:34:uses -n for dry runs"));
+    assert!(!s.contains("\x1b[38;5;220m34\x1b[0m"));
+}
+
+#[test]
+fn grep_classifier_requires_requested_line_numbers() {
+    use linefmt::GrepView;
+    let matches = Some(CommandView::Grep(GrepView::Matches));
+    let columns = Some(CommandView::Grep(GrepView::ColumnMatches));
+
+    // Explicit requests, including combined short clusters.
+    assert_eq!(grep_command_view(b"grep -n needle f.txt", "grep"), matches);
+    assert_eq!(grep_command_view(b"grep -rn deploy notes", "grep"), matches);
+    assert_eq!(grep_command_view(b"grep -nH deploy notes", "grep"), matches);
+    assert_eq!(
+        grep_command_view(b"grep --line-number x f", "grep"),
+        matches
+    );
+    assert_eq!(grep_command_view(b"rg -n TODO src", "rg"), matches);
+    assert_eq!(grep_command_view(b"rg --vimgrep TODO", "rg"), columns);
+    assert_eq!(grep_command_view(b"rg --column TODO", "rg"), columns);
+    assert_eq!(
+        grep_command_view(b"rg --column --no-column -n TODO", "rg"),
+        matches
+    );
+
+    // No request, no view.
+    assert_eq!(grep_command_view(b"grep needle notes.txt", "grep"), None);
+    assert_eq!(grep_command_view(b"grep -r needle notes", "grep"), None);
+
+    // Later disabling flags win (ripgrep).
+    assert_eq!(grep_command_view(b"rg -n -N TODO src", "rg"), None);
+    assert_eq!(
+        grep_command_view(b"rg -n --no-line-number TODO", "rg"),
+        None
+    );
+
+    // Option-lookalikes that are not options: after `--`, inside a quoted
+    // pattern, or as the value of `-e`.
+    assert_eq!(grep_command_view(b"grep -- -n notes.txt", "grep"), None);
+    assert_eq!(
+        grep_command_view(b"grep 'uses -n inside' notes.txt", "grep"),
+        None
+    );
+    assert_eq!(grep_command_view(b"grep -e -n notes.txt", "grep"), None);
+
+    // Attached short-option arguments never read as flags (`-C3n` is C=3n).
+    assert_eq!(grep_command_view(b"grep -C3n x f.txt", "grep"), None);
+    // ripgrep's -r takes a replacement value, so `-rn` is not `-r -n` there.
+    assert_eq!(grep_command_view(b"rg -rn foo src", "rg"), None);
+
+    // Pipeline separators end this stage's options.
+    assert_eq!(
+        grep_command_view(b"grep foo f.txt | rg -n bar", "grep"),
+        None
+    );
+}
+
+#[test]
 fn grep_colorizer_declines_plain_theme_and_unshaped_lines() {
     let plain = Theme::plain();
     let colored = Theme::default_colored();
