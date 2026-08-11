@@ -3135,6 +3135,120 @@ fn kubectl_get_pods_colors_failing_status() {
 }
 
 #[test]
+fn cargo_build_progress_and_finished_are_colored() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cargo build")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"   Compiling glimps v0.1.0 (/work/glimps)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.34s\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    // Progress verb is low-priority scroll; Finished is the success signal.
+    assert!(s.contains("\x1b[38;5;153mCompiling\x1b[0m glimps v0.1.0"));
+    assert!(s.contains("\x1b[38;2;39;135;51mFinished\x1b[0m `dev` profile"));
+}
+
+#[test]
+fn cargo_check_diagnostics_are_colored() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cargo check")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"warning: unused variable: `x`\nerror[E0308]: mismatched types\nerror: aborting due to 1 previous error\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[38;5;220mwarning: unused variable: `x`\x1b[0m"));
+    assert!(s.contains("\x1b[31merror[E0308]: mismatched types\x1b[0m"));
+    assert!(s.contains("\x1b[31merror: aborting due to 1 previous error\x1b[0m"));
+}
+
+#[test]
+fn cargo_test_summary_colors_pass_and_fail() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cargo test")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"test tests::alpha ... ok\ntest tests::beta ... FAILED\ntest tests::gamma ... ignored\nfailures:\ntest result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    // Per-test verdicts paint only the verdict token, keeping names readable.
+    assert!(s.contains("test tests::alpha ... \x1b[38;2;39;135;51mok\x1b[0m"));
+    assert!(s.contains("test tests::beta ... \x1b[31mFAILED\x1b[0m"));
+    assert!(s.contains("test tests::gamma ... \x1b[2mignored\x1b[0m"));
+    assert!(s.contains("\x1b[31mfailures:\x1b[0m"));
+    assert!(s.contains("\x1b[31mtest result: FAILED. 1 passed; 1 failed;"));
+}
+
+#[test]
+fn cargo_ok_test_summary_is_green() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cargo t")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b"test result: ok. 204 passed; 0 failed; 0 ignored; 0 measured\n"),
+    );
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[38;2;39;135;51mtest result: ok. 204 passed;"));
+}
+
+#[test]
+fn cargo_shapes_outside_cargo_commands_pass_through() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"echo warning: not from cargo")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"warning: not from cargo\ntest result: ok. fake\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    // Under a non-cargo command the generic log colorizer may still claim the
+    // leading severity *token* (existing behavior, unchanged), but the
+    // cargo view's whole-line diagnostic paint must not fire, and the fake
+    // test summary stays plain.
+    assert!(s.contains("not from cargo\n"));
+    assert!(!s.contains("\x1b[38;5;220mwarning: not from cargo\x1b[0m"));
+    assert!(!s.contains("\x1b[38;2;39;135;51mtest result:"));
+}
+
+#[test]
+fn cargo_run_output_is_not_claimed() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cargo run --quiet")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"test result: ok. printed by the program itself\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    // `cargo run` output belongs to the user's program; the view stays off.
+    assert!(!s.contains("\x1b[38;2;39;135;51mtest result:"));
+}
+
+#[test]
 fn kubectl_non_pod_output_passes_through() {
     let mut f = Formatter::new();
     if !f.is_enabled() {

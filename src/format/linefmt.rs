@@ -33,10 +33,11 @@ mod tables;
 
 pub use code::{colorize_code_line, CodeLanguage};
 pub use command_views::{
-    colorize_curl_header_line, colorize_curl_progress_line, colorize_df_line, colorize_du_line,
-    colorize_find_line, colorize_getfileinfo_line, colorize_grep_line, colorize_history_count_line,
-    colorize_history_line, colorize_kubectl_pods_line, colorize_ls_line, colorize_ps_line,
-    colorize_whereis_line, colorize_whois_line, colorize_xattr_line, GrepView,
+    colorize_cargo_line, colorize_curl_header_line, colorize_curl_progress_line, colorize_df_line,
+    colorize_du_line, colorize_find_line, colorize_getfileinfo_line, colorize_grep_line,
+    colorize_history_count_line, colorize_history_line, colorize_kubectl_pods_line,
+    colorize_ls_line, colorize_ps_line, colorize_whereis_line, colorize_whois_line,
+    colorize_xattr_line, GrepView,
 };
 pub(crate) use command_views::{DfColumn, PsColumnRole};
 pub(crate) use common::{
