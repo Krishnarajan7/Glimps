@@ -43,8 +43,9 @@ fn resolve_document_delimiter(bytes: &[u8], requested: u8) -> Option<u8> {
         return matches!(requested, b',' | b';' | b'\t' | b'|').then_some(requested);
     }
 
-    [b',', b';', b'\t']
-        .into_iter()
+    b",;\t"
+        .iter()
+        .copied()
         .filter_map(|candidate| {
             let records = parse_delimited_document(bytes, candidate)?;
             let (header, rows) = records.split_first()?;

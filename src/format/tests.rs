@@ -1416,6 +1416,27 @@ fn exit_127_footer_explains_command_not_found() {
 }
 
 #[test]
+fn zsh_unmatched_glob_is_a_shell_diagnostic_with_the_pattern_preserved() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(
+        b"cp ~/Desktop/Screen*2026-08-12*.mov ./streak-ref.mov",
+    )));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(
+        &f.process(b"zsh: no matches found: /Users/krishv/Desktop/Screen*2026-08-12*.mov\n"),
+    );
+    out.extend_from_slice(&f.process(D1));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[31mno matches found\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230m/Users/krishv/Desktop/Screen*2026-08-12*.mov\x1b[0m"));
+    assert!(s.contains("command failed: cp ~/Desktop/Screen*2026-08-12*.mov ./streak-ref.mov"));
+}
+
+#[test]
 fn ctrl_c_footer_is_a_neutral_notice_never_red() {
     // The alarm-fatigue rule: a deliberate Ctrl-C must not be styled like a
     // failure, or the red footer stops meaning anything.

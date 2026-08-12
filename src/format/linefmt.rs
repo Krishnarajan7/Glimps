@@ -196,6 +196,15 @@ mod tests {
         assert!(
             colorize_cli_diagnostic_line(b"http://example.com: no such page\n", &theme).is_none()
         );
+        assert_eq!(
+            colorize_cli_diagnostic_line(
+                b"zsh: no matches found: /Users/krishv/Desktop/Screen*2026-08-12*.mov\n",
+                &theme
+            )
+            .unwrap(),
+            b"\x1b[2mzsh\x1b[0m\x1b[2m: \x1b[0m\x1b[31mno matches found\x1b[0m\x1b[2m: \x1b[0m\x1b[38;2;142;202;230m/Users/krishv/Desktop/Screen*2026-08-12*.mov\x1b[0m\n"
+        );
+        assert!(colorize_cli_diagnostic_line(b"zsh: no matches found:\n", &theme).is_none());
     }
 
     #[test]

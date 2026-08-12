@@ -386,6 +386,16 @@ mod tests {
     fn cli_tool_diagnostic_pins() {
         let pin = pin_of(&[b"find: illegal option -- m\n", b"usage: find path ...\n"]).unwrap();
         assert_eq!(text(&pin), "find: illegal option -- m");
+
+        let pin = pin_of(&[
+            b"zsh: no matches found: /Users/me/Desktop/Screen*.mov\n",
+            b"later output\n",
+        ])
+        .unwrap();
+        assert_eq!(
+            text(&pin),
+            "zsh: no matches found: /Users/me/Desktop/Screen*.mov"
+        );
     }
 
     #[test]
