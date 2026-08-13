@@ -1052,6 +1052,7 @@ impl Formatter {
             CommandView::Ping => linefmt::colorize_ping_line(line, &self.theme),
             CommandView::DiskutilInfo => linefmt::colorize_diskutil_info_line(line, &self.theme),
             CommandView::KubectlPods => linefmt::colorize_kubectl_pods_line(line, &self.theme),
+            CommandView::Cargo => linefmt::colorize_cargo_line(line, &self.theme),
             CommandView::IfConfig => linefmt::colorize_ifconfig_line(line, &self.theme),
             CommandView::ScutilDns => linefmt::colorize_scutil_dns_line(line, &self.theme),
             CommandView::Route => linefmt::colorize_route_line(line, &self.theme),
@@ -1438,6 +1439,7 @@ enum CommandView {
     Ping,
     DiskutilInfo,
     KubectlPods,
+    Cargo,
     IfConfig,
     ScutilDns,
     Route,
@@ -1566,6 +1568,7 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "curl" => curl_command_view(cmd),
         "cd" => cd_command_view(cmd),
         "kubectl" => kubectl_command_view(cmd),
+        "cargo" => cargo_command_view(cmd),
         "scutil" => scutil_command_view(cmd),
         "route" => route_command_view(cmd),
         "netstat" => netstat_command_view(cmd),
@@ -2037,6 +2040,24 @@ fn kubectl_command_view(command: &[u8]) -> Option<CommandView> {
 
     match (words.next()?, words.next()?) {
         ("get", "pods") => Some(CommandView::KubectlPods),
+        _ => None,
+    }
+}
+
+/// `cargo build` / `cargo test` / `cargo check` (including cargo's built-in
+/// single-letter aliases), optionally after a `+toolchain` selector. Other
+/// subcommands — notably `cargo run`, whose output belongs to the user's
+/// program — keep the generic path.
+fn cargo_command_view(command: &[u8]) -> Option<CommandView> {
+    let text = std::str::from_utf8(command).ok()?;
+    let mut words = text.split_whitespace();
+
+    if words.next()? != "cargo" {
+        return None;
+    }
+    let subcommand = words.find(|word| !word.starts_with('+'))?;
+    match subcommand {
+        "build" | "b" | "test" | "t" | "check" | "c" => Some(CommandView::Cargo),
         _ => None,
     }
 }

@@ -2,7 +2,7 @@
 
 use super::super::{cmdline, theme::Theme};
 use super::{
-    colorize_size_path_line, colorize_words, paint_bytes, paint_whole, split_line,
+    colorize_size_path_line, colorize_words, paint_bytes, paint_span, paint_whole, split_line,
     trim_ascii_start, word_spans,
 };
 
@@ -808,6 +808,117 @@ fn ready_color(ready: &[u8], theme: &Theme) -> Option<&'static str> {
 
 fn parse_u16(bytes: &[u8]) -> Option<u16> {
     std::str::from_utf8(bytes).ok()?.parse().ok()
+}
+
+/// Color one line of `cargo build` / `cargo test` / `cargo check` output.
+///
+/// Shape-strict: only lines Cargo and rustc themselves print are colored —
+/// compiler diagnostics, the right-aligned progress verbs, per-test verdicts,
+/// and the test summary. Anything else (test stdout, build-script output)
+/// passes through untouched. Enabled only under a cargo command, so ordinary
+/// prose containing `warning:` elsewhere stays uncolored.
+pub fn colorize_cargo_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Compiler diagnostics: `error: …`, `error[E0308]: …`, `warning: …`.
+    if is_cargo_diagnostic(trimmed, b"error") {
+        return Some(paint_whole(content, ending, theme.error, theme.reset));
+    }
+    if is_cargo_diagnostic(trimmed, b"warning") {
+        return Some(paint_whole(content, ending, theme.warn, theme.reset));
+    }
+
+    // Test summary: `test result: ok. 42 passed; …` / `test result: FAILED. …`.
+    if let Some(rest) = trimmed.strip_prefix(b"test result:") {
+        let rest = trim_ascii_start(rest);
+        if rest.starts_with(b"ok.") {
+            return Some(paint_whole(content, ending, theme.info, theme.reset));
+        }
+        if rest.starts_with(b"FAILED.") {
+            return Some(paint_whole(content, ending, theme.error, theme.reset));
+        }
+        return None;
+    }
+
+    // The header of the failed-test list that precedes the summary.
+    if trimmed == b"failures:" {
+        return Some(paint_whole(content, ending, theme.error, theme.reset));
+    }
+
+    // Per-test verdicts: `test module::name ... ok` — only the verdict token is
+    // painted, so long test names stay readable.
+    if trimmed.starts_with(b"test ") {
+        if let Some(idx) = find_last(content, b" ... ") {
+            let verdict_start = idx + b" ... ".len();
+            let verdict = &content[verdict_start..];
+            let color = match verdict {
+                b"ok" => theme.info,
+                b"FAILED" => theme.error,
+                b"ignored" => theme.debug,
+                _ => return None,
+            };
+            return Some(paint_span(
+                content,
+                ending,
+                verdict_start,
+                content.len(),
+                color,
+                theme.reset,
+            ));
+        }
+        return None;
+    }
+
+    // Right-aligned progress verbs. `Finished` is the success signal (green);
+    // the in-flight verbs are low-priority scroll.
+    let spans = word_spans(content);
+    if spans.len() >= 2 {
+        let (start, end) = spans[0];
+        let color = match &content[start..end] {
+            b"Finished" => Some(theme.info),
+            b"Compiling" | b"Checking" | b"Documenting" | b"Downloading" | b"Downloaded"
+            | b"Updating" | b"Running" | b"Doc-tests" => Some(theme.muted),
+            _ => None,
+        };
+        if let Some(color) = color {
+            return Some(paint_span(content, ending, start, end, color, theme.reset));
+        }
+    }
+
+    None
+}
+
+/// `error` / `warning` at the start of a line, followed by `:` or a
+/// bracketed code (`error[E0308]:`). Plain prose that merely contains the
+/// word never matches.
+fn is_cargo_diagnostic(trimmed: &[u8], severity: &[u8]) -> bool {
+    let Some(rest) = trimmed.strip_prefix(severity) else {
+        return false;
+    };
+    match rest.first() {
+        Some(b':') => true,
+        Some(b'[') => rest
+            .iter()
+            .position(|&b| b == b']')
+            .is_some_and(|close| rest.get(close + 1) == Some(&b':')),
+        _ => false,
+    }
+}
+
+fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len())
+        .rev()
+        .find(|&i| &haystack[i..i + needle.len()] == needle)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
