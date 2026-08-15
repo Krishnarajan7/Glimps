@@ -49,8 +49,8 @@ pub(crate) use diagnostics::is_cli_error_line;
 pub use diskutil::colorize_diskutil_info_line;
 pub use documents::{
     colorize_config_line, colorize_dotenv_line, colorize_gitignore_line,
-    colorize_gitleaks_ignore_line, colorize_man_index_line, colorize_markdown_line,
-    format_man_line, markdown_fence_language, MarkdownEmbeddedLanguage,
+    colorize_gitleaks_ignore_line, colorize_htaccess_line, colorize_man_index_line,
+    colorize_markdown_line, format_man_line, markdown_fence_language, MarkdownEmbeddedLanguage,
 };
 pub use git::{colorize_git_line, GitView};
 pub use json_lines::{colorize_json_fragment_line, colorize_json_line, is_json_line};

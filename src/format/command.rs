@@ -242,18 +242,93 @@ fn is_builtin_sensitive(command: &[u8]) -> bool {
 }
 
 fn contains_sensitive_file_reader_loose(command: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(command) else {
-        return false;
+    // The strict parser declines compound commands. Keep the conservative
+    // secret-file fallback, but associate reader arguments with their own
+    // shell stage. A global token scan made an unrelated grep pattern such as
+    // `grep "Failed password" log | tail -40` look sensitive merely because
+    // `tail` occurred later in the pipeline, disabling all formatting.
+    let Some(stages) = shell_stages(command) else {
+        return true;
     };
-    let tokens = text.split_whitespace().collect::<Vec<_>>();
-    let has_reader = tokens.iter().any(|token| {
-        let clean = token.trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')'));
-        matches!(
-            clean.rsplit('/').next(),
-            Some("cat" | "head" | "tail" | "sed" | "more")
-        )
-    });
-    has_reader && tokens.iter().any(|token| secret_file_argument(token))
+    stages.iter().any(|words| {
+        words.iter().enumerate().any(|(index, word)| {
+            let Ok(name) = std::str::from_utf8(word) else {
+                return false;
+            };
+            matches!(
+                name.rsplit('/').next(),
+                Some("cat" | "head" | "tail" | "sed" | "more")
+            ) && words[index + 1..]
+                .iter()
+                .filter_map(|argument| std::str::from_utf8(argument).ok())
+                .any(secret_file_argument)
+        })
+    })
+}
+
+/// Split valid-enough compound shell text into words grouped by execution
+/// stage. Quotes and escapes are honored; pipes, lists, and grouping boundaries
+/// end a stage, while redirection operands stay with the command they affect.
+fn shell_stages(command: &[u8]) -> Option<Vec<Vec<Vec<u8>>>> {
+    let mut stages = Vec::new();
+    let mut words = Vec::new();
+    let mut word = Vec::new();
+    let mut quote = None;
+    let mut index = 0;
+
+    while index < command.len() {
+        let byte = command[index];
+        if let Some(delimiter) = quote {
+            if byte == delimiter {
+                quote = None;
+            } else if delimiter == b'"' && byte == b'\\' && index + 1 < command.len() {
+                index += 1;
+                word.push(command[index]);
+            } else {
+                word.push(byte);
+            }
+        } else if byte.is_ascii_whitespace() {
+            push_shell_word(&mut words, &mut word);
+        } else if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+        } else if byte == b'\\' && index + 1 < command.len() {
+            index += 1;
+            word.push(command[index]);
+        } else if matches!(byte, b'|' | b'&' | b';' | b'(' | b')') {
+            push_shell_word(&mut words, &mut word);
+            push_shell_stage(&mut stages, &mut words);
+            if command.get(index + 1) == Some(&byte) {
+                index += 1;
+            }
+        } else if matches!(byte, b'<' | b'>') {
+            push_shell_word(&mut words, &mut word);
+            if command.get(index + 1) == Some(&byte) {
+                index += 1;
+            }
+        } else {
+            word.push(byte);
+        }
+        index += 1;
+    }
+
+    if quote.is_some() {
+        return None;
+    }
+    push_shell_word(&mut words, &mut word);
+    push_shell_stage(&mut stages, &mut words);
+    Some(stages)
+}
+
+fn push_shell_word(words: &mut Vec<Vec<u8>>, word: &mut Vec<u8>) {
+    if !word.is_empty() {
+        words.push(std::mem::take(word));
+    }
+}
+
+fn push_shell_stage(stages: &mut Vec<Vec<Vec<u8>>>, words: &mut Vec<Vec<u8>>) {
+    if !words.is_empty() {
+        stages.push(std::mem::take(words));
+    }
 }
 
 fn is_custom_sensitive(command: &[u8], custom_rules: &[String]) -> bool {

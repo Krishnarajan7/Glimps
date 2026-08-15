@@ -2024,6 +2024,56 @@ fn cat_config_gets_key_value_coloring() {
 }
 
 #[test]
+fn cat_htaccess_gets_apache_semantics_without_recoloring_regexes() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "# Force HTTPS\n",
+        "RewriteEngine On\n",
+        "RewriteCond %{HTTPS} off\n",
+        "RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n",
+        "<FilesMatch \"(?i)\\.(env|ini|log)$\">\n",
+        "  Require all denied\n",
+        "</FilesMatch>\n",
+        "AddOutputFilterByType DEFLATE text/html application/json\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat .htaccess")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[2m# Force HTTPS\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;224;82;125mRewriteEngine\x1b[0m \x1b[35mOn\x1b[0m"));
+    assert!(s.contains("\x1b[36m%{HTTPS}\x1b[0m \x1b[35moff\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117mhttps://%{HTTP_HOST}%{REQUEST_URI}\x1b[0m"));
+    assert!(s.contains("\x1b[2m[\x1b[0m\x1b[38;5;220mL\x1b[0m\x1b[2m,\x1b[0m\x1b[38;5;220mR\x1b[0m\x1b[2m=\x1b[0m\x1b[38;5;220m301\x1b[0m\x1b[2m]\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;224;82;125mFilesMatch\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117m\"(?i)\\.(env|ini|log)$\"\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn apache_shaped_text_without_htaccess_filename_stays_unclaimed() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"cat notes.txt")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"RewriteEngine On\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(!s.contains("\x1b[38;2;224;82;125mRewriteEngine\x1b[0m"));
+}
+
+#[test]
 fn cat_dotenv_gets_semantic_coloring_without_secret_pinning() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -3212,6 +3262,32 @@ fn cargo_ok_test_summary_is_green() {
 }
 
 #[test]
+fn cargo_view_survives_wrappers_paths_toolchains_and_global_options() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let commands: &[&[u8]] = &[
+        b"env RUSTFLAGS='-D warnings' cargo test",
+        b"command /opt/rust/bin/cargo check",
+        b"cargo --color always build",
+        b"cargo +nightly -Z unstable-options check",
+    ];
+    let mut out = Vec::new();
+    for command in commands {
+        out.extend_from_slice(&f.process(&cmd_marker(command)));
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(b"    Finished `test` profile in 0.01s\n"));
+        out.extend_from_slice(&f.process(D));
+    }
+    let s = String::from_utf8_lossy(&out);
+    assert_eq!(
+        s.matches("\x1b[38;2;39;135;51mFinished\x1b[0m").count(),
+        commands.len()
+    );
+}
+
+#[test]
 fn cargo_shapes_outside_cargo_commands_pass_through() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -3230,6 +3306,20 @@ fn cargo_shapes_outside_cargo_commands_pass_through() {
     assert!(s.contains("not from cargo\n"));
     assert!(!s.contains("\x1b[38;5;220mwarning: not from cargo\x1b[0m"));
     assert!(!s.contains("\x1b[38;2;39;135;51mtest result:"));
+}
+
+#[test]
+fn cargo_name_as_an_argument_does_not_activate_cargo_view() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"echo cargo test")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"    Finished `test` profile in 0.01s\n"));
+    out.extend_from_slice(&f.process(D));
+    assert!(!String::from_utf8_lossy(&out).contains("\x1b[38;2;39;135;51mFinished\x1b[0m"));
 }
 
 #[test]
@@ -3876,11 +3966,48 @@ fn sensitive_command_registry_does_not_catch_neighbor_commands() {
         b"doppler run -- cargo test",
         b"cat .env.example",
         b"cat README.md",
+        br#"grep "Failed password" $L | tail -40"#,
     ];
     for command in commands {
         assert!(
             !is_sensitive_command(command, &[]),
             "unexpected sensitive command: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn ssh_auth_logs_survive_a_grep_tail_pipeline_with_a_password_pattern() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let line = b"2026-08-07T14:59:12.573694+00:00 server sshd[493736]: Failed password for invalid user centos from 172.182.10.105 port 61497 ssh2\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(br#"grep "Failed password" $L | tail -40"#)));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(line));
+    out.extend_from_slice(&f.process(D0));
+    let rendered = String::from_utf8_lossy(&out);
+
+    assert!(rendered.contains("\x1b[31mFailed password\x1b[0m"));
+    assert!(rendered.contains("\x1b[38;5;220m493736\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(line.len())
+        .any(|window| window == line));
+}
+
+#[test]
+fn compound_sensitive_readers_remain_stage_scoped_and_protected() {
+    for command in [
+        &b"cat .env | tail -40"[..],
+        b"printf ignored; head -20 ~/.aws/credentials | sed -n 1p",
+        b"echo ignored && tail < id_ed25519",
+    ] {
+        assert!(
+            is_sensitive_command(command, &[]),
+            "sensitive reader escaped pipeline policy: {}",
             String::from_utf8_lossy(command)
         );
     }
@@ -5102,6 +5229,7 @@ proptest::proptest! {
             &b"git status --short"[..],
             b"cat .gitignore",
             b"cat .gitleaksignore",
+            b"cat .htaccess",
             b"cat .env.example",
             b"cat schema.sql",
             b"cat notes.md",

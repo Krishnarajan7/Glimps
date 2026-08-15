@@ -569,6 +569,76 @@ fn gitignore_file_is_colored_end_to_end() {
 }
 
 #[test]
+fn htaccess_file_is_colored_end_to_end() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let htaccess_path = zdot.path().join(".htaccess");
+    std::fs::write(
+        &htaccess_path,
+        b"# Force HTTPS\nRewriteEngine On\nRewriteCond %{HTTPS} off\nRewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n",
+    )
+    .expect("write htaccess fixture");
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+    s.write(format!("cat -- {}\n", htaccess_path.display()).as_bytes());
+    assert!(
+        s.wait_for(b"\x1b[38;2;224;82;125mRewriteEngine\x1b[0m", FORMAT_BUDGET),
+        "Apache directive was not colored through the real supervisor: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        s.wait_for(b"\x1b[36m%{HTTPS}\x1b[0m", FORMAT_BUDGET),
+        "Apache variable was not colored through the real supervisor"
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
+fn custom_prompt_grep_tail_auth_logs_are_colored_end_to_end() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let log_path = zdot.path().join("auth.log");
+    std::fs::write(
+        &log_path,
+        b"2026-08-07T14:59:12.573694+00:00 server sshd[493736]: Failed password for invalid user centos from 172.182.10.105 port 61497 ssh2\n",
+    )
+    .expect("write authentication log fixture");
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+
+    s.write(b"PS1='$ '\n");
+    assert!(
+        s.wait_for(b"$ ", FORMAT_BUDGET),
+        "custom prompt did not appear"
+    );
+    s.write(
+        format!(
+            "L={}; grep \"Failed password\" $L | tail -40\n",
+            log_path.display()
+        )
+        .as_bytes(),
+    );
+    assert!(
+        s.wait_for(b"\x1b[31mFailed password\x1b[0m", FORMAT_BUDGET),
+        "authentication event stayed unformatted through the real pipeline: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        s.wait_for(b"\x1b[38;5;220m493736\x1b[0m", FORMAT_BUDGET),
+        "sshd PID was not semantically colored through the real pipeline"
+    );
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+#[test]
 fn private_metadata_path_is_not_inherited_by_commands() {
     let Some(zsh) = zsh_path() else {
         eprintln!("skipping: zsh not available");

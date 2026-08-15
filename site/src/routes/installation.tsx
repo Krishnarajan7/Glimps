@@ -193,7 +193,7 @@ function InstallPage() {
         <H2 id="verify">Verify it works</H2>
         <P>Confirm the binary is on your PATH:</P>
         <Shell
-          lines={[{ cmd: "glimps --version" }, { out: "glimps 0.0.1" }]}
+          lines={[{ cmd: "glimps --version" }, { out: "glimps 0.1.0-rc.1" }]}
         />
         <P>
           Then open a new terminal, run any command, and confirm a <Code>▌</Code> command

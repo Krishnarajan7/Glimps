@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import {
   DocsLayout,
   H2,
@@ -178,19 +178,14 @@ function FeaturesPage() {
         <div className="space-y-3">
           <H3 id="command-aware">Command-aware output</H3>
           <P>
-            Beyond whole-document and streaming detection, <Glimps quiet /> knows the shape of many
-            everyday commands and files and formats them accordingly: Git (
-            <Code>status</Code>, <Code>branch</Code>, <Code>log</Code>, <Code>stat</Code>),
-            CSV/TSV, SQL, config files (YAML, TOML, INI, dotenv), JSON-lines (
-            <Code>.jsonl</Code>), <Code>.gitignore</Code> patterns, <Code>.gitleaksignore</Code>{" "}
-            fingerprints, source-code
-            files shown through reader commands (<Code>cat</Code>, <Code>head</Code>),
-            Kubernetes pod tables (<Code>kubectl get pods</Code>), directory and system tools (
-            <Code>ls</Code>, <Code>find</Code>, <Code>du</Code>, <Code>df</Code>,{" "}
-            <Code>ps</Code>, <Code>ping</Code>, <Code>dig</Code>), macOS networking, file metadata (
-            <Code>diskutil info</Code>, <Code>GetFileInfo</Code>, <Code>xattr -l</Code>), service status, <Code>man</Code>/help
-            output, manual-index searches (<Code>whatis</Code>, <Code>apropos</Code>,
-            <Code>man -k</Code>, <Code>man -f</Code>), and Markdown files.
+            Beyond whole-document detection, <Glimps quiet /> has semantic views for Git,
+            Cargo, filesystem and process tools, search results, HTTP and networking,
+            database tables, macOS metadata, project files, and source code. The precise
+            commands and deliberately restricted forms are listed in the{" "}
+            <Link to="/commands" className="underline underline-offset-4">
+              command coverage catalogue
+            </Link>
+            .
           </P>
           <P>
             Dotenv values receive visual coloring only when you deliberately read the file.

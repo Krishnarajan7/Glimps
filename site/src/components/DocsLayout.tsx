@@ -49,7 +49,10 @@ const NAV: { group: string; items: { to: string; label: ReactNode }[] }[] = [
   },
   {
     group: "Reference",
-    items: [{ to: "/features", label: "Features" }],
+    items: [
+      { to: "/features", label: "Features" },
+      { to: "/commands", label: "Command coverage" },
+    ],
   },
   {
     group: "Community",

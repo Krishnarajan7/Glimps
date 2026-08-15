@@ -239,6 +239,201 @@ pub fn colorize_config_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     None
 }
 
+/// Color Apache per-directory configuration without pretending it is HTML.
+///
+/// `.htaccess` combines directive records, XML-shaped section containers,
+/// regular expressions, environment variables, URLs, MIME types, and flag
+/// lists. Known token shapes receive restrained semantic colors; regexes and
+/// free-form arguments remain untouched. Selection is filename-gated, so
+/// ordinary Apache-looking output cannot be claimed accidentally.
+pub fn colorize_htaccess_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    let trimmed = trim_ascii_start(content);
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with(b"#") {
+        return Some(paint_whole(content, ending, theme.comment, theme.reset));
+    }
+
+    let offset = content.len() - trimmed.len();
+    let mut out = Vec::with_capacity(line.len() + 96);
+    out.extend_from_slice(&content[..offset]);
+
+    if trimmed.starts_with(b"<") {
+        colorize_apache_section(trimmed, ending, theme, &mut out)?;
+        return Some(out);
+    }
+
+    let directive_end = trimmed
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(trimmed.len());
+    let directive = &trimmed[..directive_end];
+    if directive.is_empty()
+        || !directive
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    {
+        return None;
+    }
+    paint_bytes(&mut out, theme.html_name, directive, theme.reset);
+    colorize_apache_arguments(&trimmed[directive_end..], theme, &mut out);
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+fn colorize_apache_section(
+    trimmed: &[u8],
+    ending: &[u8],
+    theme: &Theme,
+    out: &mut Vec<u8>,
+) -> Option<()> {
+    let close = trimmed.iter().rposition(|byte| *byte == b'>')?;
+    if close + 1 != trimmed.len() {
+        return None;
+    }
+    let name_start = if trimmed.get(1) == Some(&b'/') { 2 } else { 1 };
+    let name_end = trimmed[name_start..close]
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .map_or(close, |index| name_start + index);
+    let name = &trimmed[name_start..name_end];
+    if name.is_empty()
+        || !name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    {
+        return None;
+    }
+
+    paint_bytes(out, theme.html_delim, &trimmed[..name_start], theme.reset);
+    paint_bytes(out, theme.html_name, name, theme.reset);
+    colorize_apache_arguments(&trimmed[name_end..close], theme, out);
+    paint_bytes(out, theme.html_delim, b">", theme.reset);
+    out.extend_from_slice(ending);
+    Some(())
+}
+
+fn colorize_apache_arguments(arguments: &[u8], theme: &Theme, out: &mut Vec<u8>) {
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index].is_ascii_whitespace() {
+            let start = index;
+            while index < arguments.len() && arguments[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            out.extend_from_slice(&arguments[start..index]);
+            continue;
+        }
+
+        if matches!(arguments[index], b'\'' | b'"') {
+            let quote = arguments[index];
+            let start = index;
+            index += 1;
+            while index < arguments.len() {
+                if arguments[index] == b'\\' && index + 1 < arguments.len() {
+                    index += 2;
+                } else if arguments[index] == quote {
+                    index += 1;
+                    break;
+                } else {
+                    index += 1;
+                }
+            }
+            paint_bytes(out, theme.string, &arguments[start..index], theme.reset);
+            continue;
+        }
+
+        if arguments[index..].starts_with(b"%{") {
+            let start = index;
+            index += 2;
+            while index < arguments.len() && arguments[index] != b'}' {
+                index += 1;
+            }
+            if index < arguments.len() {
+                index += 1;
+            }
+            paint_bytes(out, theme.key, &arguments[start..index], theme.reset);
+            continue;
+        }
+
+        if arguments[index] == b'[' {
+            if let Some(relative_end) = arguments[index..].iter().position(|byte| *byte == b']') {
+                let end = index + relative_end + 1;
+                colorize_apache_flags(&arguments[index..end], theme, out);
+                index = end;
+                continue;
+            }
+        }
+
+        let start = index;
+        while index < arguments.len() && !arguments[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let token = &arguments[start..index];
+        if let Some(color) = apache_value_color(token, theme) {
+            paint_bytes(out, color, token, theme.reset);
+        } else {
+            out.extend_from_slice(token);
+        }
+    }
+}
+
+fn colorize_apache_flags(flags: &[u8], theme: &Theme, out: &mut Vec<u8>) {
+    paint_bytes(out, theme.html_delim, b"[", theme.reset);
+    let inner = &flags[1..flags.len() - 1];
+    for (index, part) in inner.split(|byte| *byte == b',').enumerate() {
+        if index > 0 {
+            paint_bytes(out, theme.html_delim, b",", theme.reset);
+        }
+        if let Some(equals) = part.iter().position(|byte| *byte == b'=') {
+            paint_bytes(out, theme.html_attr, &part[..equals], theme.reset);
+            paint_bytes(out, theme.html_delim, b"=", theme.reset);
+            let value = &part[equals + 1..];
+            let color = if value.iter().all(u8::is_ascii_digit) {
+                theme.number
+            } else {
+                theme.string
+            };
+            paint_bytes(out, color, value, theme.reset);
+        } else {
+            paint_bytes(out, theme.html_attr, part, theme.reset);
+        }
+    }
+    paint_bytes(out, theme.html_delim, b"]", theme.reset);
+}
+
+fn apache_value_color(token: &[u8], theme: &Theme) -> Option<&'static str> {
+    if token.is_empty() {
+        return None;
+    }
+    if token.iter().all(u8::is_ascii_digit) {
+        return Some(theme.number);
+    }
+    if matches!(
+        token,
+        b"On" | b"Off" | b"on" | b"off" | b"all" | b"denied" | b"granted" | b"Allow" | b"Deny"
+    ) || (token.len() > 1 && token.iter().all(|byte| byte.is_ascii_uppercase()))
+    {
+        return Some(theme.keyword);
+    }
+    if token.starts_with(b"http://")
+        || token.starts_with(b"https://")
+        || token.starts_with(b"mod_")
+        || (token.contains(&b'/')
+            && token.iter().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b'+' | b'-' | b'.')
+            }))
+    {
+        return Some(theme.string);
+    }
+    None
+}
+
 /// Color dotenv assignments without changing or summarizing their values.
 ///
 /// Real `.env` files commonly contain credentials, so this formatter is only a

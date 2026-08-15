@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as InstallationRouteImport } from './routes/installation'
 import { Route as FeedbackRouteImport } from './routes/feedback'
 import { Route as FeaturesRouteImport } from './routes/features'
+import { Route as CommandsRouteImport } from './routes/commands'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as IndexRouteImport } from './routes/index'
 
@@ -30,6 +31,11 @@ const FeaturesRoute = FeaturesRouteImport.update({
   path: '/features',
   getParentRoute: () => rootRouteImport,
 } as any)
+const CommandsRoute = CommandsRouteImport.update({
+  id: '/commands',
+  path: '/commands',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AboutRoute = AboutRouteImport.update({
   id: '/about',
   path: '/about',
@@ -44,6 +50,7 @@ const IndexRoute = IndexRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
+  '/commands': typeof CommandsRoute
   '/features': typeof FeaturesRoute
   '/feedback': typeof FeedbackRoute
   '/installation': typeof InstallationRoute
@@ -51,6 +58,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
+  '/commands': typeof CommandsRoute
   '/features': typeof FeaturesRoute
   '/feedback': typeof FeedbackRoute
   '/installation': typeof InstallationRoute
@@ -59,21 +67,31 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
+  '/commands': typeof CommandsRoute
   '/features': typeof FeaturesRoute
   '/feedback': typeof FeedbackRoute
   '/installation': typeof InstallationRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/about' | '/features' | '/feedback' | '/installation'
+  fullPaths:
+    '/' | '/about' | '/commands' | '/features' | '/feedback' | '/installation'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/about' | '/features' | '/feedback' | '/installation'
-  id: '__root__' | '/' | '/about' | '/features' | '/feedback' | '/installation'
+  to: '/' | '/about' | '/commands' | '/features' | '/feedback' | '/installation'
+  id:
+    | '__root__'
+    | '/'
+    | '/about'
+    | '/commands'
+    | '/features'
+    | '/feedback'
+    | '/installation'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AboutRoute: typeof AboutRoute
+  CommandsRoute: typeof CommandsRoute
   FeaturesRoute: typeof FeaturesRoute
   FeedbackRoute: typeof FeedbackRoute
   InstallationRoute: typeof InstallationRoute
@@ -102,6 +120,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof FeaturesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/commands': {
+      id: '/commands'
+      path: '/commands'
+      fullPath: '/commands'
+      preLoaderRoute: typeof CommandsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/about': {
       id: '/about'
       path: '/about'
@@ -122,6 +147,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AboutRoute: AboutRoute,
+  CommandsRoute: CommandsRoute,
   FeaturesRoute: FeaturesRoute,
   FeedbackRoute: FeedbackRoute,
   InstallationRoute: InstallationRoute,

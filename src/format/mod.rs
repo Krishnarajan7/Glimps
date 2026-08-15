@@ -1079,6 +1079,7 @@ impl Formatter {
         match view {
             FileView::Html => html::colorize_fragment_line(line, &self.theme),
             FileView::Markdown => self.format_markdown_line(line),
+            FileView::Htaccess => linefmt::colorize_htaccess_line(line, &self.theme),
             FileView::Config => linefmt::colorize_config_line(line, &self.theme),
             FileView::Dotenv => linefmt::colorize_dotenv_line(line, &self.theme),
             FileView::Gitignore => linefmt::colorize_gitignore_line(line, &self.theme),
@@ -1461,6 +1462,7 @@ enum CommandView {
 enum FileView {
     Html,
     Markdown,
+    Htaccess,
     Config,
     Dotenv,
     Gitignore,
@@ -1557,6 +1559,14 @@ fn registered_command_view(name: &str) -> Option<CommandView> {
 
 fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
     let cmd = command.as_deref()?;
+    // Cargo permits wrappers with quoted environment values. The generic
+    // first-word helper is intentionally lightweight and can split those
+    // values, so let the stricter shell-word parser recognize Cargo first.
+    // `cargo_command_view` validates every token before `cargo`, preventing an
+    // argument such as `echo cargo test` from selecting this view.
+    if let Some(view) = cargo_command_view(cmd) {
+        return Some(view);
+    }
     let name = cmdline::first_word(cmd)?;
     if let Some(view) = file_content_view(&name, cmd) {
         return Some(view);
@@ -1568,7 +1578,6 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "curl" => curl_command_view(cmd),
         "cd" => cd_command_view(cmd),
         "kubectl" => kubectl_command_view(cmd),
-        "cargo" => cargo_command_view(cmd),
         "scutil" => scutil_command_view(cmd),
         "route" => route_command_view(cmd),
         "netstat" => netstat_command_view(cmd),
@@ -2049,17 +2058,62 @@ fn kubectl_command_view(command: &[u8]) -> Option<CommandView> {
 /// subcommands — notably `cargo run`, whose output belongs to the user's
 /// program — keep the generic path.
 fn cargo_command_view(command: &[u8]) -> Option<CommandView> {
-    let text = std::str::from_utf8(command).ok()?;
-    let mut words = text.split_whitespace();
+    let words = shell_words(command)?;
+    // Find Cargo's actual token so wrappers (`env … cargo`, `command cargo`)
+    // and an absolute Cargo path use the same command-aware view as plain
+    // `cargo`. The prefix validation below establishes that it is an
+    // executable, not an ordinary argument.
+    let cargo_index = words
+        .iter()
+        .position(|word| word.rsplit(|byte| *byte == b'/').next() == Some(b"cargo".as_slice()))?;
+    // Only wrappers, their flags, and environment assignments may precede the
+    // executable. This is deliberately narrower than “Cargo appears somewhere
+    // in the command”, which would claim ordinary output from `echo cargo test`.
+    for word in &words[..cargo_index] {
+        let text = std::str::from_utf8(word).ok()?;
+        let base = text.rsplit('/').next().unwrap_or(text);
+        let wrapper = matches!(
+            base,
+            "sudo" | "env" | "command" | "nohup" | "time" | "doas" | "exec" | "builtin" | "stdbuf"
+        );
+        let assignment = text.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && !name.as_bytes()[0].is_ascii_digit()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        });
+        if !wrapper && !assignment && !text.starts_with('-') {
+            return None;
+        }
+    }
 
-    if words.next()? != "cargo" {
-        return None;
+    let mut index = cargo_index + 1;
+    while let Some(word) = words.get(index) {
+        let text = std::str::from_utf8(word).ok()?;
+        if text.starts_with('+') {
+            index += 1;
+            continue;
+        }
+
+        // Cargo accepts global options before the subcommand. Most are
+        // switches; these four consume the following token when their value is
+        // not attached with `=` (or directly after `-Z`/`-C`).
+        if matches!(text, "--color" | "--config" | "-Z" | "-C") {
+            index += 2;
+            continue;
+        }
+        if text.starts_with('-') {
+            index += 1;
+            continue;
+        }
+
+        return match text {
+            "build" | "b" | "test" | "t" | "check" | "c" => Some(CommandView::Cargo),
+            _ => None,
+        };
     }
-    let subcommand = words.find(|word| !word.starts_with('+'))?;
-    match subcommand {
-        "build" | "b" | "test" | "t" | "check" | "c" => Some(CommandView::Cargo),
-        _ => None,
-    }
+    None
 }
 
 fn git_args_request_stat(args: &[&str]) -> bool {
@@ -2276,6 +2330,9 @@ fn file_view_for_word(word: &str) -> Option<FileView> {
     }
     if clean == ".gitignore" {
         return Some(FileView::Gitignore);
+    }
+    if clean == ".htaccess" {
+        return Some(FileView::Htaccess);
     }
     if matches!(
         clean.as_str(),
