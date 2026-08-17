@@ -35,10 +35,7 @@ kind of output is coming.
 > Most tasks teach GLIMPS one more small output type and don't require touching
 > the PTY internals.
 
-<!-- DEMO: run scripts/render-demo.sh (see demo/README.md) to produce
-     demo/glimps.gif from demo/glimps.tape, then replace this comment with:
-     ![GLIMPS in action](demo/glimps.gif)
-     The static example below is the same idea. -->
+![GLIMPS in action](demo/glimps.gif)
 
 ## What it looks like
 
@@ -112,6 +109,37 @@ git --no-pager diff --name-status
 man printf
 git --no-pager diff -- README.md
 ```
+
+## When something breaks
+
+Formatting is the part you see first. This is the part that only GLIMPS can do.
+
+Because GLIMPS owns the PTY and reads OSC-133 markers, it knows where a command
+started, where its output ended, what it exited with, and how long it took. Tools
+that sit downstream of the PTY see bytes; they never see that boundary. So GLIMPS
+can add a footer under failed output that says what broke and where:
+
+![GLIMPS failure intelligence](demo/failure.gif)
+
+Four things are happening there:
+
+- **Exit codes are translated.** `127` becomes `command not found on PATH`. `137`
+  becomes `SIGKILL: force-killed, often out of memory`. See
+  [`src/format/exitcode.rs`](./src/format/exitcode.rs) for the full dictionary.
+- **Pipeline failures stop hiding.** `false | wc -l` exits `0`, because the shell
+  reports only the last stage. GLIMPS reads the whole pipeline status array and
+  warns that stage 1 failed.
+- **Non-zero is not always failure.** Ctrl-C exits `130`, and GLIMPS calls it
+  `interrupted`, in a notice color — not a red error.
+- **The error line gets pinned.** When the thing that actually broke has scrolled
+  out of reach, GLIMPS repeats it under the footer with `file:line` and how far up
+  it was, so you don't page back through a test run to find it.
+
+None of this is AI, telemetry, or guesswork: it decodes an exit code the shell
+already produced and quotes a line that is already on your screen. The footer is
+purely additive — it never rewrites command output, which is what keeps the
+byte-safety promise in [`docs/SAFETY_INVARIANTS.md`](./docs/SAFETY_INVARIANTS.md)
+intact. Turn any of it off in `.glimpsrc` under `[failures]`.
 
 ## Why
 
@@ -353,6 +381,7 @@ output zone — never your prompt or input. Full rationale in
 | [`docs/FORMATTER_DESIGN_GUIDE.md`](./docs/FORMATTER_DESIGN_GUIDE.md) | Rules for adding safe formatters |
 | [`docs/GOOD_FIRST_ISSUES.md`](./docs/GOOD_FIRST_ISSUES.md) | Copy-ready beginner issue specs |
 | [`docs/LAUNCH_HARDENING_CHECKLIST.md`](./docs/LAUNCH_HARDENING_CHECKLIST.md) | Public-beta hardening checklist |
+| [`docs/VISUAL_EVIDENCE_CHECKLIST.md`](./docs/VISUAL_EVIDENCE_CHECKLIST.md) | Honest demo, screenshot, and GIF capture rules |
 | [`docs/FRESH_MAC_DOGFOOD.md`](./docs/FRESH_MAC_DOGFOOD.md) | Fresh-machine dogfood procedure |
 | [`docs/PUBLIC_BETA_RELEASE_RUNBOOK.md`](./docs/PUBLIC_BETA_RELEASE_RUNBOOK.md) | Maintainer release and Homebrew verification runbook |
 | [`docs/SAFETY_INVARIANTS.md`](./docs/SAFETY_INVARIANTS.md) | Public safety invariants |

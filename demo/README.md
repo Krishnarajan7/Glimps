@@ -1,9 +1,25 @@
 # Demo
 
-The README demo is generated from [`glimps.tape`](./glimps.tape) with
-[VHS](https://github.com/charmbracelet/vhs). The point is to keep the demo
-reproducible. If the product changes, the tape changes with it, and reviewers can
-see what story we are telling.
+The README demos are generated with [VHS](https://github.com/charmbracelet/vhs).
+The point is to keep them reproducible. If the product changes, the tape changes
+with it, and reviewers can see what story we are telling.
+
+There are two, because GLIMPS makes two separate promises:
+
+| Tape | Output | Shows |
+|---|---|---|
+| [`glimps.tape`](./glimps.tape) | `glimps.gif` | Formatting: the command header, JSON, log severity, and ordinary output left alone |
+| [`failure.tape`](./failure.tape) | `failure.gif` | Failure intelligence: exit-code translation, pipeline-stage warnings, Ctrl-C as a notice, and error pinning |
+
+Both run in a seeded throwaway project with a plain `%1~ %# ` prompt, so no local
+files, usernames, or hostnames reach the frames. GLIMPS never touches `PROMPT`
+(see the doc comment in [`src/init.rs`](../src/init.rs)), so that is cosmetic
+only — and it makes clear that every color in the frames came from GLIMPS.
+
+Before you publish a capture anywhere — README, website, issue, or launch post —
+read [`docs/VISUAL_EVIDENCE_CHECKLIST.md`](../docs/VISUAL_EVIDENCE_CHECKLIST.md).
+It covers which commands to show, how to take an honest before/after pair, where
+generated media belongs, and which install claims are not true yet.
 
 ## Render it
 
@@ -12,31 +28,52 @@ see what story we are telling.
 brew install vhs            # macOS
 # or: go install github.com/charmbracelet/vhs@latest
 
-# 2. Render with the repo-local binary (writes demo/glimps.gif)
+# 2. Render with the repo-local binary (writes both GIFs)
 scripts/render-demo.sh
+
+# ...or just one
+scripts/render-demo.sh demo/failure.tape
 ```
 
 The render script runs `cargo build --bin glimps`, puts `target/debug` at the
-front of `PATH` for that process only, and then invokes VHS. The tape writes the
+front of `PATH` for that process only, and then invokes VHS. Each tape writes the
 GLIMPS integration into a throwaway zsh config (`glimps init zsh > $TMP/.zshrc`)
 and starts a wrapped shell, so it does **not** install GLIMPS globally, read or
 modify your `~/.zshrc`, or change your login shell.
 
+`failure.tape` additionally needs `python3` (stdlib only) for the real failing
+`unittest` run, and it builds its fixture under `/tmp/glimps-demo` rather than a
+`mktemp -d` path — Python prints absolute paths in tracebacks, and a temp path
+would put a random hash into the frames.
+
 ## Wire it into the README
 
-Once `demo/glimps.gif` exists and the visual has been reviewed on a real
-terminal-sized viewport, replace the `<!-- DEMO: ... -->` placeholder near the
-top of the root [`README.md`](../README.md) with:
+Both GIFs are already referenced from the root [`README.md`](../README.md):
 
 ```markdown
-![GLIMPS in action](demo/glimps.gif)
+![GLIMPS in action](demo/glimps.gif)               <!-- near the top -->
+![GLIMPS failure intelligence](demo/failure.gif)   <!-- "When something breaks" -->
 ```
+
+Re-rendering overwrites those files in place, so no README change is needed to
+refresh a demo — but do review the new render before committing it.
 
 ## Tweaking
 
-Edit `glimps.tape` to change the commands shown, timing (`Sleep`), size
+Edit a tape to change the commands shown, timing (`Sleep`), size
 (`Set Width/Height/FontSize`), or palette (`Set Theme`). See the
 [VHS command reference](https://github.com/charmbracelet/vhs#vhs-command-reference).
+
+Run `vhs validate <tape>` after any edit — it catches parse errors in seconds,
+where a full render costs a rebuild. One gotcha worth knowing: VHS does **not**
+accept backslash-escaped quotes inside a double-quoted argument, so
+`Type "echo \"hi\""` is a parse error. Use backticks for any line containing
+quotes: ``Type `echo "hi"` ``.
+
+Keep `Set Height` just above what the content needs. Too tall wastes vertical
+space and shrinks the text once GitHub scales the GIF to the README's width; too
+short and the opening act scrolls off the top before the demo ends.
+
 A short, legible loop reads better than a long one. Show the moment GLIMPS earns
 its place: command header, structured output, readable logs, and ordinary output
-left alone.
+left alone — and, in `failure.tape`, a real failure with a real exit code.

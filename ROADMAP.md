@@ -74,9 +74,11 @@ GIF people can understand without a private walkthrough.
       macOS+Linux binaries, a shell installer, and a Homebrew formula on version
       tags. To go live: create the `Krishnarajan7/homebrew-tap` repo + token secret,
       bump the version, and push a `vX.Y.Z` tag.)
-- ◐ Polished README (done) with an animated before/after demo GIF - tooling done
-      (`demo/glimps.tape` + `demo/README.md`, self-contained VHS script); the GIF
-      itself just needs `vhs demo/glimps.tape` run on a machine with VHS installed
+- ☑ Polished README with animated demo GIFs, rendered from tapes via
+      `scripts/render-demo.sh`: `demo/glimps.gif` (formatting) and
+      `demo/failure.gif` (failure intelligence — exit-code translation, pipeline
+      warnings, Ctrl-C as a notice, error pinning). Capture rules live in
+      `docs/VISUAL_EVIDENCE_CHECKLIST.md`.
 - ☑ Docs: install, config, safety/privacy statement, uninstall (README + `.glimpsrc.example`)
 - ☑ Read-only `glimps doctor`, security policy, Code of Conduct, CODEOWNERS,
       compatibility matrix, pinned CI actions, and least-privilege workflows

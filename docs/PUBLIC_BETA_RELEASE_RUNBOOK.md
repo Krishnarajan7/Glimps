@@ -81,6 +81,10 @@ Review `demo/glimps.gif` before committing it. The demo should make the value
 obvious in seconds: command header, JSON structure, log severity color, and
 ordinary output staying normal.
 
+Work through `docs/VISUAL_EVIDENCE_CHECKLIST.md` before the GIF or any launch
+screenshot goes public. It is the sign-off list for capture hygiene and for the
+install claims that are not true until the tap is verified from a real tag.
+
 ## 4. Release Plumbing
 
 Before pushing a public release tag:
