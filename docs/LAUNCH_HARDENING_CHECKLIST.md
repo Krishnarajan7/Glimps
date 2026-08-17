@@ -117,13 +117,10 @@ Legend: todo / in progress / done
 - done: Add semantic HTML colors for delimiters, element names, attributes,
   quoted values, and raw CSS/JS/title text.
 - done: Add a repo-local demo rendering script for `demo/glimps.tape`.
-- done: Add a visual-evidence checklist covering demo commands, before/after
-  capture, media placement, and the install claims that must not be advertised
-  yet, in `docs/VISUAL_EVIDENCE_CHECKLIST.md`.
-- done: Generate and commit the demo GIF from `demo/glimps.tape`, reviewed
-  against `docs/VISUAL_EVIDENCE_CHECKLIST.md`. The tape now renders in a seeded
-  throwaway project with a plain prompt, so frames carry no local files,
-  username, or hostname.
+- done: Generate and commit the demo GIF from `demo/glimps.tape`. The tape had
+  never rendered — VHS rejects backslash-escaped quotes inside a double-quoted
+  `Type` argument — and it now renders in a seeded throwaway project with a plain
+  prompt, so frames carry no local files, username, or hostname.
 - done: Add a second capture for failure intelligence (`demo/failure.tape` →
   `demo/failure.gif`) and a README section for it. It is the launch headline per
   `docs/FAILURE_INTELLIGENCE_PLAN.md`, and it was previously undemonstrated.

@@ -77,8 +77,7 @@ GIF people can understand without a private walkthrough.
 - ☑ Polished README with animated demo GIFs, rendered from tapes via
       `scripts/render-demo.sh`: `demo/glimps.gif` (formatting) and
       `demo/failure.gif` (failure intelligence — exit-code translation, pipeline
-      warnings, Ctrl-C as a notice, error pinning). Capture rules live in
-      `docs/VISUAL_EVIDENCE_CHECKLIST.md`.
+      warnings, Ctrl-C as a notice, error pinning).
 - ☑ Docs: install, config, safety/privacy statement, uninstall (README + `.glimpsrc.example`)
 - ☑ Read-only `glimps doctor`, security policy, Code of Conduct, CODEOWNERS,
       compatibility matrix, pinned CI actions, and least-privilege workflows

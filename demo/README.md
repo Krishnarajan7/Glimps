@@ -8,18 +8,13 @@ There are two, because GLIMPS makes two separate promises:
 
 | Tape | Output | Shows |
 |---|---|---|
-| [`glimps.tape`](./glimps.tape) | `glimps.gif` | Formatting: the command header, JSON, log severity, and ordinary output left alone |
+| [`glimps.tape`](./glimps.tape) | `glimps.gif` | Formatting: the command header, JSON, log severity, and command-aware `ls` coloring |
 | [`failure.tape`](./failure.tape) | `failure.gif` | Failure intelligence: exit-code translation, pipeline-stage warnings, Ctrl-C as a notice, and error pinning |
 
 Both run in a seeded throwaway project with a plain `%1~ %# ` prompt, so no local
 files, usernames, or hostnames reach the frames. GLIMPS never touches `PROMPT`
 (see the doc comment in [`src/init.rs`](../src/init.rs)), so that is cosmetic
 only — and it makes clear that every color in the frames came from GLIMPS.
-
-Before you publish a capture anywhere — README, website, issue, or launch post —
-read [`docs/VISUAL_EVIDENCE_CHECKLIST.md`](../docs/VISUAL_EVIDENCE_CHECKLIST.md).
-It covers which commands to show, how to take an honest before/after pair, where
-generated media belongs, and which install claims are not true yet.
 
 ## Render it
 
@@ -75,5 +70,5 @@ space and shrinks the text once GitHub scales the GIF to the README's width; too
 short and the opening act scrolls off the top before the demo ends.
 
 A short, legible loop reads better than a long one. Show the moment GLIMPS earns
-its place: command header, structured output, readable logs, and ordinary output
-left alone — and, in `failure.tape`, a real failure with a real exit code.
+its place: command header, structured output, readable logs — and, in
+`failure.tape`, a real failure with a real exit code.

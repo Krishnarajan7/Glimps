@@ -24,7 +24,8 @@ With no arguments it renders every tape:
 
 Pass one or more tape paths to render only those.
 
-Review each render against docs/VISUAL_EVIDENCE_CHECKLIST.md before committing it.
+Review each render before committing it: no local files, usernames, or hostnames
+should appear in any frame.
 
 This does not install GLIMPS globally, edit ~/.zshrc, or change your login shell.
 EOF

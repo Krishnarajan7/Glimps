@@ -10,8 +10,7 @@
 #
 # The demo also runs inside a seeded throwaway project directory rather than this
 # checkout. That keeps the capture reproducible on any machine and keeps local
-# files, usernames, and hostnames out of the frames — see
-# docs/VISUAL_EVIDENCE_CHECKLIST.md.
+# files, usernames, and hostnames out of the frames.
 #
 # NOTE on quoting: VHS does not support backslash-escaped quotes inside a
 # double-quoted `Type "..."` argument. Use backticks for any line containing
@@ -80,7 +79,10 @@ Sleep 700ms
 Enter
 Sleep 2.2s
 
-# --- 3) Ordinary output is untouched — but you can still find your command ---
+# --- 3) An everyday command, still findable in the scrollback ---
+# `ls` has a command-aware view too, so this is not a pass-through example. The
+# point of this beat is the header: even for a command you run fifty times a day,
+# you can see exactly where its output began.
 Type "ls -la"
 Sleep 700ms
 Enter

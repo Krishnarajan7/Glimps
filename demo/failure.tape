@@ -14,8 +14,7 @@
 # unittest` run, not a scripted echo.
 #
 # Like glimps.tape, this runs in a seeded throwaway project with a plain prompt so
-# no local files, usernames, or hostnames reach the frames — see
-# docs/VISUAL_EVIDENCE_CHECKLIST.md.
+# no local files, usernames, or hostnames reach the frames.
 #
 # NOTE on quoting: VHS does not support backslash-escaped quotes inside a
 # double-quoted `Type "..."` argument. Use backticks for any line containing
