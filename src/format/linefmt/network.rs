@@ -384,8 +384,13 @@ fn colorize_route_or_netstat_table_line(line: &[u8], theme: &Theme) -> Option<Ve
     ))
 }
 
-/// Color `lsof -i` connection rows.
-pub fn colorize_lsof_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+/// Color an `lsof` open-file table: every invocation from bare `lsof` to
+/// `-i`/`-p`/`+D` prints the same fixed-width shape, read from its own heading.
+pub fn colorize_lsof_line(
+    line: &[u8],
+    theme: &Theme,
+    columns: &mut Vec<LsofColumn>,
+) -> Option<Vec<u8>> {
     if theme.reset.is_empty() {
         return None;
     }
@@ -394,24 +399,252 @@ pub fn colorize_lsof_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     if words.is_empty() {
         return None;
     }
-    let first = &content[words[0].0..words[0].1];
-    if first == b"COMMAND" {
-        return Some(paint_whole(content, ending, theme.debug, theme.reset));
+    if let Some(schema) = lsof_header_schema(content, &words) {
+        *columns = schema;
+        // Each heading takes its own column's color, the way the other two
+        // schema-learning views do (`colorize_df_line`, `colorize_ps_line`), so
+        // a heading is visually tied to the column it names. Painting the whole
+        // row one color made it indistinguishable from the COMMAND value below
+        // it, which shares `theme.key`. The empty word keeps the value-dependent
+        // branches out of the decision, as `ps` does.
+        let roles = columns.iter().map(|column| column.role).collect::<Vec<_>>();
+        return Some(colorize_words(content, ending, theme, |index, _| {
+            let role = roles.get(index).copied().unwrap_or(LsofColumnRole::Unknown);
+            lsof_role_color(role, b"", theme)
+        }));
     }
-    Some(colorize_words(
-        content,
-        ending,
-        theme,
-        |idx, word| match idx {
-            0 => Some(theme.key),
-            1 => Some(theme.number),
-            2 => Some(theme.string),
-            3 | 4 => Some(theme.keyword),
-            _ if looks_like_report_number(word) => Some(theme.number),
-            _ if looks_like_socket_name(word) => Some(theme.path),
-            _ => Some(theme.muted),
-        },
-    ))
+    colorize_lsof_row(content, ending, theme, &words, columns)
+}
+
+/// Byte span and semantic role of one heading in the table `lsof` printed for
+/// the current invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LsofColumn {
+    start: usize,
+    end: usize,
+    role: LsofColumnRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LsofColumnRole {
+    Command,
+    Pid,
+    User,
+    Fd,
+    Type,
+    Device,
+    Size,
+    Node,
+    Name,
+    Unknown,
+}
+
+/// Widest schema accepted. Every row is matched against every column, so an
+/// absurdly wide "heading" would make each later line cost O(words × columns).
+/// A real `lsof` table has at most a dozen columns; this only rules out a line
+/// that reached the heading test by accident or by construction.
+const LSOF_MAX_COLUMNS: usize = 64;
+
+/// Learn the schema from an `lsof` heading row.
+///
+/// Flags reshape the table — `-R` adds PPID, `-K` adds TID, `+L` adds NLINK,
+/// `-o` renames SIZE/OFF — so the heading is read rather than assumed. A row is
+/// only a schema if it starts at COMMAND and ends at NAME, which is what every
+/// `lsof` table does and what arbitrary whitespace-aligned output does not.
+fn lsof_header_schema(content: &[u8], words: &[(usize, usize)]) -> Option<Vec<LsofColumn>> {
+    let (first_start, first_end) = *words.first()?;
+    if &content[first_start..first_end] != b"COMMAND" || words.len() > LSOF_MAX_COLUMNS {
+        return None;
+    }
+    let columns = words
+        .iter()
+        .map(|(start, end)| LsofColumn {
+            start: *start,
+            end: *end,
+            role: lsof_header_role(&content[*start..*end]),
+        })
+        .collect::<Vec<_>>();
+    let ends_at_name = columns
+        .last()
+        .is_some_and(|column| column.role == LsofColumnRole::Name);
+    let has_pid = columns
+        .iter()
+        .any(|column| column.role == LsofColumnRole::Pid);
+    (ends_at_name && has_pid && columns.len() >= 4).then_some(columns)
+}
+
+fn lsof_header_role(word: &[u8]) -> LsofColumnRole {
+    match word {
+        b"COMMAND" | b"TASKCMD" => LsofColumnRole::Command,
+        b"PID" | b"PPID" | b"TID" | b"PGID" => LsofColumnRole::Pid,
+        b"USER" => LsofColumnRole::User,
+        b"FD" => LsofColumnRole::Fd,
+        b"TYPE" => LsofColumnRole::Type,
+        b"DEVICE" => LsofColumnRole::Device,
+        b"SIZE" | b"OFF" | b"SIZE/OFF" | b"OFFSET" | b"NLINK" => LsofColumnRole::Size,
+        b"NODE" | b"INODE" => LsofColumnRole::Node,
+        b"NAME" => LsofColumnRole::Name,
+        _ => LsofColumnRole::Unknown,
+    }
+}
+
+/// Color one table row against the learned schema.
+///
+/// Values are matched to headings by byte position rather than by word index,
+/// because rows for kernel objects (KQUEUE, NPOLICY, PSXSEM) leave DEVICE,
+/// SIZE/OFF and NODE empty, which shifts every later word. NAME is the one
+/// column that may contain spaces, so every word from its start byte onward is
+/// treated as part of it — each is still painted individually (a NAME with a
+/// space gets a reset between the pieces), but none can be mistaken for a
+/// value in an earlier column.
+fn colorize_lsof_row(
+    content: &[u8],
+    ending: &[u8],
+    theme: &Theme,
+    words: &[(usize, usize)],
+    columns: &[LsofColumn],
+) -> Option<Vec<u8>> {
+    // No schema means no coloring, and that is load-bearing: it is the whole
+    // reason `lsof -t` (bare pids), `-v` and `-h` stay verbatim, since none of
+    // them print a heading. `df` and `ps` do fall back to guessing from value
+    // shapes when their schema is empty — do NOT copy that here.
+    let name_start = columns
+        .last()
+        .filter(|column| column.role == LsofColumnRole::Name)?
+        .start;
+    // Only a row carrying a process id under the PID heading is data. Warning
+    // continuations ("Output information may be incomplete.") and any output
+    // that drifted out of alignment decline here rather than being recolored.
+    // This runs before the roles vector is built so a declined line pays for a
+    // short scan instead of a full mapping plus an allocation.
+    let pid_index = words
+        .iter()
+        .position(|span| lsof_role_at(columns, *span, name_start) == LsofColumnRole::Pid)?;
+    let (pid_start, pid_end) = *words.get(pid_index)?;
+    let pid = content.get(pid_start..pid_end)?;
+    if !pid.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    // `roles` is indexed by the same word order `colorize_words` walks, because
+    // both come from `word_spans` over this same `content`.
+    let roles = words
+        .iter()
+        .map(|span| lsof_role_at(columns, *span, name_start))
+        .collect::<Vec<_>>();
+    Some(colorize_words(content, ending, theme, |index, word| {
+        let role = roles.get(index).copied().unwrap_or(LsofColumnRole::Unknown);
+        lsof_role_color(role, word, theme)
+    }))
+}
+
+/// The heading a value sits under. Numeric columns are right-aligned and text
+/// columns left-aligned, but `lsof` sizes each column to its widest value, so a
+/// value always overlaps its own heading. The widest overlap wins for the rare
+/// value that outgrows its column and reaches into a neighbor.
+fn lsof_role_at(
+    columns: &[LsofColumn],
+    (start, end): (usize, usize),
+    name_start: usize,
+) -> LsofColumnRole {
+    if start >= name_start {
+        return LsofColumnRole::Name;
+    }
+    let mut best = (0usize, LsofColumnRole::Unknown);
+    for column in columns {
+        // Columns come from `word_spans`, so they are sorted by `start`: once a
+        // heading begins at or after this word ends, no later one can overlap.
+        // A single line may be up to `limits.line_cap` bytes, so this keeps the
+        // per-row cost proportional to the columns actually near each word.
+        if column.start >= end {
+            break;
+        }
+        let overlap = end.min(column.end).saturating_sub(start.max(column.start));
+        if overlap > best.0 {
+            best = (overlap, column.role);
+        }
+    }
+    best.1
+}
+
+fn lsof_role_color(role: LsofColumnRole, word: &[u8], theme: &Theme) -> Option<&'static str> {
+    Some(match role {
+        // Cyan reads as the row's identity. `folder` would be the match with
+        // `ps`, but a DIR file type already claims it in this same row.
+        LsofColumnRole::Command => theme.key,
+        LsofColumnRole::Pid => theme.number,
+        LsofColumnRole::User => theme.string,
+        LsofColumnRole::Fd => lsof_fd_color(word, theme),
+        LsofColumnRole::Type => lsof_type_color(word, theme),
+        // A major,minor device number and an inode identify the same file the
+        // NAME column already names, so they stay out of the way. A SIZE/OFF
+        // value is a file offset, not a size, when it carries an offset prefix:
+        // `0t` decimal, or `0x` hex under `-o`.
+        LsofColumnRole::Device => theme.comment,
+        LsofColumnRole::Size if word.starts_with(b"0t") || word.starts_with(b"0x") => theme.comment,
+        LsofColumnRole::Size => theme.number,
+        // NODE holds the protocol for a network file and an inode for the rest.
+        LsofColumnRole::Node if word.iter().all(u8::is_ascii_digit) => theme.comment,
+        LsofColumnRole::Node => theme.keyword,
+        LsofColumnRole::Name => lsof_name_color(word, theme),
+        // The mapper could not place THIS WORD under any heading. Only the word
+        // is left bare — the rest of the row still colors, since the row already
+        // proved itself by carrying a numeric pid under the PID heading, and one
+        // stray value (a column the heading did not name) is not reason to drop
+        // a whole row's coloring. Invariant #2 applied at word granularity:
+        // uncolored beats guessed, and a drifted value stays visibly plain.
+        LsofColumnRole::Unknown => return None,
+    })
+}
+
+fn lsof_fd_color(word: &[u8], theme: &Theme) -> &'static str {
+    match word {
+        // A descriptor still open on an unlinked file — the reason a deleted
+        // file can keep holding disk space.
+        b"DEL" | b"del" => theme.warn,
+        // lsof could not read the descriptor.
+        b"err" | b"NOFD" | b"unk" => theme.error,
+        // Process structure rather than an open file: these repeat on every row
+        // of every process and are what makes bare `lsof` hard to read.
+        b"cwd" | b"rtd" | b"txt" | b"mem" | b"mmap" | b"pd" | b"jld" | b"ltx" | b"tr" | b"v86" => {
+            theme.comment
+        }
+        // A real descriptor with its access mode: `0u`, `3r`, `42uW`.
+        _ if word.first().is_some_and(u8::is_ascii_digit) => theme.keyword,
+        _ => theme.muted,
+    }
+}
+
+fn lsof_type_color(word: &[u8], theme: &Theme) -> &'static str {
+    match word {
+        b"DIR" => theme.folder,
+        // Communication endpoints — the rows people run `lsof` to find.
+        b"IPv4" | b"IPv6" | b"inet" | b"unix" | b"sock" | b"netlink" | b"systm" | b"ndrv"
+        | b"rte" | b"key" | b"PIPE" | b"FIFO" => theme.keyword,
+        _ => theme.muted,
+    }
+}
+
+fn lsof_name_color(word: &[u8], theme: &Theme) -> &'static str {
+    if word.starts_with(b"(") && word.ends_with(b")") && word.len() > 2 {
+        return lsof_state_color(&word[1..word.len() - 1], theme);
+    }
+    if word == b"->" {
+        return theme.comment;
+    }
+    theme.path
+}
+
+/// The connection state or file condition `lsof` appends to a name.
+fn lsof_state_color(state: &[u8], theme: &Theme) -> &'static str {
+    match state {
+        b"LISTEN" | b"ESTABLISHED" => theme.info,
+        // Half-closed and transitional sockets: a pile of CLOSE_WAIT entries is
+        // the classic descriptor leak. `deleted`/`revoked` mark a name that no
+        // longer resolves to the file behind it.
+        b"CLOSE_WAIT" | b"TIME_WAIT" | b"FIN_WAIT_1" | b"FIN_WAIT_2" | b"LAST_ACK" | b"CLOSING"
+        | b"CLOSED" | b"SYN_SENT" | b"SYN_RCVD" | b"deleted" | b"revoked" => theme.warn,
+        _ => theme.muted,
+    }
 }
 
 /// Color `launchctl list` service rows.
@@ -560,11 +793,6 @@ fn looks_like_interface_name(word: &[u8]) -> bool {
     }
     let prefix_len = word.iter().take_while(|b| b.is_ascii_alphabetic()).count();
     prefix_len > 0 && prefix_len < word.len() && word[prefix_len..].iter().all(u8::is_ascii_digit)
-}
-
-fn looks_like_socket_name(word: &[u8]) -> bool {
-    let word = trim_word_punctuation(word);
-    word.contains(&b':') || word.contains(&b'.') || word.contains(&b'[') || word.contains(&b']')
 }
 
 fn looks_like_report_number(word: &[u8]) -> bool {

@@ -3873,6 +3873,291 @@ fn mac_networking_commands_get_command_aware_coloring() {
 }
 
 #[test]
+fn bare_lsof_colors_the_open_file_table_by_column_role() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "COMMAND     PID   USER   FD      TYPE             DEVICE   SIZE/OFF                NODE NAME\n",
+        "loginwind   588 krishv  cwd       DIR               1,17        704                   2 /\n",
+        "loginwind   588 krishv  txt       REG               1,17    3227536 1152921500312105867 /usr/lib/dyld\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"lsof")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    assert!(s.contains("\x1b[36mloginwind\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m588\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;117mkrishv\x1b[0m"));
+    // Process structure, the device number and the inode repeat on every row of
+    // every process; dimming them is what makes the table readable.
+    assert!(s.contains("\x1b[2mcwd\x1b[0m"));
+    assert!(s.contains("\x1b[2m1,17\x1b[0m"));
+    assert!(s.contains("\x1b[2m1152921500312105867\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;122;162;247mDIR\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;153mREG\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m3227536\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230m/usr/lib/dyld\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn lsof_marks_protocol_socket_state_and_descriptors_on_deleted_files() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    // The KQUEUE row leaves DEVICE, SIZE/OFF and NODE empty, which shifts its
+    // NAME words left of where every other row puts them.
+    let body = concat!(
+        "COMMAND     PID   USER   FD      TYPE             DEVICE   SIZE/OFF                NODE NAME\n",
+        "Code       5146 krishv   42u     IPv4 0xabcdef1234567890        0t0                 TCP localhost:5173 (LISTEN)\n",
+        "node       8821 krishv   23u     IPv4 0xabcdef1234567892        0t0                 TCP localhost:9229 (CLOSE_WAIT)\n",
+        "loginwind   588 krishv   19u   KQUEUE                                                    count=0, state=0xa\n",
+        "loginwind   588 krishv  DEL      REG               1,17                          30030075 /private/var/tmp/gone\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"lsof -i -P -n")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    // NODE carries the protocol for a network file, not an inode.
+    assert!(s.contains("\x1b[35mTCP\x1b[0m"));
+    assert!(s.contains("\x1b[35mIPv4\x1b[0m"));
+    assert!(s.contains("\x1b[35m42u\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230mlocalhost:5173\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;39;135;51m(LISTEN)\x1b[0m"));
+    // A half-closed socket and a descriptor still open on an unlinked file are
+    // the two states worth flagging rather than merely coloring.
+    assert!(s.contains("\x1b[38;5;220m(CLOSE_WAIT)\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220mDEL\x1b[0m"));
+    // The empty-column row keeps its NAME in the NAME color.
+    assert!(s.contains("\x1b[38;2;142;202;230mcount=0,\x1b[0m"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn lsof_output_without_a_heading_is_left_alone() {
+    // `lsof -t` prints bare pids and `lsof -v` a version report: no heading, so
+    // the view has no schema and must not guess one from the values.
+    for (command, body) in [
+        (&b"lsof -t -i :3000"[..], &b"5146\n8821\n"[..]),
+        (
+            b"lsof -v",
+            b"lsof version information:\n    revision: 4.99.4\n",
+        ),
+    ] {
+        let mut f = Formatter::new();
+        if !f.is_enabled() {
+            return;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(&cmd_marker(command)));
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(body));
+        out.extend_from_slice(&f.process(D0));
+        let rendered = String::from_utf8_lossy(&out);
+        let output = rendered
+            .split_once("\x1b]133;C\x07")
+            .map(|(_, tail)| tail.to_string())
+            .unwrap_or_default();
+        assert!(
+            output.contains(&String::from_utf8_lossy(body).to_string()),
+            "expected verbatim output for {:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn lsof_corpus_fixture_is_colored_without_losing_a_byte() {
+    // The golden case: a captured `lsof -i` table carrying every awkward shape
+    // at once — LISTEN/ESTABLISHED/CLOSE_WAIT states, a peer arrow, NPOLICY and
+    // KQUEUE rows with three empty columns, a DEL descriptor, a unix socket, and
+    // lsof's stderr warning with its continuation line. The corpus sweep in
+    // `corpus_common_commands_preserve_every_byte` reads the same file but under
+    // the plain theme with no command marker, so only this test actually runs
+    // the colorizer over it.
+    let sample = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/corpus/commands/lsof_network.txt"
+    ))
+    .expect("read lsof corpus fixture");
+
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"lsof -i -P -n")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(&sample));
+    out.extend_from_slice(&f.process(D0));
+
+    // Byte safety over the whole fixture: stripping the SGR escapes must give
+    // the captured bytes back exactly.
+    assert!(
+        strip_sgr(&out)
+            .windows(sample.len())
+            .any(|window| window == sample.as_slice()),
+        "the fixture's bytes must survive coloring"
+    );
+
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[38;2;39;135;51m(LISTEN)\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;39;135;51m(ESTABLISHED)\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220m(CLOSE_WAIT)\x1b[0m"));
+    assert!(s.contains("\x1b[38;5;220mDEL\x1b[0m"));
+    assert!(s.contains("\x1b[35mTCP\x1b[0m"));
+    assert!(s.contains("\x1b[35munix\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;142;202;230m127.0.0.1:8080->127.0.0.1:52694\x1b[0m"));
+    // A row whose DEVICE/SIZE/NODE columns are empty still lands its NAME in
+    // the NAME color rather than drifting into a numeric column.
+    assert!(s.contains("\x1b[38;2;142;202;230mcount=0,\x1b[0m"));
+    // lsof's own warning keeps the diagnostic treatment, and its continuation
+    // line carries no pid so it is never painted as a table row.
+    assert!(s.contains("      Output information may be incomplete."));
+}
+
+#[test]
+fn lsof_names_with_multibyte_paths_stay_intact() {
+    // Invariant #4. The row mapper slices at word boundaries and strips the
+    // parentheses off a state token, so every slice index must land on a UTF-8
+    // character boundary even when the NAME column is not ASCII.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "COMMAND     PID   USER   FD      TYPE             DEVICE   SIZE/OFF                NODE NAME\n",
+        "Pages      1234 krishv  txt       REG               1,18      12345            30030075 /Users/krishv/Documents/résumé—naïve/файл.pdf\n",
+        "Pages      1234 krishv   9u      IPv4 0x0000000000000001        0t0                 TCP 127.0.0.1:80 (établi)\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"lsof -c Pages")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+
+    assert!(std::str::from_utf8(&out).is_ok());
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        s.contains("\x1b[38;2;142;202;230m/Users/krishv/Documents/résumé—naïve/файл.pdf\x1b[0m")
+    );
+}
+
+#[test]
+fn lsof_view_covers_flags_and_wrappers_but_not_field_output() {
+    for command in [
+        &b"lsof"[..],
+        b"lsof -i",
+        b"lsof -i :3000",
+        b"lsof -nP -i TCP -sTCP:LISTEN",
+        b"lsof -p 5146",
+        b"lsof +D /var/log",
+        b"lsof -u krishv -a -d cwd",
+        b"sudo lsof -i",
+        b"sudo /usr/sbin/lsof -p 1",
+    ] {
+        assert_eq!(
+            command_view(&Some(command.to_vec())),
+            Some(CommandView::Lsof),
+            "expected the lsof view for {:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
+    // `-F` is machine-readable field output, not a table.
+    for command in [&b"lsof -F"[..], b"lsof -FpcfnDi", b"lsof -F0 -i"] {
+        assert_eq!(
+            command_view(&Some(command.to_vec())),
+            None,
+            "field output must decline the table view: {:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn lsof_heading_lookalikes_from_other_commands_do_not_get_the_table_view() {
+    // The view only ever applies to `lsof` itself, and only a row carrying a
+    // numeric pid under the PID heading is treated as data.
+    assert_eq!(command_view(&Some(b"echo lsof -i".to_vec())), None);
+
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = concat!(
+        "COMMAND     PID   USER   FD      TYPE             DEVICE   SIZE/OFF                NODE NAME\n",
+        "lsof: WARNING: can't stat() nullfs file system /System/Volumes/Data\n",
+        "      Output information may be incomplete.\n",
+    );
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"lsof")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body.as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+
+    // The warning keeps the diagnostic treatment; its continuation, which has no
+    // pid, is not painted as a table row.
+    assert!(s.contains("      Output information may be incomplete.\n"));
+    assert!(strip_sgr(&out)
+        .windows(body.len())
+        .any(|window| window == body.as_bytes()));
+}
+
+#[test]
+fn an_absurdly_wide_heading_is_rejected_before_it_can_cost_per_row_work() {
+    // Every row is matched against every column, so accepting a very wide
+    // heading would make each later line pay O(words x columns). A line can
+    // reach the heading test by accident — a process named COMMAND holding a
+    // file whose name contains spaces — so the width is bounded rather than
+    // trusted. Output must then pass through untouched.
+    let mut wide = b"COMMAND PID".to_vec();
+    for index in 0..200 {
+        wide.extend_from_slice(format!(" C{index}").as_bytes());
+    }
+    wide.extend_from_slice(b" NAME\n");
+    let row = b"proc 1234 x /tmp/a\n";
+    let mut body = wide.clone();
+    body.extend_from_slice(row);
+
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"lsof")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(&body));
+    out.extend_from_slice(&f.process(D0));
+
+    let rendered = String::from_utf8_lossy(&out);
+    let output = rendered
+        .split_once("\x1b]133;C\x07")
+        .map(|(_, tail)| tail.to_string())
+        .unwrap_or_default();
+    assert!(
+        output.contains(&String::from_utf8_lossy(&body).to_string()),
+        "an over-wide heading must leave the output verbatim"
+    );
+}
+
+#[test]
 fn networksetup_output_gets_label_and_value_coloring() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -4863,6 +5148,44 @@ fn latency_budget_no_pathological_blowup() {
     );
 }
 
+#[test]
+fn latency_budget_holds_for_a_colored_command_table() {
+    use std::time::Instant;
+    // The plain-theme guard above never reaches a command view. Bare `lsof` is
+    // the largest table GLIMPS colors — tens of thousands of rows, each mapped
+    // against the learned schema — so the same wall budget is applied to it
+    // with a real command and a colored theme. CI compiles the criterion benches
+    // but does not run them; this is what would catch a complexity regression
+    // in the per-row column mapper.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let heading = b"COMMAND     PID   USER   FD      TYPE             DEVICE   SIZE/OFF                NODE NAME\n";
+    let row = b"loginwind   588 krishv  txt       REG               1,17    3227536 1152921500312105867 /usr/lib/dyld\n";
+    let mut body = Vec::with_capacity(4 * 1024 * 1024);
+    body.extend_from_slice(heading);
+    while body.len() < 4 * 1024 * 1024 {
+        body.extend_from_slice(row);
+    }
+    let start = Instant::now();
+    let _ = f.process(&cmd_marker(b"lsof"));
+    let _ = f.process(C);
+    for chunk in body.chunks(8192) {
+        let _ = f.process(chunk);
+    }
+    let _ = f.process(D0);
+    let elapsed = start.elapsed();
+    // Tight enough to catch a real regression: the measured debug cost is well
+    // under a second, so a 10s budget would only have caught an order-of-
+    // magnitude blowup.
+    assert!(
+        elapsed.as_secs() < 3,
+        "colored {} bytes of table in {elapsed:?} (budget 3s)",
+        body.len()
+    );
+}
+
 proptest::proptest! {
     /// Arbitrary config (random toggles + small/zero caps) over arbitrary
     /// command output never panics, and when the master switch is off the
@@ -5170,6 +5493,23 @@ fn cmd_view_line() -> impl Strategy<Value = Vec<u8>> {
         proptest::prop_oneof![Just(b'\t'), Just(b' '), 0x21u8..=0x7e],
         0..24,
     );
+    // Multibyte text, so the colored views are exercised on lines where a
+    // careless slice index would split a UTF-8 sequence. Built from `char` so
+    // every sequence is well-formed; the byte-level torture cases live in the
+    // arbitrary-`Vec<u8>` proptests.
+    let unicode = proptest::collection::vec(
+        proptest::prop_oneof![
+            Just('é'),
+            Just('—'),
+            Just('ф'),
+            Just('中'),
+            Just('🌍'),
+            Just(' '),
+            Just('/'),
+        ],
+        0..16,
+    )
+    .prop_map(|chars| chars.into_iter().collect::<String>().into_bytes());
     let branch = (
         proptest::collection::vec(0x61u8..=0x7a, 1..6),
         proptest::option::of(proptest::collection::vec(0x61u8..=0x7a, 1..6)),
@@ -5191,7 +5531,14 @@ fn cmd_view_line() -> impl Strategy<Value = Vec<u8>> {
             line.extend_from_slice(meta);
             line
         });
-    proptest::prop_oneof![text, branch]
+    // An `lsof` heading, so some runs teach the table view a schema and the
+    // arbitrary lines that follow are then mapped onto it by byte position —
+    // the path that must not lose a byte when a row does not fit the columns.
+    let lsof_heading = Just(
+        b"COMMAND     PID   USER   FD      TYPE             DEVICE   SIZE/OFF                NODE NAME"
+            .to_vec(),
+    );
+    proptest::prop_oneof![text, branch, lsof_heading, unicode]
 }
 
 proptest::proptest! {
@@ -5242,6 +5589,8 @@ proptest::proptest! {
             b"whereis cat",
             b"history 1",
             b"ping -c 1 127.0.0.1",
+            b"lsof",
+            b"lsof -i -P -n",
         ] {
             let mut f = Formatter::build(Clock::Off, true, Config::default());
             if !f.is_enabled() {
@@ -5278,4 +5627,698 @@ proptest::proptest! {
             );
         }
     }
+}
+
+/// Every corpus fixture: the command that produced it, and the command view
+/// that command must select (empty when the capture is handled by the streaming
+/// formatters or passed through untouched).
+///
+/// The sweep in `corpus_common_commands_preserve_every_byte` reads these same
+/// files under `Theme::plain()` and with no command marker. Both of those make
+/// every command-view colorizer early-return, so on their own the captures
+/// prove only that GLIMPS does not corrupt output — never that it colors it
+/// correctly. This table is what lets them do the second job.
+///
+/// A fixture missing from here fails `every_corpus_fixture_is_wired_to_a_command`
+/// on purpose. An unwired fixture looks like coverage while proving nothing,
+/// which is the trap `lsof_network.txt` fell into on the day it was added.
+const CORPUS_COMMANDS: &[(&str, &str, &str)] = &[
+    ("ansi_256color.txt", "printf colors", ""),
+    ("ansi_control_only.txt", "clear", ""),
+    ("app_log.txt", "tail -n 40 app.log", ""),
+    ("base64.txt", "base64 payload.bin", ""),
+    ("binary_dump.txt", "cat /bin/ls", ""),
+    ("brew_list.txt", "brew list --versions", ""),
+    ("cargo_build.txt", "cargo build", "Cargo"),
+    ("cargo_test.txt", "cargo test", "Cargo"),
+    ("cargo_tree.txt", "cargo tree", ""),
+    (
+        "cr_progress.txt",
+        "curl -O https://example.com/f.bin",
+        "CurlProgress",
+    ),
+    (
+        "curl_verbose.txt",
+        "curl -v https://example.com",
+        "CurlProgress",
+    ),
+    ("date.txt", "date", ""),
+    ("df.txt", "df -h", "Df"),
+    ("docker_ps.txt", "docker ps", ""),
+    ("du.txt", "du -sh src", "Du"),
+    ("emoji_cjk.txt", "cat notes.txt", ""),
+    ("empty.txt", "true", ""),
+    ("env.txt", "env", ""),
+    ("find.txt", "find . -name main.rs", "Find"),
+    ("git_branch_color.txt", "git branch -vv", "Git"),
+    ("git_diff_color.txt", "git diff", ""),
+    ("git_log_graph.txt", "git log --graph --oneline", "Git"),
+    ("git_log.txt", "git log", "Git"),
+    ("git_status.txt", "git status", "Git"),
+    ("grep_color.txt", "grep -rn TODO src", "Grep"),
+    ("hexdump.txt", "hexdump -C /bin/ls", ""),
+    ("hosts.txt", "cat /etc/hosts", ""),
+    ("ifconfig.txt", "ifconfig", "IfConfig"),
+    ("journalctl.txt", "journalctl -u sshd", ""),
+    ("jq_color.txt", "jq . data.json", ""),
+    ("kubectl_get.txt", "kubectl get pods", "KubectlPods"),
+    ("ls_color.txt", "ls --color=always", "Ls"),
+    ("ls.txt", "ls -la", "Ls"),
+    ("lsof.txt", "lsof", "Lsof"),
+    ("lsof_network.txt", "lsof -i -P -n", "Lsof"),
+    ("man_overstrike.txt", "man printf", "Man"),
+    ("netstat.txt", "netstat -an", ""),
+    ("npm_install.txt", "npm install", ""),
+    ("ping.txt", "ping -c 3 github.com", "Ping"),
+    ("ps.txt", "ps aux", "Ps"),
+    ("rustc_version.txt", "rustc --version", ""),
+    ("source_code.txt", "cat src/terminal.rs", "File"),
+    ("sqlite_table.txt", "sqlite3 app.db", "SqlResult"),
+    ("stacktrace_python.txt", "python3 -m pytest", ""),
+    ("stacktrace_rust.txt", "cargo run", ""),
+    ("systemctl.txt", "systemctl status glimps", ""),
+    ("tabs_table.txt", "cat data.txt", ""),
+    ("top.txt", "top -l 1", ""),
+    ("tree.txt", "tree", ""),
+    ("unicode.txt", "cat unicode.txt", ""),
+    ("uptime.txt", "uptime", ""),
+    ("whitespace_only.txt", "printf spaces", ""),
+    ("whoami.txt", "whoami", ""),
+];
+
+/// Fixtures whose view deliberately REWRITES its input rather than only adding
+/// color, so content preservation is not the right assertion for them. `man`
+/// resolves overstrike sequences (`NNAAMMEE` -> `NAME`), which is the whole
+/// point of that view.
+const CORPUS_REWRITING_FIXTURES: &[&str] = &["man_overstrike.txt"];
+
+fn corpus_dir() -> &'static str {
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus/commands")
+}
+
+#[test]
+fn every_corpus_fixture_is_wired_to_a_command() {
+    let mut on_disk = std::fs::read_dir(corpus_dir())
+        .expect("corpus dir")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            (path.extension().and_then(|e| e.to_str()) == Some("txt"))
+                .then(|| path.file_name()?.to_str().map(str::to_string))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    on_disk.sort();
+
+    let mut wired = CORPUS_COMMANDS
+        .iter()
+        .map(|(fixture, _, _)| (*fixture).to_string())
+        .collect::<Vec<_>>();
+    wired.sort();
+
+    assert_eq!(
+        on_disk, wired,
+        "every corpus fixture needs a command in CORPUS_COMMANDS — an unwired \
+         fixture is never run through a colorizer and proves nothing"
+    );
+}
+
+#[test]
+fn corpus_fixtures_keep_their_content_through_the_colored_command_views() {
+    // The colored counterpart to `corpus_common_commands_preserve_every_byte`:
+    // same real captures, but with the command marker attached and the default
+    // colored theme, so the command-aware views actually run on them. Coloring
+    // may only INSERT escapes, so stripping the escapes back out must recover
+    // the capture's own content.
+    if !Formatter::new().is_enabled() {
+        return;
+    }
+    let mut views_exercised = 0;
+    for (fixture, command, expected_view) in CORPUS_COMMANDS {
+        let sample = std::fs::read(format!("{}/{fixture}", corpus_dir()))
+            .unwrap_or_else(|e| panic!("read corpus fixture {fixture}: {e}"));
+
+        let selected = command_view(&Some(command.as_bytes().to_vec()));
+        let selected_name = selected.map(|view| format!("{view:?}")).unwrap_or_default();
+        assert!(
+            selected_name.starts_with(expected_view)
+                && (expected_view.is_empty() == selected_name.is_empty()),
+            "{fixture}: `{command}` selected {selected_name:?}, expected {expected_view:?}"
+        );
+        if !expected_view.is_empty() {
+            views_exercised += 1;
+        }
+
+        let mut f = Formatter::new();
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(&cmd_marker(command.as_bytes())));
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(&sample));
+        out.extend_from_slice(&f.process(D0));
+
+        assert!(
+            std::str::from_utf8(&out).is_ok() || std::str::from_utf8(&sample).is_err(),
+            "{fixture}: coloring turned valid UTF-8 into invalid UTF-8"
+        );
+        if CORPUS_REWRITING_FIXTURES.contains(fixture) {
+            continue;
+        }
+        // The capture may carry its own escapes, so both sides are stripped:
+        // what must survive is the content, not GLIMPS's additions.
+        let want = strip_sgr(&sample);
+        let got = strip_sgr(&out);
+        assert!(
+            want.is_empty() || got.windows(want.len()).any(|window| window == want),
+            "{fixture}: content lost when colored as `{command}`"
+        );
+    }
+    // Exact, not a floor: a floor lets fixtures be quietly downgraded to "no
+    // view" until the slack runs out. Changing this number should be a visible
+    // line in the diff, in either direction.
+    assert_eq!(
+        views_exercised, 23,
+        "the number of corpus fixtures exercising a command view changed"
+    );
+}
+
+#[test]
+fn a_stderr_redirect_no_longer_hides_the_command_view() {
+    // `cmd 2>/dev/null` still writes its stdout to the terminal, so the view
+    // belongs to `cmd`. This used to decline, because the shell word parser
+    // bails on the first operator byte and cannot tell `2>` from `>` — which
+    // made the usual way of running a noisy command (bare `lsof` warns
+    // constantly) the one way to lose formatting.
+    for (command, expected) in [
+        (&b"lsof 2>/dev/null"[..], "Lsof"),
+        (b"lsof -i -P -n 2>/dev/null", "Lsof"),
+        (b"lsof 2>>errors.log", "Lsof"),
+        (b"lsof 2> /dev/null", "Lsof"),
+        (b"lsof 2>&1", "Lsof"),
+        (b"git status 2>/dev/null", "Git"),
+        (b"kubectl get pods 2>/dev/null", "KubectlPods"),
+        (b"netstat -rn 2>/dev/null", "Netstat"),
+    ] {
+        let view = command_view(&Some(command.to_vec()));
+        let name = view.map(|view| format!("{view:?}")).unwrap_or_default();
+        assert!(
+            name.starts_with(expected),
+            "{:?} selected {name:?}, expected {expected:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn pipes_and_stdout_redirects_still_decline_the_shell_parsed_views() {
+    // The cases the operator check exists for must not be relaxed: with a pipe
+    // the screen shows the LAST stage's output, and with stdout redirected the
+    // only thing reaching the screen is stderr. Applying the first command's
+    // view to either would paint bytes it does not own.
+    for command in [
+        &b"lsof -i | grep LISTEN"[..],
+        b"lsof > out.txt",
+        b"lsof 1>out.txt",
+        b"lsof -i > out.txt 2>/dev/null",
+        b"netstat -rn | head",
+        b"curl -v https://example.com | head",
+        b"launchctl list > services.txt",
+        b"scutil --dns | head",
+        // `lsof` as an argument is still not a command.
+        b"echo lsof 2>/dev/null",
+    ] {
+        assert_eq!(
+            command_view(&Some(command.to_vec())),
+            None,
+            "expected no view for {:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn name_registered_views_still_ignore_operators() {
+    // Documenting a PRE-EXISTING asymmetry rather than asserting it is right.
+    // Views resolved purely from the command name (`COMMAND_VIEW_REGISTRY`:
+    // df, ls, du, …) never consult the shell parser, and `git` splits on
+    // whitespace instead of parsing, so a pipe or a stdout redirect does not
+    // stop them the way it stops the argument-parsed views above. It is benign
+    // today because a piped `df` or `git status` still yields lines of the same
+    // shape, but it is inconsistent, and this test exists so that changing it
+    // is a deliberate decision with a visible diff rather than a surprise.
+    for (command, expected) in [
+        (&b"df -h | tail -n 3"[..], "Df"),
+        (b"ls -la > listing.txt", "Ls"),
+        (b"du -sh . | sort -h", "Du"),
+        (b"git status | head", "Git"),
+        (b"kubectl get pods | wc -l", "KubectlPods"),
+        (b"diskutil info /dev/disk1 | head", "DiskutilInfo"),
+    ] {
+        let view = command_view(&Some(command.to_vec()));
+        let name = view.map(|view| format!("{view:?}")).unwrap_or_default();
+        assert!(
+            name.starts_with(expected),
+            "{:?} selected {name:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn a_stderr_redirect_no_longer_declassifies_a_secret_printing_command() {
+    // Regression guard for a real gap: `gh auth token` was recognized as
+    // sensitive but `gh auth token 2>/dev/null` was not, because the operator
+    // sent it to the loose fallback and that only recognizes secret-reading
+    // *files*, never secret-printing tools. Sensitive output must stay raw
+    // pass-through whether or not the caller silenced stderr.
+    for command in [
+        &b"gh auth token 2>/dev/null"[..],
+        b"op read op://Private/GitHub/token 2>/dev/null",
+        b"aws configure get aws_secret_access_key 2>&1",
+        b"doppler secrets get DATABASE_URL 2> /dev/null",
+        b"cat .env.local 2>/dev/null",
+    ] {
+        assert!(
+            is_sensitive_command(command, &[]),
+            "a redirect must not declassify: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+    // A custom rule must survive a redirect too.
+    assert!(is_sensitive_command(
+        b"vault read secret/db 2>/dev/null",
+        &["vault read".to_string()]
+    ));
+    // Ordinary neighbors stay ordinary.
+    for command in [&b"gh issue list 2>/dev/null"[..], b"lsof 2>/dev/null"] {
+        assert!(
+            !is_sensitive_command(command, &[]),
+            "unexpectedly sensitive: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+    // Every other operator still reaches the stricter loose fallback.
+    assert!(is_sensitive_command(b"cat .env; ls", &[]));
+}
+
+#[test]
+fn every_sensitive_command_survives_a_stderr_redirect() {
+    // Differential guard for the classifier change. Setting a stderr redirect
+    // aside moves these onto the structured pass, so every command the registry
+    // recognizes must still be recognized with the redirect appended, in each of
+    // its spellings.
+    //
+    // The PATH-QUALIFIED entries below are the ones that matter most: the loose
+    // pass matches a reader by basename while the structured pass compares the
+    // whole word, so `/bin/cat` is recognized by one and not the other. An
+    // earlier version of this change made the structured pass a *replacement*
+    // for the loose one, which silently turned `/bin/cat .env 2>/dev/null` from
+    // Sensitive into Normal — a secret handed to the colorizer and the error
+    // pin. The first version of this very test could not catch it, because
+    // every entry was spelled bare.
+    let commands: &[&[u8]] = &[
+        br#"security find-generic-password -D "AirPort network password" -a "HomeWiFi" -gw"#,
+        b"gh auth token",
+        b"op read op://Private/GitHub/token",
+        b"op item get GitHub --fields password --reveal",
+        b"bw get password github",
+        b"pass show github/token",
+        b"/bin/cat .env",
+        b"/usr/bin/head -5 ~/.aws/credentials",
+        b"/usr/bin/tail -n 20 /etc/secret.pem",
+        b"sudo /bin/cat /root/.ssh/id_rsa",
+        b"/bin/sed -n 1p .env",
+        b"./scripts/cat id_rsa",
+        b"/usr/local/bin/op read op://Private/GitHub/token",
+        b"aws configure get aws_secret_access_key",
+        b"aws secretsmanager get-secret-value --secret-id prod/db",
+        b"aws ssm get-parameter --name /prod/db/password --with-decryption",
+        b"gcloud auth print-access-token",
+        b"doppler secrets get DATABASE_URL",
+        b"cat .env.local",
+        b"head -20 ~/.aws/credentials",
+        b"tail ~/.kube/config",
+        b"sed -n 1,20p id_ed25519",
+    ];
+    for command in commands {
+        assert!(
+            is_sensitive_command(command, &[]),
+            "baseline regression: {}",
+            String::from_utf8_lossy(command)
+        );
+        for suffix in [
+            &b" 2>/dev/null"[..],
+            b" 2>&1",
+            b" 2> /dev/null",
+            b" 2>>errors.log",
+        ] {
+            let mut redirected = command.to_vec();
+            redirected.extend_from_slice(suffix);
+            assert!(
+                is_sensitive_command(&redirected, &[]),
+                "declassified by {}: {}",
+                String::from_utf8_lossy(suffix),
+                String::from_utf8_lossy(command)
+            );
+        }
+    }
+}
+
+/// Command-shaped fuzz for the stderr-redirect stripper: real-looking words
+/// mixed with every redirection spelling and every operator that must make it
+/// bail. A plain `Vec<u8>` generator almost never produces a `2>` at a word
+/// boundary, so it would exercise only the borrow-and-return fast path.
+fn redirect_fuzz_command() -> impl Strategy<Value = Vec<u8>> {
+    let token = proptest::prop_oneof![
+        Just(&b"lsof"[..]),
+        Just(&b"-i"[..]),
+        Just(&b"/dev/null"[..]),
+        Just(&b"2>"[..]),
+        Just(&b"2>>"[..]),
+        Just(&b"2>&1"[..]),
+        Just(&b"2>/dev/null"[..]),
+        Just(&b"2>>err.log"[..]),
+        Just(&b">"[..]),
+        Just(&b"1>out"[..]),
+        Just(&b"|"[..]),
+        Just(&b"&&"[..]),
+        Just(&b";"[..]),
+        Just(&b"\""[..]),
+        Just(&b"'q'"[..]),
+        Just(&b"\"2>x\""[..]),
+        Just(&b"grep"[..]),
+        Just(&b""[..]),
+    ];
+    // Separators are generated, not fixed: joining every token with a space
+    // meant `2>&1` was never adjacent to another byte, which is precisely why
+    // the earlier version of this generator could not catch `ls 2>&1extra`
+    // being rewritten to `ls extra`.
+    let separator = proptest::prop_oneof![Just(&b" "[..]), Just(&b""[..]), Just(&b"  "[..])];
+    (
+        proptest::collection::vec(token, 0..8),
+        proptest::collection::vec(separator, 0..8),
+    )
+        .prop_map(|(tokens, separators)| {
+            let mut out = Vec::new();
+            for (index, token) in tokens.iter().enumerate() {
+                if index > 0 {
+                    out.extend_from_slice(separators.get(index - 1).copied().unwrap_or(b" "));
+                }
+                out.extend_from_slice(token);
+            }
+            out
+        })
+}
+
+proptest::proptest! {
+    /// The stripper runs on a captured command line, which a forged marker can
+    /// fill with anything. It must never panic, never loop forever, and never
+    /// invent bytes: its output is always the input untouched or a subsequence.
+    #[test]
+    fn prop_stderr_redirection_stripper_is_safe(command in redirect_fuzz_command()) {
+        let cleaned = command::without_stderr_redirection(&command);
+        proptest::prop_assert!(cleaned.len() <= command.len());
+        let mut source = command.iter();
+        for byte in cleaned.iter() {
+            proptest::prop_assert!(
+                source.any(|candidate| candidate == byte),
+                "emitted a byte that is not a subsequence of the input"
+            );
+        }
+    }
+
+    /// Stripping may only REMOVE whole words (a redirection and its target); it
+    /// must never fabricate a word or splice two together. That is what stops it
+    /// from ever inventing a program name and pointing view selection at it.
+    ///
+    /// Note it may legitimately change which word comes first: `2>/dev/null lsof`
+    /// is a redirect written before its command, and cleaning it correctly
+    /// reveals `lsof`. What matters is that every surviving word was already
+    /// there.
+    #[test]
+    fn prop_stderr_stripping_only_removes_whole_words(command in redirect_fuzz_command()) {
+        let cleaned = command::without_stderr_redirection(&command);
+        let original_words = command
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>();
+        for word in cleaned.split(|byte| byte.is_ascii_whitespace()) {
+            if word.is_empty() {
+                continue;
+            }
+            proptest::prop_assert!(
+                original_words.contains(&word),
+                "stripping produced a word that was not in the command: {:?}",
+                String::from_utf8_lossy(word)
+            );
+        }
+    }
+
+    /// A command carrying a pipe, a command separator, or a subshell must come
+    /// back untouched, so those keep declining downstream exactly as before.
+    /// (Stdout redirects are excluded here only because telling `>` apart from
+    /// the `>` inside `2>`/`2>>` is the very thing under test; the table-driven
+    /// test above covers them directly.)
+    #[test]
+    fn prop_non_stderr_operators_are_never_stripped(command in redirect_fuzz_command()) {
+        let mut quote = None;
+        let mut blocking = false;
+        for byte in command.iter().copied() {
+            match quote {
+                Some(open) if byte == open => quote = None,
+                Some(_) => {}
+                None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+                None if matches!(byte, b'|' | b';' | b'(' | b')' | b'<') => blocking = true,
+                None => {}
+            }
+        }
+        if blocking {
+            let cleaned = command::without_stderr_redirection(&command);
+            proptest::prop_assert_eq!(
+                cleaned.as_ref(),
+                &command[..],
+                "a blocking operator must leave the command untouched"
+            );
+        }
+    }
+}
+
+proptest::proptest! {
+    /// The monotonicity contract, asserted directly instead of by example:
+    /// whatever the loose secret-file backstop recognizes, the classifier as a
+    /// whole must recognize. This is the property the table-driven test above
+    /// was trying to approximate, and it is what makes the structured pass
+    /// unable to ever *replace* the loose one.
+    #[test]
+    fn prop_loose_secret_detection_is_never_lost(command in redirect_fuzz_command()) {
+        if command::contains_sensitive_file_reader_loose_for_test(&command) {
+            proptest::prop_assert!(
+                is_sensitive_command(&command, &[]),
+                "loose backstop recognized a secret the classifier dropped: {:?}",
+                String::from_utf8_lossy(&command)
+            );
+        }
+    }
+
+    /// Same contract over secret-reader command lines specifically, including
+    /// the path-qualified spellings the loose pass exists to catch.
+    #[test]
+    fn prop_path_qualified_secret_readers_stay_sensitive(
+        reader in proptest::prop_oneof![
+            Just(&b"cat"[..]),
+            Just(&b"/bin/cat"[..]),
+            Just(&b"/usr/bin/head"[..]),
+            Just(&b"tail"[..]),
+            Just(&b"/usr/bin/sed"[..]),
+            Just(&b"/bin/more"[..]),
+            Just(&b"./scripts/cat"[..]),
+        ],
+        secret in proptest::prop_oneof![
+            Just(&b".env"[..]),
+            Just(&b".env.local"[..]),
+            Just(&b"~/.aws/credentials"[..]),
+            Just(&b"id_ed25519"[..]),
+            Just(&b"/root/.ssh/id_rsa"[..]),
+        ],
+        redirect in proptest::prop_oneof![
+            Just(&b""[..]),
+            Just(&b" 2>/dev/null"[..]),
+            Just(&b" 2>&1"[..]),
+            Just(&b" 2> /dev/null"[..]),
+            Just(&b" 2>>err.log"[..]),
+        ],
+        wrapper in proptest::prop_oneof![Just(&b""[..]), Just(&b"sudo "[..])],
+    ) {
+        let mut command = wrapper.to_vec();
+        command.extend_from_slice(reader);
+        command.push(b' ');
+        command.extend_from_slice(secret);
+        command.extend_from_slice(redirect);
+        proptest::prop_assert!(
+            is_sensitive_command(&command, &[]),
+            "secret reader not classified sensitive: {:?}",
+            String::from_utf8_lossy(&command)
+        );
+    }
+}
+
+#[test]
+fn a_path_qualified_secret_reader_stays_sensitive_with_a_redirect() {
+    // Named regression guard. Making the structured pass see past a stderr
+    // redirect first shipped as a *replacement* for the loose backstop, and the
+    // two disagree: the loose pass matches a reader by basename, the structured
+    // pass compared the whole word. So `/bin/cat .env 2>/dev/null` silently
+    // became Normal — the file's contents routed to the formatters and copied
+    // into the error pin, which re-prints matching lines in the failure footer.
+    // The fix is both directions at once: the structured pass now compares
+    // basenames too, and the loose pass runs unconditionally as a backstop.
+    for command in [
+        &b"/bin/cat .env 2>/dev/null"[..],
+        b"/usr/bin/head -5 ~/.aws/credentials 2>/dev/null",
+        b"/usr/bin/tail -n 20 /etc/secret.pem 2> /dev/null",
+        b"sudo /bin/cat /root/.ssh/id_rsa 2>>/tmp/err",
+        b"/bin/sed -n 1p .env 2>&1",
+        b"./scripts/cat id_rsa 2>/dev/null",
+        // The same spellings without a redirect were a pre-existing gap that
+        // the basename comparison closes as well.
+        b"/bin/cat .env",
+        b"/usr/local/bin/gh auth token",
+        b"/usr/local/bin/op read op://Private/GitHub/token",
+    ] {
+        assert!(
+            is_sensitive_command(command, &[]),
+            "must stay sensitive: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+    // Ordinary readers and ordinary commands are unaffected.
+    for command in [
+        &b"/bin/cat README.md 2>/dev/null"[..],
+        b"lsof -i 2>/dev/null",
+        b"gh issue list 2>/dev/null",
+    ] {
+        assert!(
+            !is_sensitive_command(command, &[]),
+            "must stay ordinary: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn a_stderr_redirect_must_end_its_word() {
+    // `2>&1` had no delimiter requirement, so `ls 2>&1extra` was cleaned to
+    // `ls extra` — a command the user never typed, whose extra word could carry
+    // a flag and steer view selection. Such a command is now left untouched.
+    for command in [&b"ls 2>&1extra"[..], b"netstat 2>&1-an", b"lsof 2>&1x"] {
+        let cleaned = command::without_stderr_redirection(command);
+        assert_eq!(
+            cleaned.as_ref(),
+            command,
+            "a malformed redirect must leave the command untouched: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+    // The well-formed spellings still strip.
+    assert_eq!(
+        command::without_stderr_redirection(b"ls 2>&1").as_ref(),
+        b"ls ",
+    );
+    assert_eq!(
+        command::without_stderr_redirection(b"ls 2>&1 -la").as_ref(),
+        b"ls  -la",
+    );
+}
+
+#[test]
+fn quoted_redirect_lookalikes_are_not_stripped() {
+    // The stripper's quote handling must agree with `shell_words`, including
+    // backslash escapes inside double quotes, or it can strip a `2>` the shell
+    // treats as ordinary text.
+    for command in [
+        &br#"grep "2>/dev/null" file"#[..],
+        &br#"echo '2>/dev/null'"#[..],
+        &br#"cat "a\" 2>x b\"c" .env"#[..],
+    ] {
+        let cleaned = command::without_stderr_redirection(command);
+        assert_eq!(
+            cleaned.as_ref(),
+            command,
+            "quoted text must survive: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn a_bypassed_command_stays_bypassed_even_when_its_arguments_look_sensitive() {
+    // `is_builtin_sensitive` scans every word, so `ssh myserver cat .env` reads
+    // as a dotenv access. If the `SensitiveText` arm outranked the bypass list,
+    // that would drop `ssh` from full pass-through to byte-preserving line
+    // coloring — GLIMPS reformatting an ssh session, which invariant 3 forbids
+    // and which the alt-screen latch does not cover for ssh specifically.
+    let cfg = Config::default();
+    let trust =
+        |command: &[u8]| command::classify(command, &cfg.bypass, &cfg.sensitive_commands).trust;
+
+    for command in [
+        &b"ssh myserver cat .env"[..],
+        b"ssh myserver /bin/cat .env",
+        b"ssh myserver ./scripts/cat .env",
+        b"vim ./scripts/cat .env",
+        b"ssh myserver tail .env.local",
+    ] {
+        assert_eq!(
+            trust(command),
+            CommandTrust::InteractiveBypass,
+            "bypass must outrank SensitiveText: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+
+    // Bypass still loses to a real Sensitive classification. Both route to
+    // `Collect::Passthrough`, so this is the same behavior either way, but the
+    // stricter label is the correct one.
+    assert_eq!(
+        trust(b"ssh myserver gh auth token"),
+        CommandTrust::Sensitive
+    );
+    assert_eq!(
+        trust(b"ssh myserver /bin/cat id_ed25519"),
+        CommandTrust::Sensitive
+    );
+
+    // And the ordinary classifications are untouched.
+    assert_eq!(trust(b"cat .env"), CommandTrust::SensitiveText);
+    assert_eq!(trust(b"/bin/cat .env"), CommandTrust::SensitiveText);
+    assert_eq!(trust(b"cat id_ed25519"), CommandTrust::Sensitive);
+    assert_eq!(trust(b"ssh myserver"), CommandTrust::InteractiveBypass);
+    assert_eq!(trust(b"more README.md"), CommandTrust::PagerText);
+    assert_eq!(trust(b"lsof 2>/dev/null"), CommandTrust::Normal);
+}
+
+#[test]
+fn a_substituting_redirect_target_is_left_alone() {
+    // A target this function cannot evaluate is one it must not silently drop.
+    for command in [
+        &b"cat .env 2>`id`"[..],
+        b"lsof -i 2>$LOGFILE",
+        b"lsof -i 2>$(mktemp)",
+    ] {
+        let cleaned = command::without_stderr_redirection(command);
+        assert_eq!(
+            cleaned.as_ref(),
+            command,
+            "substituting target must leave the command untouched: {}",
+            String::from_utf8_lossy(command)
+        );
+    }
+    // But `$` elsewhere in the command is ordinary and must not disable the
+    // feature — bailing on every `$VAR` would give up most real command lines.
+    assert_eq!(
+        command::without_stderr_redirection(b"lsof -p $PID 2>/dev/null").as_ref(),
+        b"lsof -p $PID ",
+    );
+    assert_eq!(
+        command_view(&Some(b"lsof -p $PID 2>/dev/null".to_vec())),
+        Some(CommandView::Lsof)
+    );
 }

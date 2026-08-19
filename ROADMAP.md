@@ -56,7 +56,7 @@ Goal: trustworthy enough to hand to strangers.
       master switch, configurable bypass, sensitive commands, failure summaries,
       and bounded buffering limits.
 - ☑ Large-output streaming switch (buffer/line caps → verbatim past threshold)
-- ☑ Golden-file test corpus (JSON/HTML goldens + **50** common-command byte-safety
+- ☑ Golden-file test corpus (JSON/HTML goldens + **53** common-command byte-safety
       fixtures — incl. already-ANSI git color/graph, jq -C colored JSON, 256-color,
       CR progress bars, top/lsof/netstat tables, emoji/CJK, binary; all byte-preserved)
 - ☑ `criterion` benchmarks + enforced latency budget in CI (latency-budget test

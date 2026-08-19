@@ -40,6 +40,26 @@ fn stacktrace_stream() -> Vec<u8> {
     [C, body.as_slice(), D].concat()
 }
 
+/// A command-aware table view over many rows. Bare `lsof` prints tens of
+/// thousands of lines, and each one is matched against the learned schema, so
+/// this is the per-line command-view cost at its worst.
+fn lsof_stream() -> Vec<u8> {
+    let head = b"\x1b]133;A\x07\x1b]7337;lsof\x07";
+    let heading = b"COMMAND     PID   USER   FD      TYPE             DEVICE   SIZE/OFF                NODE NAME\n";
+    let row = b"loginwind   588 krishv  txt       REG               1,17    3227536 1152921500312105867 /usr/lib/dyld\n";
+    [head.as_slice(), C, heading.as_slice(), &row.repeat(64), D].concat()
+}
+
+/// The same table behind `lsof 2>/dev/null`. The redirect is what makes
+/// `without_stderr_redirection` allocate instead of borrow, so this is the one
+/// stream that measures the owned path; `lsof_stream` only ever borrows.
+fn lsof_redirected_stream() -> Vec<u8> {
+    let head = b"\x1b]133;A\x07\x1b]7337;lsof 2>/dev/null\x07";
+    let heading = b"COMMAND     PID   USER   FD      TYPE             DEVICE   SIZE/OFF                NODE NAME\n";
+    let row = b"loginwind   588 krishv  txt       REG               1,17    3227536 1152921500312105867 /usr/lib/dyld\n";
+    [head.as_slice(), C, heading.as_slice(), &row.repeat(64), D].concat()
+}
+
 fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("process");
 
@@ -49,6 +69,8 @@ fn bench(c: &mut Criterion) {
         ("json_output", json_stream()),
         ("diff_output", diff_stream()),
         ("stacktrace_output", stacktrace_stream()),
+        ("lsof_output", lsof_stream()),
+        ("lsof_output_redirected", lsof_redirected_stream()),
     ] {
         group.throughput(Throughput::Bytes(data.len() as u64));
         group.bench_function(name, |b| {

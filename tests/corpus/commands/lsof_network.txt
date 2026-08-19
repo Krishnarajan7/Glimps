@@ -1,0 +1,11 @@
+COMMAND     PID   USER   FD      TYPE             DEVICE   SIZE/OFF                NODE NAME
+postgres   1467 krishv    8u     IPv4 0x0000000000000001        0t0                 TCP 127.0.0.1:5432 (LISTEN)
+JavaAppli 79307 krishv   12u     IPv6 0x0000000000000002        0t0                 TCP 127.0.0.1:50720 (LISTEN)
+JavaAppli 79307 krishv   24u     IPv6 0x0000000000000003        0t0                 TCP 127.0.0.1:8080->127.0.0.1:52694 (ESTABLISHED)
+JavaAppli 79307 krishv   31u     IPv6 0x0000000000000004        0t0                 TCP 127.0.0.1:8080->127.0.0.1:52258 (CLOSE_WAIT)
+UserEvent   584 krishv    4   NPOLICY
+UserEvent   584 krishv    6u   KQUEUE                                                   count=0, state=0x8
+Dropbox    1042 krishv   12u     unix 0x0000000000000005        0t0                     /tmp/dropbox.sock
+loginwind   588 krishv  DEL      REG               1,17                          30030075 /private/var/tmp/gone
+lsof: WARNING: can't stat() nullfs file system /System/Volumes/Data
+      Output information may be incomplete.

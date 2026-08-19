@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 42cf25613d371e852f13986fee7ef46915aec3d2f38ff5ba0001a7e0a992358d # shrinks to lines = [[35, 35, 32, 97, 46, 46, 46, 97, 32, 32, 91, 97, 104, 101, 97, 100, 32, 49, 93]]
+cc e11c24bdac9bfcd185357c269b4b6989f917d2eac5d80af25ca2019f7d4e5b79 # shrinks to command = [50, 62, 62, 32, 108, 115, 111, 102]
+cc 593cb81f8c128e082da9942488e7ed5d93294680dff4797b763a28431b093284 # shrinks to command = [50, 62, 38, 49]

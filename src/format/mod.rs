@@ -227,6 +227,10 @@ pub struct Formatter {
     /// Column starts and roles learned from this `df` invocation. BSD/macOS,
     /// GNU/Linux and flag combinations expose different schemas.
     df_columns: Vec<linefmt::DfColumn>,
+    /// Column spans and roles learned from this `lsof` invocation. Flags add,
+    /// rename and reorder columns, and rows for kernel objects leave some of
+    /// them empty, so values are placed by byte position against this schema.
+    lsof_columns: Vec<linefmt::LsofColumn>,
     /// Read-only error-line observer for the failure footer (F3). Fed the
     /// output zone's bytes — including in-zone Pass escapes, which is where
     /// colored compiler errors live — and never emits a byte itself.
@@ -302,6 +306,7 @@ impl Formatter {
             command_output_line_count: 0,
             ps_columns: Vec::new(),
             df_columns: Vec::new(),
+            lsof_columns: Vec::new(),
             pin: pin::ErrorPin::new(),
             pin_armed: false,
             markdown_fence: None,
@@ -415,10 +420,7 @@ impl Formatter {
                     self.pending_command = self.take_command_metadata();
                     self.command_started_at = Some(Instant::now());
                     self.command_had_visible_output = false;
-                    self.command_output_line_count = 0;
-                    self.ps_columns.clear();
-                    self.df_columns.clear();
-                    self.markdown_fence = None;
+                    self.reset_command_line_state();
                     let trust = self
                         .pending_command
                         .as_deref()
@@ -455,11 +457,9 @@ impl Formatter {
                     self.pending_command = None;
                     self.command_started_at = None;
                     self.command_had_visible_output = false;
-                    self.command_output_line_count = 0;
-                    self.ps_columns.clear();
+                    self.reset_command_line_state();
                     self.pin.reset();
                     self.pin_armed = false;
-                    self.markdown_fence = None;
                 }
             }
         }
@@ -1005,6 +1005,21 @@ impl Formatter {
         out
     }
 
+    /// Drop everything a line formatter learned from the command that just
+    /// ended or is about to begin.
+    ///
+    /// Both command boundaries call this, so the two reset sites cannot drift
+    /// apart — they had already drifted once, with `ps` cleared at both and
+    /// `df` at only one. A learned schema leaking into the next command would
+    /// mean coloring its output against the wrong table.
+    fn reset_command_line_state(&mut self) {
+        self.command_output_line_count = 0;
+        self.ps_columns.clear();
+        self.df_columns.clear();
+        self.lsof_columns.clear();
+        self.markdown_fence = None;
+    }
+
     fn emit_stream_line(&mut self, out: &mut Vec<u8>, line: &[u8]) {
         if let Some(formatted) = self.format_command_line(line) {
             out.extend_from_slice(&formatted);
@@ -1057,7 +1072,9 @@ impl Formatter {
             CommandView::ScutilDns => linefmt::colorize_scutil_dns_line(line, &self.theme),
             CommandView::Route => linefmt::colorize_route_line(line, &self.theme),
             CommandView::Netstat => linefmt::colorize_netstat_line(line, &self.theme),
-            CommandView::Lsof => linefmt::colorize_lsof_line(line, &self.theme),
+            CommandView::Lsof => {
+                linefmt::colorize_lsof_line(line, &self.theme, &mut self.lsof_columns)
+            }
             CommandView::Launchctl => linefmt::colorize_launchctl_line(line, &self.theme),
             CommandView::Pmset => linefmt::colorize_pmset_line(line, &self.theme),
             CommandView::NetworkSetup => linefmt::colorize_networksetup_line(line, &self.theme),
@@ -1558,7 +1575,13 @@ fn registered_command_view(name: &str) -> Option<CommandView> {
 }
 
 fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
-    let cmd = command.as_deref()?;
+    // A redirection of stderr leaves stdout on the terminal, so the command
+    // still owns what is on screen and its view still applies. Stripping it
+    // here — the one place views are chosen — covers every view at once and
+    // leaves the bypass and sensitive-command classifiers untouched. Pipes and
+    // stdout redirects survive this call and keep declining downstream.
+    let cleaned = command::without_stderr_redirection(command.as_deref()?);
+    let cmd = cleaned.as_ref();
     // Cargo permits wrappers with quoted environment values. The generic
     // first-word helper is intentionally lightweight and can split those
     // values, so let the stricter shell-word parser recognize Cargo first.
@@ -1807,15 +1830,29 @@ fn netstat_command_view(command: &[u8]) -> Option<CommandView> {
         .then_some(CommandView::Netstat)
 }
 
+/// Select the `lsof` table view.
+///
+/// Bare `lsof`, `-i`, `-p`, `-u`, `+D` and any filter combination all print the
+/// same `COMMAND … NAME` table, so the view is not gated on a flag list.
+///
+/// What actually keeps the non-table modes untouched is the line formatter,
+/// which colors nothing until it has read a `COMMAND … NAME` heading — `-t`
+/// (bare pids), `-v` (a version report) and `-F` (machine-readable field
+/// output) print no such heading. The `-F` check below is therefore an
+/// early, explicit statement of intent rather than the load-bearing guard;
+/// note it does not catch `F` bundled into a single-dash group such as
+/// `-nPFpcfn`, which the heading requirement handles instead.
 fn lsof_command_view(command: &[u8]) -> Option<CommandView> {
     let words = shell_words(command)?;
-    words
+    let lsof_index = words
         .iter()
-        .skip(1)
-        .any(|arg| {
-            std::str::from_utf8(arg).is_ok_and(|text| text == "-i" || text.starts_with("-i"))
-        })
-        .then_some(CommandView::Lsof)
+        .position(|word| word.rsplit(|byte| *byte == b'/').next() == Some(b"lsof"))?;
+    let field_output = words
+        .get(lsof_index + 1..)
+        .unwrap_or_default()
+        .iter()
+        .any(|arg| arg.starts_with(b"-F"));
+    (!field_output).then_some(CommandView::Lsof)
 }
 
 fn launchctl_command_view(command: &[u8]) -> Option<CommandView> {

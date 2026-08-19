@@ -54,6 +54,7 @@ pub use documents::{
 };
 pub use git::{colorize_git_line, GitView};
 pub use json_lines::{colorize_json_fragment_line, colorize_json_line, is_json_line};
+pub(crate) use network::LsofColumn;
 pub use network::{
     colorize_dns_line, colorize_ifconfig_line, colorize_launchctl_line, colorize_lsof_line,
     colorize_netstat_line, colorize_networksetup_line, colorize_ping_line, colorize_pmset_line,

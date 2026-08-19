@@ -330,11 +330,19 @@ new raw shell with `GLIMPS=0 zsh`.
 - Homebrew and crates.io installs are not live yet. Use the repo-local dogfood
   session or `cargo install --path .` from a checkout until the tap/release flow
   is verified from a real version tag.
+- **Pipes and stdout redirects turn command-aware views off.** With
+  `lsof -i | grep LISTEN` the text on screen is `grep`'s output, and with
+  `lsof > out.txt` the only thing reaching the terminal is stderr, so applying
+  `lsof`'s view to either would color bytes it does not own. Silencing *stderr*
+  is fine and keeps formatting: `lsof 2>/dev/null`, `2>>file` and `2>&1` all
+  still get the full view. Whole-document formatting (JSON, HTML) and the
+  streaming log/HTTP/stack-trace coloring are unaffected either way.
 - The current formatter handles whole JSON/HTML/diff/HTTP-response documents,
   streaming log/HTTP/stack-trace lines, and command-aware `cd`, `find`, `ls`,
   `du`, `df`, `ps`, `ping`, `dig`/`nslookup`, macOS networking output (`ifconfig`,
-  `scutil --dns`, `route get default`, `netstat -rn`, `lsof -i`,
-  `networksetup`), macOS disk and file metadata (`diskutil info`, `GetFileInfo`, `xattr -l`), system status
+  `scutil --dns`, `route get default`, `netstat -rn`, `networksetup`),
+  open files and sockets (`lsof` and its flags, read from the table schema each
+  invocation prints), macOS disk and file metadata (`diskutil info`, `GetFileInfo`, `xattr -l`), system status
   output (`launchctl list`, `pmset -g`),
   `man`/help output and manual-index searches (`whatis`, `apropos`, `man -k`, `man -f`), Markdown project files, YAML/TOML/INI/dotenv-style config
   files, `.gitignore` patterns, `.gitleaksignore` fingerprints, adaptive CSV/TSV/PSV tables, SQL query files,
