@@ -46,7 +46,7 @@ pub fn detect(bytes: &[u8]) -> bool {
 /// Whether an in-progress buffer has a document-level HTML/XML root strong
 /// enough to survive a quiet network interval. This deliberately rejects
 /// generic tag-shaped text such as an interactive `<choose a value>` prompt.
-pub(crate) fn confident_document_prefix(bytes: &[u8]) -> bool {
+fn confident_document_prefix(bytes: &[u8]) -> bool {
     let bytes = trim_ascii_ws_start(bytes);
     markup_name_prefix(bytes, b"!doctype")
         || markup_name_prefix(bytes, b"?xml")
@@ -199,6 +199,12 @@ impl super::BufferedFormatter for Html {
     }
     fn needs_crlf(&self) -> bool {
         true // re-indents content with bare `\n`
+    }
+
+    fn holds_across_stall(&self, buf: &[u8]) -> bool {
+        // `could_start` is a bare `<` — far too loose to withhold bytes on.
+        // Only a confident document prefix earns a hold.
+        confident_document_prefix(buf)
     }
 }
 

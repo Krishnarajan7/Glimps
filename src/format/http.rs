@@ -3,7 +3,7 @@
 //! The streaming line formatter already colors standalone `HTTP/1.1 404` lines.
 //! This formatter handles the richer case: a response starts with a status line,
 //! contains headers, then may contain a JSON/HTML body. It keeps detection tight
-//! (`HTTP/` at the first non-whitespace byte plus a complete header block) so
+//! (`HTTP/` at the first non-whitespace byte opening a valid status line) so
 //! ordinary text is not captured.
 
 use super::theme::Theme;
@@ -13,7 +13,13 @@ pub struct HttpResponse;
 
 impl super::BufferedFormatter for HttpResponse {
     fn could_start(&self, head: &[u8]) -> bool {
-        head.starts_with(b"HTTP/") && looks_like_headers(head)
+        // The first line alone is the evidence, not the header block: curl's
+        // stdout is line-buffered at a TTY, so the status line arrives in its
+        // own flush and the headers routinely land a chunk later. Demanding a
+        // `Name: value` line in the same chunk pushed every such response onto
+        // the streaming path for good. Eagerness is safe by design — an
+        // unconfirmed candidate is emitted verbatim at finalize.
+        head.starts_with(b"HTTP/") && starts_like_status_line(head)
     }
 
     fn try_format(&self, bytes: &[u8], theme: &Theme) -> Option<Vec<u8>> {
@@ -27,13 +33,85 @@ impl super::BufferedFormatter for HttpResponse {
     fn needs_crlf(&self) -> bool {
         true
     }
+
+    fn holds_across_stall(&self, buf: &[u8]) -> bool {
+        // A *complete* valid status line is the evidence: nothing an
+        // interactive prompt produces looks like `HTTP/2 200` followed by a
+        // newline, and both gaps a real response has — status line to headers
+        // (curl's next line-buffered write), header block to body (a network
+        // round trip) — land after exactly that state. Without a hold the
+        // 40 ms stall flush releases the run in one of those gaps, dropping it
+        // to pass-through for the rest of the command.
+        //
+        // An *unterminated* first line never holds: a prompt that merely opens
+        // with `HTTP/...` and waits for input must stay visible (liveness).
+        //
+        // Trimming matches `try_format` exactly, so holding a run always
+        // implies it still has a real chance of formatting.
+        let buf = trim_leading_newlines(buf);
+        buf.starts_with(b"HTTP/") && complete_status_line(buf)
+    }
 }
 
-fn looks_like_headers(bytes: &[u8]) -> bool {
-    bytes
-        .split(|&b| b == b'\n')
-        .skip(1)
-        .any(|line| line.iter().position(|&b| b == b':').is_some_and(|i| i > 0))
+/// Skip the leading CR/LF bytes [`try_format`] ignores — and only those, so a
+/// run starting with a space (which `try_format` would reject) is never held.
+fn trim_leading_newlines(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !matches!(byte, b'\r' | b'\n'))
+        .unwrap_or(bytes.len());
+    &bytes[start..]
+}
+
+/// Whether `head` (which starts with `HTTP/`) opens with something that is —
+/// or could still grow into — a status line: `HTTP/<ver> <3-digit code> …`.
+/// A first line already terminated by a newline must parse fully; a line still
+/// arriving is judged on the prefix seen so far.
+fn starts_like_status_line(head: &[u8]) -> bool {
+    let (line, complete) = match head.iter().position(|&b| b == b'\n') {
+        Some(end) => (&head[..end], true),
+        None => (head, false),
+    };
+    let line = trim_trailing_crs(line);
+    let mut fields = line
+        .split(|&b| b == b' ' || b == b'\t')
+        .filter(|field| !field.is_empty());
+    let Some(version) = fields.next() else {
+        return false;
+    };
+    if !version.starts_with(b"HTTP/") {
+        return false;
+    }
+    let Some(code) = fields.next() else {
+        // Only the version has arrived; plausible iff the line is still open.
+        return !complete;
+    };
+    if !code.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    if code.len() == 3 {
+        return true;
+    }
+    // A shorter code is a plausible prefix only while both the line and the
+    // code field are still open.
+    !complete && code.len() < 3 && fields.next().is_none()
+}
+
+/// Whether `bytes` (which starts with `HTTP/`) begins with a *complete*,
+/// newline-terminated, valid status line.
+fn complete_status_line(bytes: &[u8]) -> bool {
+    let Some(end) = bytes.iter().position(|&b| b == b'\n') else {
+        return false;
+    };
+    starts_like_status_line(&bytes[..=end])
+}
+
+fn trim_trailing_crs(line: &[u8]) -> &[u8] {
+    let end = line
+        .iter()
+        .rposition(|&b| b != b'\r')
+        .map_or(0, |last| last + 1);
+    &line[..end]
 }
 
 pub fn try_format(bytes: &[u8], theme: &Theme) -> Option<Vec<u8>> {
@@ -80,11 +158,34 @@ pub fn try_format(bytes: &[u8], theme: &Theme) -> Option<Vec<u8>> {
     formatted_any.then(|| out.into_bytes())
 }
 
+/// Split the header block from the body at the first blank line.
+///
+/// Tolerates any number of CRs before each LF. The bytes GLIMPS sees are not
+/// the bytes `curl` wrote: the inner PTY has `ONLCR` on, so it expands curl's
+/// own `\r\n` to `\r\r\n` and the separator arrives as `\r\r\n\r\r\n`. Matching
+/// only the literal `\r\n\r\n` / `\n\n` forms means every real terminal response
+/// is declined while a response read from a file formats fine.
 fn split_header_body(text: &str) -> Option<(&str, &str)> {
-    if let Some(i) = text.find("\r\n\r\n") {
-        return Some((&text[..i], &text[i + 4..]));
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = bytes
+        .get(from..)
+        .and_then(|rest| rest.iter().position(|&byte| byte == b'\n'))
+    {
+        // `end_of_headers` terminates the last header line; the blank line that
+        // follows it is CRs only, then its own LF at `blank`.
+        let end_of_headers = from + offset;
+        let mut blank = end_of_headers + 1;
+        while bytes.get(blank) == Some(&b'\r') {
+            blank += 1;
+        }
+        // Every byte scanned here is ASCII, so both indices are char boundaries.
+        if bytes.get(blank) == Some(&b'\n') {
+            return Some((&text[..end_of_headers], &text[blank + 1..]));
+        }
+        from = end_of_headers + 1;
     }
-    text.find("\n\n").map(|i| (&text[..i], &text[i + 2..]))
+    None
 }
 
 fn valid_status_line(line: &str) -> bool {
@@ -223,6 +324,36 @@ mod tests {
     }
 
     #[test]
+    fn status_line_evidence_matches_real_first_chunks() {
+        // Complete first lines, with every CR shape the PTY produces.
+        assert!(starts_like_status_line(b"HTTP/2 200 \r\r\n"));
+        assert!(starts_like_status_line(
+            b"HTTP/1.1 301 Moved Permanently\r\n"
+        ));
+        assert!(starts_like_status_line(b"HTTP/1.1 404 Not Found\nmore"));
+        // Still-arriving first lines: plausible prefixes are accepted...
+        assert!(starts_like_status_line(b"HTTP/"));
+        assert!(starts_like_status_line(b"HTTP/1.1 "));
+        assert!(starts_like_status_line(b"HTTP/1.1 20"));
+        assert!(starts_like_status_line(b"HTTP/1.1 200 OK"));
+        // ...but not text that can no longer become a status line.
+        assert!(!starts_like_status_line(b"HTTP/2 is the successor"));
+        assert!(!starts_like_status_line(b"HTTP/1.1 20 OK"));
+        assert!(!starts_like_status_line(b"HTTP/2\r\n"));
+        assert!(!starts_like_status_line(b"HTTP/1.1 20\n"));
+        assert!(!starts_like_status_line(b"HTTP/1.1 2000 OK\n"));
+    }
+
+    #[test]
+    fn only_a_terminated_status_line_holds_across_a_stall() {
+        use super::super::BufferedFormatter;
+        assert!(HttpResponse.holds_across_stall(b"HTTP/2 200 \r\r\n"));
+        assert!(HttpResponse.holds_across_stall(b"HTTP/1.1 200 OK\r\nServer: x\r\n"));
+        assert!(!HttpResponse.holds_across_stall(b"HTTP/1.1 200 OK"));
+        assert!(!HttpResponse.holds_across_stall(b"HTTP/2 waiting\n"));
+    }
+
+    #[test]
     fn declines_incomplete_headers() {
         assert!(try_format(b"HTTP/1.1 200 OK\nContent-Type: text/html", &Theme::plain()).is_none());
         assert!(try_format(b"plain text\n\nbody", &Theme::plain()).is_none());
@@ -235,5 +366,62 @@ mod tests {
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("\x1b[38;5;220m404\x1b[0m"));
         assert!(s.contains("\x1b[35mHTML body\x1b[0m"));
+    }
+
+    // ---- property tests ----------------------------------------------------
+
+    proptest::proptest! {
+        /// `try_format` never panics on arbitrary bytes, and when it claims a
+        /// run its output is valid UTF-8. The function slices a `&str` at byte
+        /// indices found by scanning for LF/CR, so a boundary mistake would be
+        /// a panic rather than a wrong answer — exactly what this pins.
+        #[test]
+        fn prop_try_format_never_panics_and_emits_utf8(bytes: Vec<u8>) {
+            if let Some(out) = try_format(&bytes, &Theme::plain()) {
+                proptest::prop_assert!(std::str::from_utf8(&out).is_ok());
+            }
+        }
+
+        /// The same, over inputs shaped like real responses, so the property
+        /// exercises the split/render path instead of declining almost always.
+        /// Line endings are drawn from every form a PTY can produce, including
+        /// the `\r\r\n` that ONLCR expansion creates.
+        #[test]
+        fn prop_response_shaped_input_never_panics(
+            eol in proptest::sample::select(vec!["\n", "\r\n", "\r\r\n", "\r\r\r\n"]),
+            code in 0u32..2000,
+            headers in proptest::collection::vec("[ -~]{0,40}", 0..6),
+            body in "[ -~\n]{0,120}",
+        ) {
+            let mut input = format!("HTTP/1.1 {code} Status{eol}");
+            for header in &headers {
+                input.push_str(header);
+                input.push_str(eol);
+            }
+            input.push_str(eol);
+            input.push_str(&body);
+            if let Some(out) = try_format(input.as_bytes(), &Theme::plain()) {
+                proptest::prop_assert!(std::str::from_utf8(&out).is_ok());
+            }
+        }
+
+        /// Splitting is agnostic to how many CRs precede each LF: the same
+        /// response with any of the PTY line endings renders identically once
+        /// the endings themselves are normalized.
+        #[test]
+        fn prop_cr_padding_does_not_change_the_render(
+            code in 100u32..600,
+            value in "[ -~]{0,30}",
+        ) {
+            let render = |eol: &str| {
+                let input =
+                    format!("HTTP/1.1 {code} OK{eol}X-Test: {value}{eol}{eol}plain body");
+                try_format(input.as_bytes(), &Theme::plain())
+            };
+            let baseline = render("\r\n");
+            for eol in ["\n", "\r\r\n", "\r\r\r\n"] {
+                proptest::prop_assert_eq!(render(eol), baseline.clone());
+            }
+        }
     }
 }

@@ -126,7 +126,46 @@ trait BufferedFormatter {
     /// `true`; ones that *preserve* the user's own line endings (diff) return
     /// `false` — running those through `push_crlf` would double their CRs.
     fn needs_crlf(&self) -> bool;
+    /// Whether a partially collected run holding `buf` should stay buffered when
+    /// the stream goes quiet (see [`Formatter::flush_stalled_output`]).
+    ///
+    /// Defaults to `false`: a quiet buffer is released so an unterminated
+    /// interactive prompt is never withheld from the user. Override only when
+    /// `buf` carries evidence an interactive prompt cannot produce — a
+    /// whole-run formatter needs the whole run, and remote output routinely
+    /// pauses mid-response.
+    ///
+    /// Deliberately a *stricter*, separate predicate from
+    /// [`could_start`](Self::could_start): over-eagerness there is free (an
+    /// unconfirmed candidate is emitted verbatim at the run's end), but
+    /// over-eagerness here holds back bytes the user may be waiting on.
+    fn holds_across_stall(&self, _buf: &[u8]) -> bool {
+        false
+    }
 }
+
+/// The longest a buffered run may be withheld once it has started being *held*
+/// across quiet intervals, before liveness wins and it is released verbatim.
+///
+/// [`BufferedFormatter::holds_across_stall`] exists for the one-network-round-trip
+/// gap between a response's headers and its body. It must not turn into an
+/// unbounded hold: a body that trickles below the [`Config::limits`] buffer cap —
+/// `curl -i -N` on an SSE or long-poll endpoint, a slow chunked response — would
+/// otherwise be withheld for the entire life of the command, and a terminal that
+/// shows nothing is indistinguishable from a hang.
+///
+/// This is deliberately the hold's **total age**, not its longest quiet gap.
+/// Measuring consecutive silence does not bound anything: a stream delivering a
+/// token every 40–500 ms restarts that clock forever and is never released. The
+/// anchor is therefore set once, on the first tick that decides to hold, and
+/// arriving bytes do not move it — so the bound also has to be enforced where
+/// bytes arrive ([`Formatter::push_output`]), since a gapless burst produces no
+/// stall tick to enforce it.
+///
+/// The result is never worse than not holding at all: without a hold a run is
+/// released at the first quiet tick, and with one it is released at the latest
+/// after this budget.
+const MAX_STALL_HOLD: Duration = Duration::from_millis(500);
 
 /// A **streaming** formatter: colors a single complete output line as it streams
 /// (suits unbounded output like `tail -f`). Implemented by the log-severity /
@@ -214,6 +253,12 @@ pub struct Formatter {
     trusted_exit_code: Option<i32>,
     /// Monotonic start time for the running command, captured at output start.
     command_started_at: Option<Instant>,
+    /// When the current buffered run first started being *held* across a quiet
+    /// interval, bounding the hold in wall-clock time (see [`MAX_STALL_HOLD`]).
+    /// Set once and deliberately NOT moved by arriving bytes — a stream that
+    /// trickles would otherwise extend its own hold indefinitely. Cleared when
+    /// the run is released or finalized.
+    hold_started_at: Option<Instant>,
     /// Whether this command produced a visible GLIMPS boundary/output. Used to
     /// avoid noisy success footers for silent commands, while still surfacing
     /// failures like `false`.
@@ -295,6 +340,7 @@ impl Formatter {
             clock,
             config,
             pending_separator: false,
+            hold_started_at: None,
             pending_command: None,
             metadata: None,
             trusted_command: None,
@@ -482,9 +528,40 @@ impl Formatter {
             }
             Collect::Buffer(mut buf) => {
                 // Separator was already emitted when this run committed to text.
-                if buf.len().saturating_add(seg.len()) > self.config.limits.buffer_cap {
+                if seg.iter().copied().any(is_binary_byte) {
+                    // The run committed to text and only *then* turned binary —
+                    // a response body with embedded NULs, a document with a
+                    // binary tail. Never reformat binary (invariant #3): release
+                    // what is held and stream the rest verbatim.
+                    //
+                    // Only the control-byte half of `looks_binary` applies here.
+                    // A multibyte character split across this chunk boundary is
+                    // a buffering artifact, not corruption (invariant #4), and
+                    // the UTF-8 validity of the whole run is still checked by
+                    // each `try_format` at finalize.
+                    self.hold_started_at = None;
+                    self.release_buffer_streaming(&buf, out);
+                    out.extend_from_slice(seg);
+                    Collect::Passthrough
+                } else if self
+                    .hold_started_at
+                    .is_some_and(|at| at.elapsed() >= MAX_STALL_HOLD)
+                {
+                    // The hold has outlived its budget. Arriving bytes must not
+                    // extend it: a stream that delivers a chunk every few
+                    // hundred milliseconds never produces a quiet tick long
+                    // enough to be released there, so the bound is enforced here
+                    // too. Release the held lines through the per-line path
+                    // (same bytes, streaming color only) and let the rest
+                    // stream live.
+                    self.hold_started_at = None;
+                    self.release_buffer_streaming(&buf, out);
+                    out.extend_from_slice(seg);
+                    Collect::Passthrough
+                } else if buf.len().saturating_add(seg.len()) > self.config.limits.buffer_cap {
                     // Too big to hold/format: flush what we have and stream the rest.
-                    out.extend_from_slice(&buf);
+                    self.hold_started_at = None;
+                    self.release_buffer_streaming(&buf, out);
                     out.extend_from_slice(seg);
                     Collect::Passthrough
                 } else {
@@ -966,6 +1043,23 @@ impl Formatter {
         }
     }
 
+    /// Release a buffered run that will no longer be formatted whole. Its
+    /// complete lines take the same per-line streaming path a non-candidate
+    /// run takes (so a status line or log line still gets its color), and the
+    /// newline-less tail is emitted verbatim. Bytes are preserved exactly;
+    /// only SGR may be added, and `emit_line` already refuses to wrap a line
+    /// containing binary bytes (invariant #3). ESC never reaches a buffered
+    /// segment — the scanner routes every escape byte to `Pass`.
+    fn release_buffer_streaming(&mut self, buf: &[u8], out: &mut Vec<u8>) {
+        if self.streaming.is_empty() {
+            out.extend_from_slice(buf);
+            return;
+        }
+        if let Collect::Stream(tail, _) = self.push_stream(Vec::new(), false, buf, out) {
+            out.extend_from_slice(&tail);
+        }
+    }
+
     /// Release output held across a quiet PTY interval.
     ///
     /// Interactive questions, password prompts, and shell confirmations usually
@@ -984,14 +1078,24 @@ impl Formatter {
             }
             Collect::Stream(line, emitted_prefix) => Collect::Stream(line, emitted_prefix),
             Collect::Buffer(buf) if !buf.is_empty() => {
-                if html::confident_document_prefix(&buf) {
-                    // A real document can arrive in bursts (remote HTTP
-                    // responses commonly pause for hundreds of milliseconds).
-                    // Keep it buffered for whole-document formatting. Ambiguous
-                    // tag-shaped prompts still take the pass-through branch.
+                // Bound the hold before consulting the registry: that also caps
+                // how often a predicate rescans the whole buffer.
+                let held_for = self
+                    .hold_started_at
+                    .get_or_insert_with(Instant::now)
+                    .elapsed();
+                if held_for < MAX_STALL_HOLD
+                    && self.buffered.iter().any(|f| f.holds_across_stall(&buf))
+                {
+                    // A real document or HTTP response can arrive in bursts
+                    // (remote responses commonly pause for hundreds of
+                    // milliseconds between headers and body). Keep it buffered
+                    // for whole-run formatting. Ambiguous content — tag-shaped
+                    // prompts, a bare `{` — still takes the pass-through branch.
                     Collect::Buffer(buf)
                 } else {
-                    out.extend_from_slice(&buf);
+                    self.hold_started_at = None;
+                    self.release_buffer_streaming(&buf, &mut out);
                     Collect::Passthrough
                 }
             }
@@ -1232,6 +1336,8 @@ impl Formatter {
     /// the raw terminal); if it doesn't parse it is emitted verbatim. A
     /// whitespace-only sniff buffer is emitted verbatim.
     fn finalize(&mut self, out: &mut Vec<u8>) {
+        // Whatever was held is being resolved now; the hold clock starts over.
+        self.hold_started_at = None;
         match std::mem::replace(&mut self.collect, Collect::Idle) {
             Collect::Buffer(buf) => {
                 let delimited = self.pending_delimited_document().and_then(|delimiter| {
@@ -1258,8 +1364,12 @@ impl Formatter {
                             out.extend_from_slice(&formatted);
                         }
                     }
-                    // Not a type we format: the user's bytes, emitted exactly as-is.
-                    None => out.extend_from_slice(&buf),
+                    // Not a type we format whole — but the run may still hold
+                    // lines the streaming colorizers know (a candidate that
+                    // opened like a document and turned out to be, say, a lone
+                    // `HTTP/... 404` status line). Release it through the same
+                    // per-line path a non-candidate run takes.
+                    None => self.release_buffer_streaming(&buf, out),
                 }
             }
             Collect::Sniff(acc) => {

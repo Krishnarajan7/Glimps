@@ -751,6 +751,411 @@ fn http_response_is_structured_with_body_formatting() {
 }
 
 #[test]
+fn a_response_with_pty_doubled_crs_is_still_formatted() {
+    // The bytes GLIMPS sees are NOT the bytes curl wrote. The inner PTY has
+    // `ONLCR` on, so it expands curl's own `\r\n` to `\r\r\n` and the
+    // header/body separator arrives as `\r\r\n\r\r\n`. A captured-to-file
+    // response has clean `\r\n` and formats fine, which is exactly why this
+    // was invisible until the real PTY stream was inspected.
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    let response = b"HTTP/1.1 301 Moved Permanently\r\r\nContent-Type: text/html\r\r\nContent-Length: 795\r\r\n\r\r\n<html><body>Moved</body></html>";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(response));
+    out.extend_from_slice(&f.process(D));
+
+    let rendered = String::from_utf8(out).unwrap();
+    let badge = String::from_utf8(badge("HTTP")).unwrap();
+    assert!(
+        rendered.contains(&badge),
+        "a PTY-doubled-CR response was not recognized: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("HTML body"),
+        "the body was not formatted: {rendered:?}"
+    );
+}
+
+#[test]
+fn the_header_body_split_accepts_every_line_ending_a_pty_can_produce() {
+    // `\r\n\r\n` straight from the wire, `\n\n` from a stripped stream, and
+    // `\r\r\n\r\r\n` after ONLCR expansion must all split the same way.
+    for separator in ["\r\n\r\n", "\n\n", "\r\r\n\r\r\n", "\r\r\r\n\r\r\r\n"] {
+        let mut f = Formatter::build(Clock::Off, true, Config::default());
+        f.theme = Theme::plain();
+        let eol = &separator[..separator.len() / 2];
+        let response =
+            format!("HTTP/1.1 200 OK{eol}Content-Type: application/json{separator}{{\"ok\":true}}");
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        out.extend_from_slice(&f.process(response.as_bytes()));
+        out.extend_from_slice(&f.process(D));
+
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("JSON body") && rendered.contains("\"ok\": true"),
+            "separator {separator:?} was not recognized: {rendered:?}"
+        );
+    }
+}
+
+#[test]
+fn stalled_http_response_survives_the_gap_between_headers_and_body() {
+    // A remote `curl -i` writes its header block as soon as it parses it, then
+    // goes quiet for a network round trip before the body lands. The 40 ms
+    // stall flush must not release the run in that gap: doing so drops it to
+    // pass-through for the rest of the command and the response is never
+    // formatted, even though the bytes are perfectly recognizable.
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    let headers = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: sid=1\r\n\r\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"curl -i https://example.com/")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(headers));
+
+    assert!(
+        f.flush_stalled_output().is_empty(),
+        "an HTTP response must stay buffered while its body is in flight"
+    );
+
+    out.extend_from_slice(&f.process(b"{\"ok\":true}"));
+    out.extend_from_slice(&f.process(D));
+
+    // Assert on the badge bytes, not the substring "HTTP" — the raw status
+    // line contains that too, so a substring check would pass on a regression.
+    let badge = String::from_utf8(badge("HTTP")).unwrap();
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(
+        rendered.contains(&badge),
+        "the HTTP badge is missing: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("JSON body"),
+        "the body was not formatted: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("\"ok\": true"),
+        "the JSON body was not re-indented: {rendered:?}"
+    );
+}
+
+#[test]
+fn stalled_http_response_formats_identically_to_an_unstalled_one() {
+    let response =
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: sid=1\r\n\r\n{\"ok\":true}";
+    let split = response.len() - "{\"ok\":true}".len();
+
+    let mut whole = Formatter::build(Clock::Off, true, Config::default());
+    whole.theme = Theme::plain();
+    let mut unstalled = Vec::new();
+    unstalled.extend_from_slice(&whole.process(C));
+    unstalled.extend_from_slice(&whole.process(response));
+    unstalled.extend_from_slice(&whole.process(D));
+
+    let mut split_f = Formatter::build(Clock::Off, true, Config::default());
+    split_f.theme = Theme::plain();
+    let mut stalled = Vec::new();
+    stalled.extend_from_slice(&split_f.process(C));
+    stalled.extend_from_slice(&split_f.process(&response[..split]));
+    stalled.extend_from_slice(&split_f.flush_stalled_output());
+    stalled.extend_from_slice(&split_f.process(&response[split..]));
+    stalled.extend_from_slice(&split_f.process(D));
+
+    assert_eq!(
+        stalled, unstalled,
+        "a network pause must not change how a response is rendered"
+    );
+}
+
+/// Seed the hold clock as if the run had already been held for `age`, without
+/// `Instant - Duration` (which panics on monotonic-clock underflow).
+fn age_the_hold(f: &mut Formatter, age: Duration) {
+    f.hold_started_at = Some(
+        Instant::now()
+            .checked_sub(age)
+            .expect("test host monotonic clock is older than the seeded age"),
+    );
+}
+
+#[test]
+fn a_held_response_is_released_once_the_hold_budget_expires() {
+    // The hold covers the one-round-trip gap between headers and body — it must
+    // not become unbounded. `curl -i -N` on an SSE / long-poll endpoint sends
+    // headers, then goes quiet indefinitely below the buffer cap. Holding that
+    // forever shows the user a blank terminal indistinguishable from a hang.
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(headers));
+
+    // Early ticks hold: this is exactly the header/body gap the fix is for.
+    assert!(
+        f.flush_stalled_output().is_empty(),
+        "the first quiet tick must still hold"
+    );
+
+    // Once the budget is spent, liveness wins and the bytes are released.
+    age_the_hold(&mut f, MAX_STALL_HOLD + Duration::from_millis(1));
+    let released = f.flush_stalled_output();
+    assert_eq!(
+        released, headers,
+        "an expired hold must release the buffer verbatim"
+    );
+    out.extend_from_slice(&released);
+
+    // And the run stays live from then on — later data streams, not buffers.
+    out.extend_from_slice(&f.process(b"data: one\r\n"));
+    out.extend_from_slice(&f.process(D));
+    assert_eq!(out, cat(&[C, &sep(), headers, b"data: one\r\n", D]));
+}
+
+#[test]
+fn a_trickling_body_cannot_extend_its_own_hold_past_the_budget() {
+    // The budget is the hold's TOTAL age, not its longest quiet gap. Measuring
+    // consecutive silence would bound nothing: an SSE / long-poll stream
+    // delivering a chunk every few hundred milliseconds restarts that clock
+    // forever and is never released. Arriving bytes must not move the anchor,
+    // and because a gapless burst produces no stall tick, the bound has to be
+    // enforced where the bytes arrive too.
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(headers));
+    assert!(f.flush_stalled_output().is_empty(), "the first tick holds");
+    let anchor = f.hold_started_at.expect("holding sets the anchor");
+
+    // Traffic arrives, well inside the budget. It must not move the anchor.
+    out.extend_from_slice(&f.process(b"data: one\r\n"));
+    assert_eq!(
+        f.hold_started_at,
+        Some(anchor),
+        "arriving bytes must not extend the hold"
+    );
+    assert!(
+        f.flush_stalled_output().is_empty(),
+        "still inside the budget"
+    );
+
+    // Once the total age is spent, the next arriving bytes release the run —
+    // with no stall tick in between, so `push_output` is what enforces it.
+    age_the_hold(&mut f, MAX_STALL_HOLD + Duration::from_millis(1));
+    let released = f.process(b"data: two\r\n").into_owned();
+    assert_eq!(
+        released,
+        cat(&[headers, b"data: one\r\n", b"data: two\r\n"]),
+        "an expired hold must release buffer-then-segment verbatim"
+    );
+    out.extend_from_slice(&released);
+    assert!(
+        f.hold_started_at.is_none(),
+        "releasing must clear the anchor"
+    );
+
+    // The run is live from here on.
+    out.extend_from_slice(&f.process(b"data: three\r\n"));
+    out.extend_from_slice(&f.process(D));
+    assert_eq!(
+        out,
+        cat(&[
+            C,
+            &sep(),
+            headers,
+            b"data: one\r\n",
+            b"data: two\r\n",
+            b"data: three\r\n",
+            D,
+        ])
+    );
+}
+
+#[test]
+fn a_response_that_completes_inside_the_budget_still_formats() {
+    // The bound must not cost ordinary responses their formatting: a body that
+    // arrives in several chunks within the budget is still formatted whole.
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"));
+    for chunk in [&b"<html>"[..], b"<body>", b"slow", b"</body>", b"</html>"] {
+        assert!(
+            f.flush_stalled_output().is_empty(),
+            "still inside the budget"
+        );
+        out.extend_from_slice(&f.process(chunk));
+    }
+    out.extend_from_slice(&f.process(D));
+
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("HTML body"), "{rendered:?}");
+}
+
+#[test]
+fn a_stalled_status_line_without_a_header_block_is_still_released() {
+    // The hold requires a *complete*, newline-terminated status line. An
+    // unterminated `HTTP/...` line that goes quiet is released like any other
+    // text — a prompt that merely opens with a protocol version and waits for
+    // input must not have its bytes withheld from the user.
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"HTTP/1.1 200 OK"));
+    let released = f.flush_stalled_output();
+    assert_eq!(
+        released, b"HTTP/1.1 200 OK",
+        "an unterminated status line must not be held"
+    );
+    out.extend_from_slice(&released);
+    out.extend_from_slice(&f.process(D));
+    assert_eq!(out, cat(&[C, &sep(), b"HTTP/1.1 200 OK", D]));
+}
+
+#[test]
+fn a_status_line_arriving_alone_still_formats_the_response() {
+    // The real `curl -i` chunking: curl's stdout is line-buffered at a TTY, so
+    // the status line is flushed in its own write and the supervisor's first
+    // read routinely carries nothing else. The headers land a moment later and
+    // the body a network round trip after that — with stall ticks in between.
+    // The run must stay buffered through all of it and format whole; requiring
+    // a header line in the first chunk dropped every such response onto the
+    // streaming path for good.
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"HTTP/2 200 \r\r\n"));
+    assert!(
+        f.flush_stalled_output().is_empty(),
+        "a complete status line alone must hold across a stall"
+    );
+    out.extend_from_slice(
+        &f.process(b"content-type: text/html\r\r\ncontent-length: 15\r\r\n\r\r\n"),
+    );
+    assert!(
+        f.flush_stalled_output().is_empty(),
+        "the header block must keep holding while the body is in flight"
+    );
+    out.extend_from_slice(&f.process(b"<p>hi</p>"));
+    out.extend_from_slice(&f.process(D));
+
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("HTML body"), "{rendered:?}");
+    assert!(rendered.contains("content-type: text/html"), "{rendered:?}");
+}
+
+#[test]
+fn a_lone_line_that_starts_with_http_but_is_not_a_status_line_streams() {
+    // Widening `could_start` to a bare status line must not capture ordinary
+    // text that merely opens with `HTTP/`: an invalid first line is never a
+    // candidate, so it takes the streaming path immediately.
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"HTTP/2 is the successor of HTTP/1.1\r\n"));
+    out.extend_from_slice(&f.process(b"and HTTP/3 runs over QUIC\r\n"));
+    out.extend_from_slice(&f.process(D));
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(
+        rendered.contains("HTTP/2 is the successor of HTTP/1.1"),
+        "{rendered:?}"
+    );
+}
+
+#[test]
+fn a_buffered_run_that_turns_binary_is_released_verbatim() {
+    // Real pages embed NUL bytes (hydration payloads, inline binary). A run
+    // that commits to text and only *then* turns binary must stop being a
+    // formatting candidate: invariant #3 forbids reformatting binary, and the
+    // held bytes must reach the terminal unchanged (invariant #4).
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    let body = b"<html><body><script>var a=\"\x00\x00\";</script></body></html>";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(headers));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D));
+
+    assert_eq!(
+        out,
+        cat(&[C, &sep(), headers, body, D]),
+        "a run that turns binary must pass through byte-for-byte"
+    );
+}
+
+#[test]
+fn a_released_candidate_keeps_streaming_color_on_its_status_line() {
+    // A buffered response whose body turns binary (hydration payloads with
+    // embedded NULs are common on real pages) is never formatted whole — but
+    // its already-held complete lines must degrade to the per-line streaming
+    // path, not to raw passthrough: the status line keeps the color it would
+    // have had if the run had never been a candidate.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+    let body = b"<html><script>var a=\"\x00\x00\";</script></html>";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(headers));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D));
+
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        s.contains("\x1b[38;2;39;135;51mHTTP/1.1 200 OK"),
+        "status line must keep its streaming color: {s:?}"
+    );
+    assert_eq!(
+        strip_sgr(&out),
+        strip_sgr(&cat(&[C, &sep(), headers, body, D])),
+        "release must preserve every byte, adding only SGR"
+    );
+}
+
+#[test]
+fn a_clean_html_body_still_formats_after_a_stall() {
+    // The binary guard must not leak into ordinary responses: a body with no
+    // binary byte still formats across a stall.
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"));
+    assert!(f.flush_stalled_output().is_empty());
+    out.extend_from_slice(&f.process(b"<html><body>ok</body></html>"));
+    out.extend_from_slice(&f.process(D));
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("HTML body"), "{rendered:?}");
+}
+
+#[test]
+fn a_stalled_json_candidate_is_still_released_for_prompt_liveness() {
+    // JSON's `could_start` is a bare `{`/`[` — far too loose to withhold bytes
+    // on. It must keep the trait's default (no hold), so a prompt that opens
+    // with a brace and waits for input stays visible.
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"{choose a value} "));
+    out.extend_from_slice(&f.flush_stalled_output());
+    out.extend_from_slice(&f.process(b"yes\r\n"));
+    out.extend_from_slice(&f.process(D));
+    assert_eq!(out, cat(&[C, &sep(), b"{choose a value} yes\r\n", D]));
+}
+
+#[test]
 fn successful_silent_cd_gets_a_moved_breadcrumb() {
     let mut f = Formatter::new();
     if !f.is_enabled() {
@@ -5349,6 +5754,56 @@ proptest::proptest! {
         // none). Removing one recovers the input exactly — no byte lost/changed.
         let recovered = strip_first(&out, &sep());
         proptest::prop_assert_eq!(recovered, input);
+    }
+
+    /// A buffered HTTP run whose body turns binary part-way through is passed
+    /// through byte-for-byte, at any body chunking. This covers the path the
+    /// single-chunk binary property below cannot reach: `decide` only inspects
+    /// the chunk that commits the run to text, so binary appearing *after*
+    /// that is caught in `push_output`'s `Collect::Buffer` arm instead.
+    ///
+    /// The complete header block is always the first chunk, so the run really
+    /// does enter `Collect::Buffer` (that is the path under test); only the
+    /// body is split. Pins invariants #3 and #4 for the case that made a real
+    /// 167 KB `curl -i` response — NULs embedded in inline JS — a formatting
+    /// candidate once responses started surviving stalls.
+    #[test]
+    fn prop_http_run_that_turns_binary_is_byte_safe(
+        body in proptest::collection::vec(
+            proptest::prop_oneof![1u8..=6, 0x20u8..=0x7e], 1..300),
+        cuts in proptest::collection::vec(0usize..300, 0..6),
+    ) {
+        proptest::prop_assume!(body.iter().copied().any(is_binary_byte));
+        let headers = &b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"[..];
+        let payload = [headers, &body].concat();
+
+        let mut splits: Vec<usize> =
+            cuts.into_iter().filter(|&c| c > 0 && c < body.len()).collect();
+        splits.sort_unstable();
+        splits.dedup();
+
+        let mut f = Formatter::build(Clock::Off, true, Config::default());
+        f.theme = Theme::plain();
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(C));
+        // The header block alone commits the run to `Collect::Buffer`.
+        out.extend_from_slice(&f.process(headers));
+        out.extend_from_slice(&f.flush_stalled_output());
+        let mut cursor = 0usize;
+        for stop in splits.into_iter().chain([body.len()]) {
+            out.extend_from_slice(&f.process(&body[cursor..stop]));
+            // A quiet interval may land at any of these boundaries.
+            out.extend_from_slice(&f.flush_stalled_output());
+            cursor = stop;
+        }
+        out.extend_from_slice(&f.process(D));
+        out.extend_from_slice(&f.flush());
+
+        // Exactly one separator is inserted (on the text commit); removing it
+        // must recover the stream byte-for-byte — nothing reformatted, nothing
+        // dropped, reordered, or truncated.
+        let input = [C, &payload, D].concat();
+        proptest::prop_assert_eq!(strip_first(&out, &sep()), input);
     }
 
     /// Binary command output is passed through byte-for-byte with NO separator,

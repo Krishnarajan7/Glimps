@@ -1,11 +1,11 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
-import { AnimatePresence, motion } from "framer-motion";
 import { HeroVideoDialog } from "@/components/ui/hero-video-dialog";
 import { GitHubStars } from "@/components/ui/github-stars";
 import { Glimps } from "@/components/ui/glimps";
 import { GlimpsMark } from "@/components/ui/glimps-mark";
 import { canonical } from "@/lib/seo";
+import { useTheme } from "@/hooks/use-theme";
 
 /* ------------------------------------------------------------------ */
 /*  DEMO VIDEO — replace these two with your real assets.              */
@@ -20,6 +20,24 @@ import { canonical } from "@/lib/seo";
 /* ------------------------------------------------------------------ */
 const DEMO_VIDEO_SRC = "https://www.youtube.com/embed/7_5hzxcg3e0"; // GLIMPS explainer (youtu.be/7_5hzxcg3e0)
 const DEMO_POSTER = "/demo-poster.svg";
+
+/* The hero reel: the two recorded sessions from demo/*.tape, joined into one
+   file so formatting plays to the end and failure intelligence follows, then
+   the whole thing loops. A GIF cannot do that — the browser exposes no way to
+   know when one has finished — which is why this is video rather than two
+   <img> tags. The tapes in demo/ stay the source of truth: re-render them with
+   scripts/render-demo.sh, then rebuild this with the ffmpeg command in
+   demo/README.md. */
+const DEMO_REEL = {
+  src: "/demo.mp4",
+  poster: "/demo-poster.jpg",
+  title: "~/acme-api — zsh",
+  width: 1200,
+  height: 800,
+  label: "a real session, unedited",
+  description:
+    "First: the command header marking where output begins, then JSON, log severity and an everyday ls formatted in place. Then: a mistyped command explained as exit 127, a pipeline failure the shell hid behind exit 0, Ctrl-C treated as a notice rather than an error, and a failing assertion pinned back into view.",
+} as const;
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -113,99 +131,6 @@ function CmdHeader({ cmd, badge, time }: { cmd: string; badge?: string; time?: s
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Hero animation — a live session. Each command appears once, then   */
-/*  GLIMPS adds its real ▌ header, recognized formatting, and finally   */
-/*  the command status footer. Nothing morphs or collapses in a way the */
-/*  terminal product itself does not.                                  */
-/* ------------------------------------------------------------------ */
-
-type Seg = { t: string; c?: string };
-type HeroScene = {
-  cmd: string;
-  badge?: string;
-  time: string;
-  lines: Seg[][];
-  footer: Seg[][];
-};
-type ScenePhase = "typing" | "output" | "complete";
-
-const SYN = {
-  key: "text-[var(--color-syn-key)]",
-  str: "text-[var(--color-syn-string)]",
-  num: "text-[var(--color-syn-number)]",
-  kw: "text-[var(--color-syn-keyword)]",
-  err: "text-[var(--color-syn-error)]",
-  dim: "text-[var(--color-syn-dim)]",
-};
-
-const HERO_SCENES: HeroScene[] = [
-  {
-    cmd: "curl -s api.example.com/user",
-    badge: "json",
-    time: "14:23:01",
-    lines: [
-      [{ t: "{", c: SYN.dim }],
-      [{ t: "  " }, { t: '"user"', c: SYN.key }, { t: ": {", c: SYN.dim }],
-      [{ t: "    " }, { t: '"id"', c: SYN.key }, { t: ": ", c: SYN.dim }, { t: "8421", c: SYN.num }, { t: ",", c: SYN.dim }],
-      [{ t: "    " }, { t: '"name"', c: SYN.key }, { t: ": ", c: SYN.dim }, { t: '"Ada Lovelace"', c: SYN.str }, { t: ",", c: SYN.dim }],
-      [{ t: "    " }, { t: '"active"', c: SYN.key }, { t: ": ", c: SYN.dim }, { t: "true", c: SYN.kw }, { t: ",", c: SYN.dim }],
-      [{ t: "    " }, { t: '"tags"', c: SYN.key }, { t: ": [", c: SYN.dim }, { t: '"founder"', c: SYN.str }, { t: ", ", c: SYN.dim }, { t: '"math"', c: SYN.str }, { t: "]", c: SYN.dim }],
-      [{ t: "  },", c: SYN.dim }],
-      [{ t: "  " }, { t: '"latency_ms"', c: SYN.key }, { t: ": ", c: SYN.dim }, { t: "38", c: SYN.num }],
-      [{ t: "}", c: SYN.dim }],
-    ],
-    footer: [[{ t: "✓ done exit 0 in 38ms", c: SYN.dim }]],
-  },
-  {
-    cmd: "git push origin main",
-    time: "14:23:12",
-    lines: [
-      [{ t: "To https://github.com/example/project", c: SYN.dim }],
-      [
-        { t: " ! [rejected] ", c: SYN.num },
-        { t: "       main -> main (fetch first)" },
-      ],
-      [{ t: "error: failed to push some refs", c: SYN.err }],
-      [{ t: "hint: Updates were rejected because the remote contains work", c: SYN.dim }],
-      [{ t: "hint: that you do not have locally. Run git pull first.", c: SYN.dim }],
-    ],
-    footer: [
-      [{ t: "✗ failed exit 1 in 973ms", c: SYN.err }],
-      [
-        { t: "↳ ", c: SYN.err },
-        { t: "error: failed to push some refs", c: SYN.dim },
-        { t: "  (↑ 3 lines up)", c: SYN.dim },
-      ],
-      [{ t: "command failed: git push origin main", c: SYN.err }],
-    ],
-  },
-  {
-    cmd: "tail -n 4 app.log",
-    badge: "log",
-    time: "14:23:26",
-    lines: [
-      [{ t: "14:22:01 ", c: SYN.dim }, { t: "INFO ", c: SYN.str }, { t: " server started on :8080" }],
-      [{ t: "14:22:04 ", c: SYN.dim }, { t: "WARN ", c: SYN.num }, { t: " cache miss key=session:8421" }],
-      [{ t: "14:22:06 ", c: SYN.dim }, { t: "ERROR", c: SYN.err }, { t: " upstream timeout after 3000ms" }],
-      [{ t: "14:22:07 ", c: SYN.dim }, { t: "INFO ", c: SYN.str }, { t: " retrying request (1/3)" }],
-    ],
-    footer: [[{ t: "✓ done exit 0 in 12ms", c: SYN.dim }]],
-  },
-  {
-    cmd: "git diff src/api.ts",
-    badge: "diff",
-    time: "14:23:39",
-    lines: [
-      [{ t: "@@ -12,2 +12,3 @@", c: SYN.dim }],
-      [{ t: "- return fetch(url).then(r => r.json())", c: SYN.err }],
-      [{ t: "+ const r = await fetch(url)", c: SYN.str }],
-      [{ t: "+ if (!r.ok) throw new HttpError(r.status)", c: SYN.str }],
-    ],
-    footer: [[{ t: "✓ done exit 0 in 9ms", c: SYN.dim }]],
-  },
-];
-
 function usePrefersReducedMotion() {
   const [reduce, setReduce] = useState(false);
   useEffect(() => {
@@ -218,128 +143,45 @@ function usePrefersReducedMotion() {
   return reduce;
 }
 
-function FormatBadge({ label }: { label: string }) {
-  return (
-    <span
-      className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-      style={{ background: "var(--color-muted)", color: "var(--color-muted-foreground)" }}
-    >
-      {label}
-    </span>
-  );
-}
-
-const heroLineV = {
-  hidden: { opacity: 0, y: 4 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.18 } },
-};
-
-function HeroTerminal() {
+/* The hero reel. Autoplays muted and loops for everyone except a visitor who
+   asked for reduced motion — they get the poster frame and real controls, so
+   the demo is still reachable but nothing moves until they choose it. That is
+   the one thing the GIFs this replaced could not offer: a GIF animates
+   unconditionally, with no way to pause it. */
+function HeroReel() {
   const reduce = usePrefersReducedMotion();
-  const [scene, setScene] = useState(0);
-  const [phase, setPhase] = useState<ScenePhase>("typing");
-
-  useEffect(() => {
-    if (reduce) return;
-    const wait = phase === "typing" ? 1000 : phase === "output" ? 1600 : 2200;
-    const t = setTimeout(() => {
-      if (phase === "typing") setPhase("output");
-      else if (phase === "output") setPhase("complete");
-      else {
-        setScene((s) => (s + 1) % HERO_SCENES.length);
-        setPhase("typing");
-      }
-    }, wait);
-    return () => clearTimeout(t);
-  }, [phase, scene, reduce]);
-
-  const active = HERO_SCENES[reduce ? 0 : scene];
-  const shownPhase: ScenePhase = reduce ? "complete" : phase;
-
   return (
-    <TerminalFrame title="~/glimps — glimps session">
-      <p className="sr-only">
-        Animated demo: commands run in a terminal, and GLIMPS marks each one with
-        a ▌ header, formats recognized output, and reports how the command ended.
+    <figure className="m-0">
+      <figcaption className="font-mono text-xs uppercase tracking-widest text-muted-foreground mb-3">
+        <span className="text-[var(--color-bar)]" aria-hidden="true">▌</span>{" "}
+        {DEMO_REEL.label}
+      </figcaption>
+      <TerminalFrame title={DEMO_REEL.title}>
+        <video
+          src={DEMO_REEL.src}
+          poster={DEMO_REEL.poster}
+          width={DEMO_REEL.width}
+          height={DEMO_REEL.height}
+          autoPlay={!reduce}
+          loop={!reduce}
+          controls={reduce}
+          muted
+          playsInline
+          preload="metadata"
+          aria-label={DEMO_REEL.description}
+          className="block w-full h-auto"
+        />
+      </TerminalFrame>
+      <p className="mt-3 text-sm text-muted-foreground leading-relaxed">
+        Formatting first, then what happens when a command fails.
       </p>
-      {/* Tall enough for the tallest scene (JSON, ~328px) at every width —
-          anything shorter crops the ✓ status footer on phones. */}
-      <div aria-hidden="true" className="h-[330px] overflow-hidden">
-        {/* Active command: prompt line */}
-        <div className="px-4 pt-3 pb-1">
-          <code>
-            <span className={SYN.str}>~/glimps</span>
-            <span className={SYN.dim}> $ </span>
-            {shownPhase === "typing" ? (
-              <span
-                key={active.cmd}
-                className="inline-block whitespace-nowrap overflow-hidden align-bottom term-cursor"
-                style={{ animation: `type-in 0.85s steps(${active.cmd.length}) 0.1s both` }}
-              >
-                {active.cmd}
-              </span>
-            ) : (
-              <span>{active.cmd}</span>
-            )}
-          </code>
-        </div>
-
-        {/* Active command: output area */}
-        <div className="px-4 pb-3">
-          <AnimatePresence mode="wait">
-            {shownPhase !== "typing" && (
-              <motion.div
-                key={"output-" + scene}
-                initial={reduce ? false : "hidden"}
-                animate="show"
-                exit={{ opacity: 0, transition: { duration: 0.12 } }}
-                variants={{ show: { transition: { staggerChildren: 0.045 } } }}
-              >
-                {/* GLIMPS repeats the command in its ▌ header */}
-                <motion.div variants={heroLineV} className="flex items-center gap-2 pb-1">
-                  <span className="text-[var(--color-bar)] font-bold select-none">▌</span>
-                  <code className={"truncate " + SYN.dim}>{active.cmd}</code>
-                  {active.badge && <FormatBadge label={active.badge} />}
-                  <span className={"ml-auto shrink-0 text-[10px] " + SYN.dim}>{active.time}</span>
-                </motion.div>
-                <div>
-                  {active.lines.map((ln, i) => (
-                    <motion.div key={i} variants={heroLineV} className="whitespace-pre">
-                      {ln.map((seg, j) => (
-                        <span key={j} className={seg.c}>
-                          {seg.t}
-                        </span>
-                      ))}
-                    </motion.div>
-                  ))}
-                  <AnimatePresence>
-                    {shownPhase === "complete" && (
-                      <motion.div
-                        initial={reduce ? false : { opacity: 0, y: 4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="mt-2"
-                      >
-                        {active.footer.map((ln, i) => (
-                          <div key={i} className="whitespace-pre">
-                            {ln.map((seg, j) => (
-                              <span key={j} className={seg.c}>
-                                {seg.t}
-                              </span>
-                            ))}
-                          </div>
-                        ))}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-      </div>
-    </TerminalFrame>
+    </figure>
   );
 }
+
+/* ------------------------------------------------------------------ */
+/*  Illustrations used by the explainer sections below.                 */
+/* ------------------------------------------------------------------ */
 
 function JsonTree() {
   const K = ({ c }: { c: string }) => <span className="text-[var(--color-syn-key)]">{c}</span>;
@@ -599,14 +441,11 @@ function InstallBlock({ label, cmd }: { label: string; cmd: string }) {
 /* ------------------------------------------------------------------ */
 
 function Landing() {
-  const [theme, setTheme] = useState<"light" | "dark">("light");
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-  }, [theme]);
+  const [theme, toggleTheme] = useTheme();
 
   return (
     <div id="top" className="min-h-screen relative overflow-x-hidden">
-      <Nav theme={theme} onToggle={() => setTheme((t) => (t === "light" ? "dark" : "light"))} />
+      <Nav theme={theme} onToggle={toggleTheme} />
 
       {/* HERO */}
       <section className="relative z-[1] mx-auto max-w-7xl px-4 sm:px-6 pt-10 sm:pt-16 md:pt-24 pb-14 sm:pb-20">
@@ -648,7 +487,10 @@ function Landing() {
             </div>
           </div>
 
-          <HeroTerminal />
+          {/* A recorded session rather than a mockup: the hero's job is to prove
+              the headline, and a real terminal does that better than an
+              illustration of one. */}
+          <HeroReel />
         </div>
       </section>
 
@@ -680,6 +522,7 @@ function Landing() {
               thumbnailAlt="GLIMPS reformatting terminal output — click to play the demo"
             />
           </div>
+
         </div>
       </section>
 

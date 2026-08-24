@@ -53,6 +53,39 @@ Both GIFs are already referenced from the root [`README.md`](../README.md):
 Re-rendering overwrites those files in place, so no README change is needed to
 refresh a demo — but do review the new render before committing it.
 
+## Wire it into the website
+
+The site's hero plays both captures as one video: formatting runs to the end,
+failure intelligence follows, then the whole thing loops. It has to be video
+rather than the GIFs, because the browser exposes no way to know when a GIF has
+finished, so two `<img>` tags would just loop independently and out of sync.
+Video also lets a visitor who asked for reduced motion get a still frame and
+real controls instead — a GIF animates unconditionally.
+
+After re-rendering the tapes, rebuild the reel (needs `ffmpeg`, not `vhs`):
+
+```bash
+# Join the two captures. glimps.gif is 1200x760 and failure.gif is 1200x800,
+# so the shorter one is padded to match with the terminal background colour
+# (#1d1c2d, sampled from the capture) rather than letterboxed in black.
+ffmpeg -y \
+  -i demo/glimps.gif -i demo/failure.gif -filter_complex \
+  "[0:v]fps=25,scale=1200:760:flags=lanczos,pad=1200:800:0:20:color=0x1d1c2d,setsar=1[a];\
+   [1:v]fps=25,scale=1200:800:flags=lanczos,setsar=1[b];\
+   [a][b]concat=n=2:v=1:a=0[out]" \
+  -map "[out]" -c:v libx264 -preset slow -crf 23 -pix_fmt yuv420p \
+  -movflags +faststart site/public/demo.mp4
+
+# Poster frame, shown before playback and to reduced-motion visitors.
+ffmpeg -y -i site/public/demo.mp4 -frames:v 1 -q:v 3 site/public/demo-poster.jpg
+```
+
+H.264 only, deliberately: VP9 was no smaller here without a quality setting
+that softened the terminal text, and h264 plays everywhere. Keep `crf` at 23 or
+lower — this is small text, and it is the first thing to go when the bitrate
+drops. Do not crop the canvas to the visible text: the tallest scene (the
+pinned assertion at the end of `failure.tape`) fills almost the whole frame.
+
 ## Tweaking
 
 Edit a tape to change the commands shown, timing (`Sleep`), size

@@ -14,6 +14,22 @@
     <meta name="author" content="Krishnarajan" />
     <meta name="theme-color" content="#1b1c22" />
 
+    <!-- Apply the stored theme before first paint, so a dark-mode visitor never
+         sees a white flash while the bundle loads. Kept in sync with
+         THEME_INIT_SCRIPT in src/lib/theme.ts — change both together. -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem('glimps-theme');
+          var theme = stored === 'light' || stored === 'dark'
+            ? stored
+            : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+          document.documentElement.classList.toggle('dark', theme === 'dark');
+          document.documentElement.style.colorScheme = theme;
+        } catch (e) {}
+      })();
+    </script>
+
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="manifest" href="/manifest.json" />
 

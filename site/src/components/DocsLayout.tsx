@@ -8,6 +8,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
+import { useTheme } from "@/hooks/use-theme";
 
 export type TocItem = { id: string; label: string; depth?: 1 | 2 };
 
@@ -121,17 +122,10 @@ function NavGroups({
 }
 
 function ThemeButton() {
-  const [theme, setTheme] = useState<"light" | "dark">(() =>
-    typeof document !== "undefined" && document.documentElement.classList.contains("dark")
-      ? "dark"
-      : "light",
-  );
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-  }, [theme]);
+  const [theme, toggleTheme] = useTheme();
   return (
     <button
-      onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+      onClick={toggleTheme}
       aria-label="Toggle theme"
       className="px-2.5 py-1.5 rounded border text-xs font-mono hover:bg-muted transition-colors"
       style={{ borderColor: "var(--color-border)" }}
