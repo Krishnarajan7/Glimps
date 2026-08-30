@@ -14,6 +14,14 @@
   <a href="https://github.com/Krishnarajan7/Glimps/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22">Good first issues</a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/Krishnarajan7/Glimps/actions/workflows/ci.yml"><img src="https://github.com/Krishnarajan7/Glimps/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/glimps"><img src="https://img.shields.io/crates/v/glimps.svg" alt="crates.io"></a>
+  <a href="https://github.com/Krishnarajan7/Glimps/releases/latest"><img src="https://img.shields.io/github/v/release/Krishnarajan7/Glimps?include_prereleases" alt="GitHub release"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey" alt="macOS and Linux">
+</p>
+
 **Zero-config smart terminal output formatter.** GLIMPS wraps your shell in a
 PTY and quietly improves the scrollback you already have. It repeats your
 command above its output so you can find what you ran, then formats output it
@@ -23,9 +31,9 @@ kind of output is coming.
 
 > Status: **public beta** — functional and heavily tested. macOS + zsh is the
 > primary early-adopter path; bash integration is beta, and Linux is a supported
-> build target covered by CI. Apple Silicon and Intel release artifacts are
-> configured, but clean-machine verification is still in progress. Homebrew
-> packaging and broader shell support are on the roadmap.
+> build target covered by CI. Prebuilt binaries for Apple Silicon and Intel
+> (macOS and Linux) ship with each release, alongside Homebrew and crates.io
+> packages. Broader shell support (fish) is on the roadmap.
 
 > **Want to help?** GLIMPS is beta and there's real, scoped work with clear
 > acceptance criteria waiting for you. Browse the
@@ -152,6 +160,24 @@ boundary, and formats only the parts it understands. The goal is not to replace
 your favorite CLI tools. The goal is to make the default terminal experience
 less punishing when you did not know you needed them.
 
+## How GLIMPS compares
+
+Every tool below is excellent at its job — GLIMPS borrows lessons from all of
+them. The difference is *when they run*: they run when you remember to invoke
+them, GLIMPS runs on everything automatically because it owns the PTY.
+
+| Tool | What it is | How GLIMPS differs |
+|---|---|---|
+| [ChromaTerm](https://github.com/hSaria/ChromaTerm) | PTY wrapper that colors output via user-defined regex rules | Same architecture, different brain: GLIMPS ships zero-config structural parsers (JSON, HTTP, diffs, tables) instead of asking you to write regex rules, and uses OSC-133 to know exactly where output begins so it never touches your prompt |
+| [grc](https://github.com/garabik/grc) | Per-command colorizer with a config ecosystem | grc must be prefixed per command (`grc ping …`) or aliased per tool; GLIMPS wraps the whole session once and auto-detects both commands and content types |
+| [bat](https://github.com/sharkdp/bat) / [jq](https://github.com/jqlang/jq) / [fx](https://github.com/antonmedv/fx) | Superb viewers for files and JSON | You pipe into them *after* predicting the output type; GLIMPS formats output you didn't predict, and gets out of the way when you do pipe (non-TTY output is never touched) |
+| [delta](https://github.com/dandavison/delta) | Best-in-class git diff pager | Configured per tool (git); GLIMPS colors diffs, logs, and stack traces from *any* command with no per-tool setup |
+| [lnav](https://github.com/tstack/lnav) | Powerful log-file navigator TUI | lnav is a destination you open; GLIMPS colors log severity live in your normal scrollback |
+
+And the part none of them can do from downstream of the PTY: because GLIMPS owns
+the session, it knows each command's exit status, duration, and pipeline stages —
+that's what powers the failure footers above.
+
 ## Try Without Installing
 
 Want to see the real terminal behavior before changing your shell startup files?
@@ -180,10 +206,28 @@ The command restarts the wrapper with the new binary while preserving dogfood
 history and the current working directory. Running jobs and unsaved shell-local
 variables cannot cross that controlled restart.
 
-## Install From Source
+## Install
 
-This is the supported install path today. It requires
-[Rust/Cargo](https://rustup.rs).
+**Homebrew (macOS / Linuxbrew):**
+
+```bash
+brew install Krishnarajan7/tap/glimps
+```
+
+**Shell installer** (prebuilt binaries for Apple Silicon and Intel, macOS and
+Linux, with [build provenance attestations](https://github.com/Krishnarajan7/Glimps/attestations)):
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Krishnarajan7/Glimps/releases/latest/download/glimps-installer.sh | sh
+```
+
+**From crates.io** (requires [Rust/Cargo](https://rustup.rs)):
+
+```bash
+cargo install glimps
+```
+
+**From source:**
 
 ```bash
 git clone https://github.com/Krishnarajan7/Glimps
@@ -191,23 +235,21 @@ cd Glimps
 cargo install --path .
 ```
 
-`cargo install --path .` builds a native binary for the machine you run it on.
-The source-install command is the same on Apple Silicon Macs, Intel Macs, and
-Linux. See the [compatibility matrix](./docs/COMPATIBILITY.md) for what has been
-physically verified.
-
-Not shipped yet:
-
-- `brew install glimps`
-- `cargo install glimps` from crates.io
-- fish shell integration
-
-Those should not be advertised as available until the release/tap flow is tested
-from a real version tag.
+All paths produce the same single native binary. See the
+[compatibility matrix](./docs/COMPATIBILITY.md) for what has been physically
+verified. fish shell integration is not shipped yet (zsh is primary, bash is
+beta — see [Known beta limits](#known-beta-limits)).
 
 ## Enable Shell Integration
 
-After installing the binary, add one guarded line **near the top** of your rc
+The guided way — it shows you the exact change, asks before touching anything,
+and backs up your rc file first:
+
+```bash
+glimps setup
+```
+
+Or add the line yourself: one guarded line **near the top** of your rc
 file — `~/.zshrc` for zsh, `~/.bashrc` for bash:
 
 ```bash
@@ -257,7 +299,8 @@ GLIMPS works with no config. To customize, copy
 [`.glimpsrc.example`](./.glimpsrc.example) to `~/.glimpsrc`:
 
 ```toml
-color = true        # false = structure but no color
+color = true        # false = structure but no color (NO_COLOR also honored)
+theme = "dark"      # "light" swaps in a palette tuned for light backgrounds
 separator = true    # the ▌ command header above each command's output
 timestamp = true    # HH:MM:SS shown in the header
 
@@ -273,6 +316,7 @@ stacktrace = true   # stack-trace / panic highlighting (Rust, Python)
 buffer_cap = 1048576   # bytes buffered to detect JSON/HTML
 line_cap   = 65536     # max streamed line length
 sniff_cap  = 64
+pretty_max_lines = 4000 # pass through instead of pretty-printing past this
 ```
 
 A missing or broken `~/.glimpsrc` falls back to defaults (GLIMPS warns once and
@@ -304,17 +348,51 @@ earn it. These are hard rules enforced in the code:
   GLIMPS may add byte-preserving ANSI color to that requested text, but disables
   error pinning so values are never duplicated into its own summaries.
 - **The terminal is always restored** on exit — including on crash.
-- **Simple off switch.** Start a shell with `GLIMPS=0` to skip wrapping, or set
-  `enabled = false` in `~/.glimpsrc` to turn it off persistently for new
-  sessions.
+- **Simple off switches, at every scope.** `glimps off` pauses formatting for
+  the current session instantly (`glimps on` resumes) — no restart needed.
+  `GLIMPS=0` starts a raw shell. `enabled = false` in `~/.glimpsrc` turns it
+  off persistently.
 
 ```bash
+glimps off       # pause formatting in this session (glimps on resumes)
 GLIMPS=0 zsh     # start a raw, unwrapped shell
 export GLIMPS=0  # keep future shells raw from this environment
 ```
 
-If you're already inside a GLIMPS-wrapped shell, run `exit` first, then start a
-new raw shell with `GLIMPS=0 zsh`.
+## FAQ
+
+**Doesn't putting a formatter between me and my shell add latency?**
+Not measurably. Typed input is written straight to the PTY — keystrokes are
+never routed through the formatter. On the output side, detection is a single
+O(n) scan with early exit, and the pass-through path benchmarks in the hundreds
+of MiB/s (365 MiB/s on the dev Apple Silicon machine — reproduce with
+`cargo bench`). Heavier whole-document formatting only ever runs on bounded,
+fully-buffered output; the PTY read/write loops never block on it. CI runs the
+benchmarks against latency budgets so regressions can't merge.
+
+**Something looks mangled — how do I get it out of the way right now?**
+`glimps off` — formatting pauses instantly for the session, `glimps on` brings
+it back. Please also [open an issue](https://github.com/Krishnarajan7/Glimps/issues/new/choose)
+with the command; "never mangle output" is a hard invariant here, so those
+reports jump the queue.
+
+**I use a light terminal background.**
+Set `theme = "light"` in `~/.glimpsrc` — same semantic colors, darker tones.
+
+**Does it respect NO_COLOR?**
+Yes. With `NO_COLOR` set (any non-empty value), GLIMPS keeps structure —
+indentation, command headers, badges — but emits no color escapes. Same as
+`color = false` in `~/.glimpsrc`.
+
+**What about a giant JSON response?**
+If pretty-printing would inflate a document past `pretty_max_lines` (default
+4000 lines), GLIMPS shows the original bytes instead — it never floods your
+scrollback to make a point, and it never truncates or hides output.
+
+**Why does the README say to put the integration line near the top of my rc?**
+The line re-execs your shell inside GLIMPS, and the re-exec'd shell re-sources
+the same rc — so anything *above* the line runs twice per session. `glimps
+doctor` warns if the line sits below a plugin manager or prompt framework.
 
 ## Known beta limits
 
@@ -327,9 +405,11 @@ new raw shell with `GLIMPS=0 zsh`.
   it and quietly stop the output markers. If you use such a tool, put the GLIMPS
   line after it. The command captured for the header is the full history line, so
   it needs interactive history enabled (the default).
-- Homebrew and crates.io installs are not live yet. Use the repo-local dogfood
-  session or `cargo install --path .` from a checkout until the tap/release flow
-  is verified from a real version tag.
+- Release verification is young. Homebrew, the shell installer, and crates.io
+  went live with v0.1.0; if an install path misbehaves on your machine, the
+  repo-local dogfood session (`scripts/dogfood-macos.sh session`) and
+  `cargo install --path .` from a checkout always work — and please
+  [open an issue](https://github.com/Krishnarajan7/Glimps/issues/new/choose).
 - **Pipes and stdout redirects turn command-aware views off.** With
   `lsof -i | grep LISTEN` the text on screen is `grep`'s output, and with
   `lsof > out.txt` the only thing reaching the terminal is stderr, so applying
@@ -380,6 +460,7 @@ output zone — never your prompt or input. Full rationale in
 |---|---|
 | [`GLIMPS-PLAN.md`](./GLIMPS-PLAN.md) | R&D findings, feasibility, tech-stack rationale |
 | [`ROADMAP.md`](./ROADMAP.md) | Versioned plan (v0.1 → v2.0) |
+| [`CHANGELOG.md`](./CHANGELOG.md) | Release history |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Contributor setup and review expectations |
 | [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) | Community participation and enforcement rules |
 | [`SECURITY.md`](./SECURITY.md) | Private vulnerability reporting and response policy |

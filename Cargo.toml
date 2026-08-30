@@ -1,7 +1,10 @@
 [package]
 name = "glimps"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 edition = "2021"
+# Floor is the highest MSRV in the locked dependency graph; verified with
+# `cargo +1.88 check --locked --all-targets`.
+rust-version = "1.88"
 description = "Zero-config smart terminal output formatter — auto-detects and reformats JSON, HTML, and logs live in your shell."
 license = "MIT"
 repository = "https://github.com/Krishnarajan7/Glimps"
@@ -9,6 +12,16 @@ homepage = "https://github.com/Krishnarajan7/Glimps"
 readme = "README.md"
 keywords = ["terminal", "pty", "formatter", "json", "cli"]
 categories = ["command-line-utilities"]
+# Keep the crates.io package to what's needed to build and test the crate —
+# the website, demo GIFs, and maintainer docs stay on GitHub.
+exclude = [
+    "site/",
+    "demo/",
+    "docs/",
+    ".github/",
+    "scripts/",
+    "*.gif",
+]
 
 [[bin]]
 name = "glimps"

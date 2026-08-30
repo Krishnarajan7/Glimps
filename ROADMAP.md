@@ -71,9 +71,21 @@ GIF people can understand without a private walkthrough.
 
 - ◐ Homebrew formula + prebuilt binaries via `cargo-dist` + release CI
       (configured: `dist-workspace.toml` + `.github/workflows/release.yml` build
-      macOS+Linux binaries, a shell installer, and a Homebrew formula on version
-      tags. To go live: create the `Krishnarajan7/homebrew-tap` repo + token secret,
-      bump the version, and push a `vX.Y.Z` tag.)
+      macOS+Linux binaries, a shell installer, a Homebrew formula, and a
+      crates.io publish on version tags. Version bumped to 0.1.0, CHANGELOG.md
+      written, README badges + comparison table + install paths in place,
+      launch checklist/copy in `docs/launch/`. To go live: create the
+      `Krishnarajan7/homebrew-tap` repo + `HOMEBREW_TAP_TOKEN` +
+      `CARGO_REGISTRY_TOKEN` secrets, and push the `v0.1.0` tag.)
+- ☑ Trust & first-run polish (pre-launch quick wins): `NO_COLOR` convention
+      honored; `theme = "light"` palette for light terminals; `glimps setup`
+      (guided, consent-based rc install with backup + atomic write);
+      `glimps off` / `glimps on` mid-session toggle (in-band OSC 7340,
+      provenance-guarded against forged toggles from untrusted output);
+      `pretty_max_lines` output-inflation guard (huge minified JSON no longer
+      floods scrollback — original bytes shown instead); `glimps doctor` warns
+      on rc-placement (double-sourcing footgun) and coexisting shell
+      integrations (iTerm2/Ghostty/Warp); README FAQ (latency, off switches).
 - ☑ Polished README with animated demo GIFs, rendered from tapes via
       `scripts/render-demo.sh`: `demo/glimps.gif` (formatting) and
       `demo/failure.gif` (failure intelligence — exit-code translation, pipeline
