@@ -9,6 +9,7 @@
 //! ```toml
 //! enabled = true     # master switch (like GLIMPS=0, but persistent)
 //! color = true       # false => no color codes anywhere (still indents/frames)
+//! theme = "dark"     # "dark" (default) or "light" — palette for light terminals
 //! separator = true   # the command/output divider line
 //! timestamp = true   # include HH:MM:SS in the separator
 //! farewell = true    # conversational message after a clean interactive exit
@@ -32,6 +33,7 @@
 //! buffer_cap = 1048576   # max bytes buffered to detect JSON/HTML (1 MiB)
 //! line_cap   = 65536     # max bytes of one un-terminated streamed line (64 KiB)
 //! sniff_cap  = 64        # max leading whitespace held while deciding
+//! pretty_max_lines = 4000 # pass through instead of pretty-printing past this (0 = no cap)
 //! ```
 
 use std::path::PathBuf;
@@ -42,6 +44,7 @@ use serde::Deserialize;
 const DEFAULT_BUFFER_CAP: usize = 1024 * 1024;
 const DEFAULT_LINE_CAP: usize = 64 * 1024;
 const DEFAULT_SNIFF_CAP: usize = 64;
+const DEFAULT_PRETTY_MAX_LINES: usize = 4000;
 
 /// Top-level configuration. Cloned once into the reader thread at startup.
 #[derive(Debug, Clone, Deserialize)]
@@ -51,6 +54,8 @@ pub struct Config {
     pub enabled: bool,
     /// Emit color escapes. `false` keeps structure (indent/frame) but no color.
     pub color: bool,
+    /// Which palette colored output uses. Ignored when `color = false`.
+    pub theme: ThemeChoice,
     /// Show the command header / separator line before output.
     pub separator: bool,
     /// Include a timestamp in the command header.
@@ -102,6 +107,18 @@ pub enum SuccessFooter {
     Off,
 }
 
+/// Palette selection for colored output. The default palette was tuned on dark
+/// backgrounds; `light` swaps the pale tones for darker ones that stay readable
+/// on white/light terminal profiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+    /// The default palette (tuned for dark terminal backgrounds).
+    Dark,
+    /// Darker tones for light terminal backgrounds.
+    Light,
+}
+
 /// Per-content-type enable switches.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -123,6 +140,14 @@ pub struct Limits {
     pub buffer_cap: usize,
     pub line_cap: usize,
     pub sniff_cap: usize,
+    /// If whole-document pretty-printing (JSON/HTML/HTTP body) would emit more
+    /// than this many lines, release the original bytes through the per-line
+    /// streaming path instead — a pretty-printed megabyte of minified JSON
+    /// floods scrollback, which defeats the point of GLIMPS. `0` disables the
+    /// cap. Charter note: this never hides bytes; the un-inflated original is
+    /// shown in full (with at most per-line coloring, same as any
+    /// unrecognized buffered candidate).
+    pub pretty_max_lines: usize,
 }
 
 impl Default for Config {
@@ -130,6 +155,7 @@ impl Default for Config {
         Config {
             enabled: true,
             color: true,
+            theme: ThemeChoice::Dark,
             separator: true,
             timestamp: true,
             farewell: true,
@@ -185,6 +211,7 @@ impl Default for Limits {
             buffer_cap: DEFAULT_BUFFER_CAP,
             line_cap: DEFAULT_LINE_CAP,
             sniff_cap: DEFAULT_SNIFF_CAP,
+            pretty_max_lines: DEFAULT_PRETTY_MAX_LINES,
         }
     }
 }
@@ -196,6 +223,12 @@ impl Config {
     pub fn load() -> Self {
         let mut config = Self::load_raw();
         config.clamp_limits();
+        // Honor the NO_COLOR convention (https://no-color.org): present and
+        // non-empty disables color, overriding `.glimpsrc`. Structure
+        // (indentation, framing, badges) is kept — only escapes are dropped.
+        if no_color_requested(std::env::var_os("NO_COLOR").as_deref()) {
+            config.color = false;
+        }
         config
     }
 
@@ -227,6 +260,12 @@ impl Config {
         self.limits.line_cap = self.limits.line_cap.clamp(256, 16 * 1024 * 1024);
         self.limits.sniff_cap = self.limits.sniff_cap.min(64 * 1024);
     }
+}
+
+/// The NO_COLOR convention: any *non-empty* value disables color; unset or
+/// empty does not. Pure so it can be tested without mutating process env.
+fn no_color_requested(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
 }
 
 /// `$GLIMPSRC` if set, else `~/.glimpsrc`. `None` if `HOME` is also unset.
@@ -307,6 +346,34 @@ mod tests {
         assert!(Config::parse("[failures]\nexplian = false\n").is_err());
         assert!(Config::parse("[failures]\npin_error = false\n").is_err());
         assert!(Config::parse("[failure]\nenabled = false\n").is_err());
+    }
+
+    #[test]
+    fn no_color_convention_requires_a_non_empty_value() {
+        use std::ffi::OsStr;
+        assert!(!no_color_requested(None));
+        assert!(!no_color_requested(Some(OsStr::new(""))));
+        assert!(no_color_requested(Some(OsStr::new("1"))));
+        assert!(no_color_requested(Some(OsStr::new("anything"))));
+    }
+
+    #[test]
+    fn theme_choice_parses_and_defaults_dark() {
+        assert_eq!(Config::default().theme, ThemeChoice::Dark);
+        assert_eq!(Config::parse("").unwrap().theme, ThemeChoice::Dark);
+        let c = Config::parse("theme = \"light\"\n").unwrap();
+        assert_eq!(c.theme, ThemeChoice::Light);
+        // Invalid values surface as parse errors (-> warning + defaults).
+        assert!(Config::parse("theme = \"solarized\"\n").is_err());
+    }
+
+    #[test]
+    fn pretty_max_lines_defaults_and_overrides() {
+        assert_eq!(Config::default().limits.pretty_max_lines, 4000);
+        let c = Config::parse("[limits]\npretty_max_lines = 0\n").unwrap();
+        assert_eq!(c.limits.pretty_max_lines, 0);
+        let c = Config::parse("[limits]\npretty_max_lines = 120\n").unwrap();
+        assert_eq!(c.limits.pretty_max_lines, 120);
     }
 
     #[test]

@@ -7,7 +7,7 @@
 use anyhow::Result;
 use glimps::config::Config;
 use glimps::format::Clock;
-use glimps::{doctor, init, pty};
+use glimps::{doctor, init, pty, session, setup};
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,6 +44,24 @@ fn main() -> Result<()> {
         Some("doctor") => {
             eprintln!("glimps: doctor does not accept arguments.");
             std::process::exit(2);
+        }
+        Some(cmd @ ("off" | "on")) => {
+            if args.len() != 1 {
+                eprintln!("glimps: {cmd} does not accept arguments.");
+                std::process::exit(2);
+            }
+            // Pause/resume formatting for the current session (in-band OSC).
+            let exit_code = session::toggle(cmd == "on")?;
+            std::process::exit(exit_code);
+        }
+        Some("setup") => {
+            if args.len() > 2 {
+                eprintln!("glimps: setup accepts at most one shell name (zsh or bash).");
+                std::process::exit(2);
+            }
+            // Guided, consent-based rc-file install of the shell integration.
+            let exit_code = setup::run(args.get(1).map(String::as_str))?;
+            std::process::exit(exit_code);
         }
         Some("-h") | Some("--help") => {
             print_help();
@@ -153,7 +171,10 @@ fn print_help() {
          USAGE:\n\
          \x20   glimps              Wrap your shell inside GLIMPS (formats output).\n\
          \x20   glimps --shell PATH Wrap PATH instead of $SHELL.\n\
+         \x20   glimps setup        Add the shell integration to your rc file (asks first).\n\
          \x20   glimps doctor       Diagnose your GLIMPS setup (read-only).\n\
+         \x20   glimps off          Pause formatting for this session.\n\
+         \x20   glimps on           Resume formatting for this session.\n\
          \x20   glimps init zsh     Print zsh shell integration (for ~/.zshrc).\n\
          \x20   glimps init bash    Print bash shell integration (for ~/.bashrc).\n\
          \x20   glimps --help       Show this help.\n\
@@ -161,6 +182,7 @@ fn print_help() {
          \n\
          ENVIRONMENT:\n\
          \x20   GLIMPS=0            Disable all formatting (pure pass-through).\n\
+         \x20   NO_COLOR=1          Keep structure but emit no color escapes.\n\
          \n\
          Enable it: add near the TOP of your ~/.zshrc (or ~/.bashrc):\n\
          \x20   command -v glimps >/dev/null 2>&1 && eval \"$(glimps init zsh)\"",

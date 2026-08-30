@@ -1030,3 +1030,66 @@ fn binary_output_is_not_framed() {
     let _ = s.wait_exit(EXIT_BUDGET);
     // `zdot` is removed by its Drop.
 }
+
+#[test]
+fn off_and_on_toggle_formatting_end_to_end() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+
+    // Baseline: formatting is on.
+    // Pretty-printed keys render as `\x1b[36m"key"\x1b[0m: ` — the colored key
+    // followed by the colon+space GLIMPS regenerates. The compact typed echo
+    // (`{"alpha":1}`) can never contain that byte sequence.
+    s.write(b"echo '{\"alpha\":1}'\n");
+    assert!(
+        s.wait_for(b"\"alpha\"\x1b[0m: ", FORMAT_BUDGET),
+        "baseline JSON was not pretty-printed. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+
+    // Pause via the real subcommand (GLIMPS_ACTIVE is set inside the session).
+    s.write(format!("{GLIMPS} off\n").as_bytes());
+    assert!(
+        s.wait_for(b"formatting paused", FORMAT_BUDGET),
+        "`glimps off` did not confirm. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+
+    // While paused, JSON must pass through verbatim. The typed command echo
+    // contains the compact form either way, so the proof of pass-through is the
+    // *absence* of the colored pretty-printed key.
+    s.write(b"echo '{\"beta\":2}'\n");
+    s.write(b"echo done-beta\n");
+    assert!(
+        s.wait_for(b"done-beta", FORMAT_BUDGET),
+        "sentinel after paused command did not appear. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    assert!(
+        !contains(&s.snapshot(), b"\"beta\"\x1b[0m: "),
+        "output was formatted while paused. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+
+    // Resume and prove formatting is back.
+    s.write(format!("{GLIMPS} on\n").as_bytes());
+    assert!(
+        s.wait_for(b"formatting resumed", FORMAT_BUDGET),
+        "`glimps on` did not confirm. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"echo '{\"gamma\":3}'\n");
+    assert!(
+        s.wait_for(b"\"gamma\"\x1b[0m: ", FORMAT_BUDGET),
+        "JSON was not formatted after resume. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}

@@ -126,6 +126,14 @@ trait BufferedFormatter {
     /// `true`; ones that *preserve* the user's own line endings (diff) return
     /// `false` — running those through `push_crlf` would double their CRs.
     fn needs_crlf(&self) -> bool;
+    /// Whether this formatter can emit (many) more lines than its input — the
+    /// property the `pretty_max_lines` inflation guard in [`recognize`] gates
+    /// on. Regenerating formatters (JSON/HTML/HTTP) inflate; a formatter that
+    /// preserves the input's own line structure (diff) must override to `false`
+    /// to stay exempt from the cap.
+    fn inflates(&self) -> bool {
+        true
+    }
     /// Whether a partially collected run holding `buf` should stay buffered when
     /// the stream goes quiet (see [`Formatter::flush_stalled_output`]).
     ///
@@ -225,8 +233,13 @@ pub struct Formatter {
     /// Master off-switch (safety invariant #6). Sampled once at construction
     /// from `GLIMPS` (a process can't have its env changed from outside anyway).
     /// When disabled, `process` is a pure, zero-copy pass-through that does no
-    /// scanning. A future mid-session toggle (e.g. a hotkey) layers on top.
+    /// scanning. The mid-session toggle (`suspended`) layers on top.
     enabled: bool,
+    /// Mid-session pause requested by `glimps off` (resumed by `glimps on`),
+    /// carried in-band as a private OSC. While suspended, chunks pass through
+    /// verbatim with no chrome — but the scanner keeps running so zone state
+    /// stays coherent and the resume toggle is seen.
+    suspended: bool,
     /// Tracks PROMPT / INPUT / OUTPUT zones from OSC-133 markers in the stream.
     scanner: Osc133Scanner,
     /// The OUTPUT-zone accumulator (see [`Collect`]).
@@ -330,12 +343,16 @@ impl Formatter {
         let streaming = enabled_streaming(&config.formatters);
         Formatter {
             enabled: config.enabled && glimps_enabled() && output_is_tty,
+            suspended: false,
             scanner: Osc133Scanner::new(),
             collect: Collect::Idle,
-            theme: if config.color {
-                Theme::default()
-            } else {
+            theme: if !config.color {
                 Theme::plain()
+            } else {
+                match config.theme {
+                    crate::config::ThemeChoice::Dark => Theme::default(),
+                    crate::config::ThemeChoice::Light => Theme::light(),
+                }
             },
             clock,
             config,
@@ -375,6 +392,55 @@ impl Formatter {
         }
 
         let segments = self.scanner.feed_segments(chunk);
+
+        // Mid-session toggle, carried in-band by `glimps off` / `glimps on`
+        // (provenance-gated in the scanner — only a `glimps …` command cycle
+        // can flip it).
+        if let Some(resume) = self.scanner.take_format_toggle() {
+            if !resume && !self.suspended {
+                // Pause: flush anything withheld (bytes are never dropped),
+                // cancel owed chrome, and stream everything verbatim from here.
+                // Provenance guarantees this chunk sits inside `glimps off`'s
+                // own output zone, so skipping its segment events loses no
+                // other command's classification.
+                self.suspended = true;
+                self.pin_armed = false;
+                self.pin.reset();
+                let mut out = Vec::with_capacity(chunk.len() + 64);
+                self.finalize(&mut out);
+                self.pending_separator = false;
+                self.pending_command = None;
+                self.command_started_at = None;
+                self.was_alt_screen = self.scanner.in_alt_screen();
+                out.extend_from_slice(chunk);
+                return Cow::Owned(out);
+            }
+            if resume && self.suspended {
+                // Resume, then fall through to NORMAL segment processing so an
+                // output-start marker later in this same chunk still gets its
+                // bypass/sensitive classification (no dropped edge events).
+                // Passthrough covers any Output bytes sitting *before* the
+                // toggle OSC in this chunk; the OSC's own Pass segment then
+                // finalizes back to Idle, which is fine — everything after it
+                // is `glimps on`'s own output, per provenance.
+                self.suspended = false;
+                // Provably Idle here (the pause flushed via finalize, and
+                // nothing mutates collect while suspended) — so this
+                // assignment can never discard held bytes.
+                debug_assert!(matches!(self.collect, Collect::Idle));
+                self.collect = Collect::Passthrough;
+            }
+        }
+        if self.suspended {
+            // Keep ambient state fresh while verbatim: the alt-screen latch
+            // (so resuming during/after a TUI can't fire a stale "exiting
+            // alt-screen" branch) and the metadata channel (so a long pause
+            // can't overflow the reader's unread-byte cap and cost the first
+            // post-resume command its trusted metadata).
+            self.was_alt_screen = self.scanner.in_alt_screen();
+            self.refresh_metadata();
+            return Cow::Borrowed(chunk);
+        }
 
         // Interactive bypass: while a full-screen program owns the alternate
         // screen (vim, less, htop, fzf, …) — or on the chunk that exits it — pass
@@ -1352,7 +1418,10 @@ impl Formatter {
                         },
                     )
                 });
-                match delimited.or_else(|| recognize(&self.buffered, &buf, &self.theme)) {
+                let pretty_max_lines = self.config.limits.pretty_max_lines;
+                match delimited
+                    .or_else(|| recognize(&self.buffered, &buf, &self.theme, pretty_max_lines))
+                {
                     // Reformatted: tag it with a content-type badge, then emit the
                     // formatted bytes — CRLF-normalized only for formatters that say
                     // so (JSON/HTML regenerate `\n`; diff preserves the user's own).
@@ -1471,15 +1540,36 @@ impl Formatter {
 /// Try each formatter in the registry in order, returning the content-type label,
 /// reformatted bytes, and CRLF policy of the first that matches — or `None` to pass
 /// the buffer through verbatim. The whole buffered dispatch is this one `find_map`.
+///
+/// `pretty_max_lines` guards against output inflation: formatters that
+/// *regenerate* content ([`BufferedFormatter::inflates`], i.e. JSON/HTML/HTTP)
+/// can turn one minified megabyte into tens of thousands of pretty-printed
+/// lines, flooding the scrollback GLIMPS exists to tame. The first *matching*
+/// formatter wins exactly as before; only then is the cap applied, so the cap
+/// can never re-route a run to a lower-priority formatter. A capped match is
+/// discarded and the caller releases the original bytes through the per-line
+/// streaming path — every byte is shown (charter invariant #4), with at most
+/// per-line coloring. `0` disables the cap.
 fn recognize(
     buffered: &[&dyn BufferedFormatter],
     bytes: &[u8],
     theme: &Theme,
+    pretty_max_lines: usize,
 ) -> Option<(&'static str, Vec<u8>, bool)> {
-    buffered.iter().find_map(|f| {
-        f.try_format(bytes, theme)
-            .map(|out| (f.label(), out, f.needs_crlf()))
-    })
+    let (formatter, out) = buffered
+        .iter()
+        .find_map(|f| f.try_format(bytes, theme).map(|out| (f, out)))?;
+    if pretty_max_lines > 0 && formatter.inflates() && line_count(&out) > pretty_max_lines {
+        return None;
+    }
+    Some((formatter.label(), out, formatter.needs_crlf()))
+}
+
+/// Number of terminal lines `bytes` will occupy: newline count, plus one for a
+/// trailing partial line.
+fn line_count(bytes: &[u8]) -> usize {
+    let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
+    newlines + usize::from(!bytes.ends_with(b"\n") && !bytes.is_empty())
 }
 
 fn is_command(command: &Option<Vec<u8>>, expected: &[u8]) -> bool {
@@ -2721,7 +2811,7 @@ fn format_recognized(
     theme: &Theme,
     fmts: &crate::config::Formatters,
 ) -> Option<(&'static str, Vec<u8>, bool)> {
-    recognize(&enabled_buffered(fmts), bytes, theme)
+    recognize(&enabled_buffered(fmts), bytes, theme, 0)
 }
 
 /// Whether a run of OUTPUT bytes looks like **binary** — content GLIMPS must never

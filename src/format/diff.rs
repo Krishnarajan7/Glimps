@@ -45,6 +45,9 @@ impl super::BufferedFormatter for Diff {
     fn needs_crlf(&self) -> bool {
         false // preserves the user's own line endings — never re-CRLF it
     }
+    fn inflates(&self) -> bool {
+        false // one output line per input line — exempt from pretty_max_lines
+    }
 }
 
 /// Try to format `bytes` as a unified diff. Returns the colored bytes if the

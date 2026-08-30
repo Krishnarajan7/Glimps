@@ -5610,6 +5610,8 @@ proptest::proptest! {
         buffer_cap in 0usize..2048,
         line_cap in 0usize..2048,
         sniff_cap in 0usize..128,
+        pretty_max_lines in 0usize..64,
+        light_theme: bool,
         failures_enabled: bool,
         success_off: bool,
         explain: bool,
@@ -5621,6 +5623,11 @@ proptest::proptest! {
         let cfg = Config {
             enabled,
             color,
+            theme: if light_theme {
+                crate::config::ThemeChoice::Light
+            } else {
+                crate::config::ThemeChoice::Dark
+            },
             separator,
             timestamp: false,
             farewell: false,
@@ -5637,7 +5644,7 @@ proptest::proptest! {
                 explain,
                 pin_errors,
             },
-            limits: crate::config::Limits { buffer_cap, line_cap, sniff_cap },
+            limits: crate::config::Limits { buffer_cap, line_cap, sniff_cap, pretty_max_lines },
         };
         let mut f = Formatter::build(Clock::Off, true, cfg);
         // Half the runs end with a bare `D`, half with `D;<code>` across the
@@ -6775,5 +6782,224 @@ fn a_substituting_redirect_target_is_left_alone() {
     assert_eq!(
         command_view(&Some(b"lsof -p $PID 2>/dev/null".to_vec())),
         Some(CommandView::Lsof)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Mid-session toggle (`glimps off` / `glimps on`, private OSC 7340)
+// ---------------------------------------------------------------------------
+
+/// Byte-subsequence search for output assertions.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+const TOGGLE_OFF: &[u8] = b"\x1b]7340;off\x07";
+const TOGGLE_ON: &[u8] = b"\x1b]7340;on\x07";
+
+#[test]
+fn off_toggle_pauses_formatting_and_on_resumes() {
+    let mut f = Formatter::with_clock(Clock::Off);
+    let json = br#"{"alpha":1}"#;
+
+    // Formats normally before the toggle.
+    let stream = [&cmd_marker(b"cat a.json"), C, json.as_slice(), D0].concat();
+    let out = f.process(&stream).into_owned();
+    assert!(contains(&out, &badge("JSON")), "pre-toggle run must format");
+
+    // `glimps off` emits the OSC inside its own output zone.
+    let off = [&cmd_marker(b"glimps off"), C, TOGGLE_OFF, b"paused\r\n", D0].concat();
+    let _ = f.process(&off);
+
+    // While paused, an identical command passes through byte-for-byte:
+    // no header, no badge, no footer.
+    let paused = [&cmd_marker(b"cat a.json"), C, json.as_slice(), D0].concat();
+    let out = f.process(&paused).into_owned();
+    assert_eq!(out, paused, "suspended output must be verbatim");
+
+    // `glimps on` restores formatting for subsequent commands.
+    let on = [&cmd_marker(b"glimps on"), C, TOGGLE_ON, b"resumed\r\n", D0].concat();
+    let _ = f.process(&on);
+    let stream = [&cmd_marker(b"cat a.json"), C, json.as_slice(), D0].concat();
+    let out = f.process(&stream).into_owned();
+    assert!(
+        contains(&out, &badge("JSON")),
+        "post-resume run must format"
+    );
+}
+
+#[test]
+fn off_toggle_flushes_a_held_buffer_without_dropping_bytes() {
+    let mut f = Formatter::with_clock(Clock::Off);
+    // A `glimps`-provenance command whose zone starts buffering a JSON
+    // candidate (contrived, but the formatter can't know that)...
+    let head = [&cmd_marker(b"glimps off"), C, br#"{"held":"#.as_slice()].concat();
+    let _ = f.process(&head);
+    // ...then the pause arrives. The withheld bytes must be released.
+    let out = f.process(TOGGLE_OFF).into_owned();
+    assert!(
+        contains(&out, br#"{"held":"#),
+        "pause must flush held bytes, got: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
+#[test]
+fn forged_toggle_from_an_untrusted_command_is_ignored() {
+    let mut f = Formatter::with_clock(Clock::Off);
+    // A hostile file `cat` — or an SSH remote — emits the toggle OSC inside a
+    // NON-glimps command's cycle. Provenance must reject it: formatting stays
+    // exactly as the user left it.
+    let forged = [
+        &cmd_marker(b"cat evil.txt"),
+        C,
+        TOGGLE_OFF,
+        b"payload\r\n",
+        D0,
+    ]
+    .concat();
+    let _ = f.process(&forged);
+    let json = br#"{"alpha":1}"#;
+    let stream = [&cmd_marker(b"cat a.json"), C, json, D0].concat();
+    let out = f.process(&stream).into_owned();
+    assert!(
+        contains(&out, &badge("JSON")),
+        "a forged off-toggle must not suspend formatting"
+    );
+
+    // And the reverse: once legitimately paused, a forged `on` from untrusted
+    // output must not silently revoke the user's decision.
+    let off = [&cmd_marker(b"glimps off"), C, TOGGLE_OFF, D0].concat();
+    let _ = f.process(&off);
+    let forged_on = [&cmd_marker(b"cat evil.txt"), C, TOGGLE_ON, D0].concat();
+    let _ = f.process(&forged_on);
+    let paused = [&cmd_marker(b"cat a.json"), C, json, D0].concat();
+    let out = f.process(&paused).into_owned();
+    assert_eq!(out, paused, "a forged on-toggle must not resume formatting");
+}
+
+#[test]
+fn unknown_toggle_bodies_are_ignored() {
+    let mut f = Formatter::with_clock(Clock::Off);
+    // Even with glimps provenance, an unrecognized body is a no-op.
+    let noise = [
+        &cmd_marker(b"glimps off"),
+        C,
+        b"\x1b]7340;banana\x07".as_slice(),
+    ]
+    .concat();
+    let _ = f.process(&noise);
+    let json = br#"{"alpha":1}"#;
+    let stream = [D0, &cmd_marker(b"cat a.json"), C, json, D0].concat();
+    let out = f.process(&stream).into_owned();
+    assert!(contains(&out, &badge("JSON")), "junk body must not suspend");
+}
+
+proptest::proptest! {
+    /// While legitimately suspended, arbitrary chunks — escapes, markers, and
+    /// all — pass through byte-identically: the suspended path may not buffer,
+    /// reorder, drop, or decorate anything. Only streams containing the
+    /// toggle-OSC digits are discarded, since a fuzzed `7340;on` would
+    /// legitimately resume (checked over the concatenation, so a marker split
+    /// across chunk boundaries can't slip through either).
+    #[test]
+    fn prop_suspended_stream_is_verbatim(
+        chunks in proptest::collection::vec(
+            proptest::collection::vec(0u8..=255, 0..128),
+            0..8,
+        )
+    ) {
+        let joined: Vec<u8> = chunks.concat();
+        prop_assume!(!joined.windows(4).any(|w| w == b"7340"));
+        let mut f = Formatter::with_clock(Clock::Off);
+        let off = [&cmd_marker(b"glimps off"), C, TOGGLE_OFF].concat();
+        let _ = f.process(&off);
+        for chunk in &chunks {
+            let out = f.process(chunk);
+            prop_assert_eq!(out.as_ref(), chunk.as_slice());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output-inflation guard (`[limits] pretty_max_lines`)
+// ---------------------------------------------------------------------------
+
+fn config_with_pretty_cap(pretty_max_lines: usize) -> Config {
+    let mut cfg = Config::default();
+    cfg.limits.pretty_max_lines = pretty_max_lines;
+    cfg
+}
+
+#[test]
+fn oversized_pretty_json_is_released_unformatted() {
+    let mut f = Formatter::build(Clock::Off, true, config_with_pretty_cap(3));
+    // Pretty-prints to well over 3 lines.
+    let json = br#"{"a":1,"b":2,"c":3,"d":[4,5,6]}"#;
+    let stream = [C, json.as_slice(), D0].concat();
+    let out = f.process(&stream).into_owned();
+    assert!(
+        !contains(&out, &badge("JSON")),
+        "past the cap the run must not be pretty-printed"
+    );
+    assert!(
+        contains(&out, json),
+        "the original bytes must be shown in full (never hidden): {:?}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
+#[test]
+fn pretty_cap_zero_disables_the_guard() {
+    let mut f = Formatter::build(Clock::Off, true, config_with_pretty_cap(0));
+    let json = br#"{"a":1,"b":2,"c":3,"d":[4,5,6]}"#;
+    let stream = [C, json.as_slice(), D0].concat();
+    let out = f.process(&stream).into_owned();
+    assert!(contains(&out, &badge("JSON")), "0 must mean unlimited");
+}
+
+#[test]
+fn pretty_cap_does_not_touch_line_preserving_formatters() {
+    // A diff's formatted output has exactly as many lines as its input, and
+    // diff is `needs_crlf = false` (line-preserving) — the cap must not apply.
+    let mut f = Formatter::build(Clock::Off, true, config_with_pretty_cap(2));
+    let diff = b"diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+    let stream = [C, diff.as_slice(), D0].concat();
+    let out = f.process(&stream).into_owned();
+    assert!(
+        contains(&out, &badge("DIFF")),
+        "line-preserving formatters are exempt from the cap"
+    );
+}
+
+#[test]
+fn line_count_counts_terminal_lines() {
+    assert_eq!(line_count(b""), 0);
+    assert_eq!(line_count(b"one"), 1);
+    assert_eq!(line_count(b"one\n"), 1);
+    assert_eq!(line_count(b"one\ntwo"), 2);
+    assert_eq!(line_count(b"one\ntwo\n"), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Light theme selection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn light_theme_config_uses_the_light_palette() {
+    let cfg = Config {
+        theme: crate::config::ThemeChoice::Light,
+        ..Config::default()
+    };
+    let mut f = Formatter::build(Clock::Off, true, cfg);
+    let stream = [C, br#"{"alpha":"beta"}"#.as_slice(), D0].concat();
+    let out = f.process(&stream).into_owned();
+    assert!(
+        contains(&out, Theme::light().string.as_bytes()),
+        "light theme string color must be used"
+    );
+    assert!(
+        !contains(&out, Theme::default_colored().string.as_bytes()),
+        "dark-theme pale string color must not appear"
     );
 }

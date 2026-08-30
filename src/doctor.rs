@@ -74,6 +74,13 @@ pub fn run() -> Result<i32> {
         check_config(config_path().as_deref()),
         check_path(&current_exe, env::var_os("PATH").as_deref()),
     ];
+    let rc = rc_text(shell.as_deref(), home.as_deref());
+    checks.extend(check_rc_hygiene(shell.as_deref(), rc.as_deref()));
+    checks.push(check_coexistence(
+        rc.as_deref(),
+        env::var("TERM_PROGRAM").ok().as_deref(),
+        env::var_os("GHOSTTY_RESOURCES_DIR").is_some(),
+    ));
 
     checks.push(
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
@@ -143,7 +150,7 @@ pub fn run() -> Result<i32> {
     }
 }
 
-fn shell_name(shell: &Path) -> Option<&str> {
+pub(crate) fn shell_name(shell: &Path) -> Option<&str> {
     shell.file_name()?.to_str()
 }
 
@@ -155,7 +162,7 @@ fn check_shell(shell: Option<&Path>) -> Check {
     }
 }
 
-fn integration_path(shell: &Path, home: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn integration_path(shell: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let home = home?;
     match shell_name(shell)? {
         "zsh" => Some(
@@ -196,11 +203,119 @@ fn check_integration(shell: Option<&Path>, home: Option<&Path>) -> Check {
     }
 }
 
-fn has_active_integration(text: &str, expected: &str) -> bool {
+pub(crate) fn has_active_integration(text: &str, expected: &str) -> bool {
     text.lines().any(|line| {
         let line = line.trim_start();
         !line.starts_with('#') && line.contains(expected)
     })
+}
+
+/// The rc file's text, when a shell/home pair selects one that exists and is
+/// readable. Read once in `run()` and shared by the hygiene and coexistence
+/// checks; never mutated.
+fn rc_text(shell: Option<&Path>, home: Option<&Path>) -> Option<String> {
+    let path = integration_path(shell?, home)?;
+    read_small_text(&path).ok().flatten()
+}
+
+/// Frameworks whose rc lines mark "everything above the GLIMPS line runs twice
+/// per session" territory. The GLIMPS integration re-execs the shell, and the
+/// re-exec'd shell re-sources the same rc — so a plugin manager or prompt
+/// framework *above* the GLIMPS line is initialized twice (slow startup, and
+/// occasionally double-registered hooks). Needles are invocation-shaped —
+/// `antigen apply`, not the bare word `antigen`, which would also match
+/// `export PATH="$HOME/.antigen/bin:$PATH"` — and matched against non-comment
+/// lines only.
+const REEXEC_HAZARDS: &[(&str, &str)] = &[
+    ("oh-my-zsh", "oh-my-zsh.sh"),
+    ("zinit", "zinit.zsh"),
+    ("zinit", "zinit light"),
+    ("zinit", "zinit snippet"),
+    ("antigen", "antigen.zsh"),
+    ("antigen", "antigen apply"),
+    ("zplug", "zplug/init.zsh"),
+    ("zplug", "zplug load"),
+    ("sheldon", "sheldon source"),
+    ("starship", "starship init"),
+    ("powerlevel10k instant prompt", "p10k-instant-prompt"),
+    ("oh-my-posh", "oh-my-posh init"),
+];
+
+/// The first non-comment line index containing `needle`, if any.
+fn active_line_index(text: &str, needle: &str) -> Option<usize> {
+    text.lines().position(|line| {
+        let line = line.trim_start();
+        !line.starts_with('#') && line.contains(needle)
+    })
+}
+
+/// If the GLIMPS integration sits *below* a known plugin manager / prompt
+/// framework, name the offender that appears earliest *in the file* (not in
+/// the hazard table). `None` means placement is fine (or the integration/rc is
+/// absent — the integration check already reports that).
+fn placement_hazard(text: &str, expected: &str) -> Option<&'static str> {
+    let glimps_at = active_line_index(text, expected)?;
+    REEXEC_HAZARDS
+        .iter()
+        .filter_map(|(name, needle)| Some((active_line_index(text, needle)?, *name)))
+        .filter(|&(at, _)| at < glimps_at)
+        .min_by_key(|&(at, _)| at)
+        .map(|(_, name)| name)
+}
+
+/// Warn when the GLIMPS rc line sits below a plugin manager or prompt
+/// framework (the double-sourcing footgun the README documents). Emitted only
+/// when the rc and an active integration line actually exist.
+fn check_rc_hygiene(shell: Option<&Path>, rc: Option<&str>) -> Option<Check> {
+    let name = shell_name(shell?)?;
+    let text = rc?;
+    let expected = format!("glimps init {name}");
+    active_line_index(text, &expected)?;
+    Some(match placement_hazard(text, &expected) {
+        Some(name) => Check::warning(
+            "rc order",
+            format!(
+                "the GLIMPS line sits below {name}; everything above it runs twice \
+                 per session — move it near the top of the rc file"
+            ),
+        ),
+        None => Check::pass("rc order", "the GLIMPS line is above known frameworks"),
+    })
+}
+
+/// Detect other shell integrations that also emit OSC-133-style marks. GLIMPS
+/// finds the command/output boundary with those marks; a second emitter in the
+/// same session is untested territory and can misplace headers. Informational:
+/// a warning here does not mean anything is broken.
+fn check_coexistence(
+    rc: Option<&str>,
+    term_program: Option<&str>,
+    ghostty_resources: bool,
+) -> Check {
+    if let Some(text) = rc {
+        if has_active_integration(text, "iterm2_shell_integration") {
+            return Check::warning(
+                "coexistence",
+                "iTerm2 shell integration is also installed; both emit shell-integration \
+                 marks — if command headers misplace, load it only outside GLIMPS sessions",
+            );
+        }
+    }
+    if ghostty_resources || term_program == Some("ghostty") {
+        return Check::warning(
+            "coexistence",
+            "Ghostty injects its own shell integration (OSC-133); if command headers \
+             misplace, disable Ghostty's shell-integration feature for GLIMPS sessions",
+        );
+    }
+    if term_program == Some("WarpTerminal") {
+        return Check::warning(
+            "coexistence",
+            "Warp rewrites terminal blocks with its own integration; GLIMPS inside \
+             Warp is untested",
+        );
+    }
+    Check::pass("coexistence", "no competing shell integration detected")
 }
 
 fn check_config(path: Option<&Path>) -> Check {
@@ -229,7 +344,7 @@ fn check_config(path: Option<&Path>) -> Check {
     }
 }
 
-fn read_small_text(path: &Path) -> std::io::Result<Option<String>> {
+pub(crate) fn read_small_text(path: &Path) -> std::io::Result<Option<String>> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -343,6 +458,53 @@ mod tests {
             "  # command -v glimps && eval \"$(glimps init zsh)\"\n",
             "glimps init zsh"
         ));
+    }
+
+    #[test]
+    fn placement_hazard_flags_frameworks_above_the_glimps_line() {
+        let below = "source $ZSH/oh-my-zsh.sh\n\
+                     command -v glimps >/dev/null 2>&1 && eval \"$(glimps init zsh)\"\n";
+        assert_eq!(
+            placement_hazard(below, "glimps init zsh"),
+            Some("oh-my-zsh")
+        );
+
+        let above = "command -v glimps >/dev/null 2>&1 && eval \"$(glimps init zsh)\"\n\
+                     source $ZSH/oh-my-zsh.sh\n\
+                     eval \"$(starship init zsh)\"\n";
+        assert_eq!(placement_hazard(above, "glimps init zsh"), None);
+
+        // Commented-out frameworks don't count.
+        let commented = "# source $ZSH/oh-my-zsh.sh\n\
+                         eval \"$(glimps init zsh)\"\n";
+        assert_eq!(placement_hazard(commented, "glimps init zsh"), None);
+
+        // No integration line at all -> no placement verdict.
+        assert_eq!(placement_hazard("source x\n", "glimps init zsh"), None);
+    }
+
+    #[test]
+    fn coexistence_flags_other_integrations_and_terminals() {
+        let rc =
+            "test -e ~/.iterm2_shell_integration.zsh && source ~/.iterm2_shell_integration.zsh\n";
+        assert_eq!(
+            check_coexistence(Some(rc), None, false).level,
+            Level::Warning
+        );
+        assert_eq!(
+            check_coexistence(None, Some("WarpTerminal"), false).level,
+            Level::Warning
+        );
+        assert_eq!(check_coexistence(None, None, true).level, Level::Warning);
+        assert_eq!(
+            check_coexistence(
+                Some("eval \"$(glimps init zsh)\"\n"),
+                Some("iTerm.app"),
+                false
+            )
+            .level,
+            Level::Pass
+        );
     }
 
     #[test]

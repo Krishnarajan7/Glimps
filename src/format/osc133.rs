@@ -93,6 +93,38 @@ const CWD_OSC: &[u8] = b"7338;";
 /// command (`OSC 7339 ; <status status ...>`), emitted by `glimps init`'s
 /// precmd without changing the shell's pipefail behavior.
 const PIPELINE_STATUS_OSC: &[u8] = b"7339;";
+/// GLIMPS's private OSC pausing/resuming formatting for the rest of the session
+/// (`OSC 7340 ; off` / `OSC 7340 ; on`), emitted by `glimps off` / `glimps on`
+/// run *inside* a wrapped shell.
+///
+/// Provenance-gated: the toggle is honored only while the most recent command
+/// captured from the (already forgery-guarded) `7337` marker invokes `glimps`
+/// itself. Untrusted bytes — an SSH remote, `cat` of a hostile file, a `curl`
+/// response — arrive inside some *other* command's cycle, so a forged `on`
+/// cannot silently revoke a user's deliberate `glimps off`, and a forged `off`
+/// cannot silently kill formatting for the session. ACCEPTED RESIDUAL: a
+/// source that can already forge an entire trusted command cycle (prompt
+/// marker + `7337;glimps …` + `C`) can also forge this — the same residual the
+/// command header itself carries.
+const FORMAT_TOGGLE_OSC: &[u8] = b"7340;";
+
+/// Whether a captured command line is exactly a `glimps` toggle invocation —
+/// two tokens, the first's path basename `glimps` and the second `off` or
+/// `on`, which is all `glimps off`/`glimps on` can be typed as. Deliberately
+/// this narrow: a looser first-token check would grant provenance to the whole
+/// line, so `glimps doctor; cat evil.txt` would let the untrusted tail forge a
+/// toggle. `sudo glimps off` or an alias also fails and the toggle is simply
+/// ignored (formatting state unchanged — safe).
+fn command_is_glimps_toggle(command: &[u8]) -> bool {
+    let mut tokens = command
+        .split(|&b| b == b' ' || b == b'\t')
+        .filter(|token| !token.is_empty());
+    let (Some(first), Some(second), None) = (tokens.next(), tokens.next(), tokens.next()) else {
+        return false;
+    };
+    let basename = first.rsplit(|&b| b == b'/').next().unwrap_or(first);
+    basename == b"glimps" && matches!(second, b"off" | b"on")
+}
 
 /// Upper bound on a captured command. Commands are short; this just bounds memory
 /// against a pathological/huge one (we then simply don't show a header for it).
@@ -165,6 +197,15 @@ pub struct Osc133Scanner {
     pipeline_statuses: Option<Vec<i32>>,
     /// The most recent command exit code captured from `OSC 133;D;<code>`.
     exit_code: Option<i32>,
+    /// A pending formatting toggle captured from `FORMAT_TOGGLE_OSC`
+    /// (`Some(true)` = resume, `Some(false)` = pause), awaiting consumption by
+    /// the formatter. `None` once taken.
+    format_toggle: Option<bool>,
+    /// Whether the most recent trusted `7337` command invokes `glimps` itself —
+    /// the provenance the toggle marker requires (see [`FORMAT_TOGGLE_OSC`]).
+    /// Unlike `command`, this is not consumed at output start; it reflects the
+    /// current command cycle until the next `7337` capture.
+    toggle_provenance_ok: bool,
     /// Private command metadata is accepted only during an armed command cycle:
     /// initially, or after a prompt/input marker. Output and command-end markers
     /// close the window so output cannot forge `D -> 7337 -> C` and create a
@@ -188,6 +229,8 @@ impl Osc133Scanner {
             cwd: None,
             pipeline_statuses: None,
             exit_code: None,
+            format_toggle: None,
+            toggle_provenance_ok: false,
             command_marker_allowed: true,
             output_start_allowed: true,
         }
@@ -219,6 +262,12 @@ impl Osc133Scanner {
     /// Take the exit code captured from the most recent command-end marker.
     pub fn take_exit_code(&mut self) -> Option<i32> {
         self.exit_code.take()
+    }
+
+    /// Take a pending formatting toggle (`true` = resume, `false` = pause)
+    /// captured from `glimps on` / `glimps off` run inside the session.
+    pub fn take_format_toggle(&mut self) -> Option<bool> {
+        self.format_toggle.take()
     }
 
     /// The zone the stream is currently in, i.e. the zone the *next* byte fed
@@ -426,6 +475,7 @@ impl Osc133Scanner {
                 // the preceding prompt/input marker. Merely leaving Output via
                 // a forged D does not re-arm this window.
                 if self.command_marker_allowed && self.zone != Zone::Output {
+                    self.toggle_provenance_ok = command_is_glimps_toggle(cmd);
                     self.command = Some(cmd.to_vec());
                     self.command_marker_allowed = false;
                 }
@@ -435,6 +485,17 @@ impl Osc133Scanner {
                 // output), so it cannot be zone-guarded. Its injection risk is
                 // fully covered by the display sanitizer in `cmdline`/`mod`.
                 self.cwd = Some(cwd.to_vec());
+            } else if let Some(raw) = self.osc_buf.strip_prefix(FORMAT_TOGGLE_OSC) {
+                // Provenance-gated (see FORMAT_TOGGLE_OSC): honored only while
+                // the current command cycle is a `glimps …` invocation.
+                // Unrecognized bodies are ignored (no state change).
+                if self.toggle_provenance_ok {
+                    match raw {
+                        b"on" => self.format_toggle = Some(true),
+                        b"off" => self.format_toggle = Some(false),
+                        _ => {}
+                    }
+                }
             } else if let Some(raw) = self.osc_buf.strip_prefix(PIPELINE_STATUS_OSC) {
                 // Same timing as cwd: the shell emits this from precmd while the
                 // stream is still in Output. The payload is parsed as integers
@@ -445,6 +506,9 @@ impl Osc133Scanner {
                 self.zone = Zone::Unknown;
                 self.command_marker_allowed = false;
                 self.output_start_allowed = false;
+                // The glimps command's cycle is over; its toggle provenance
+                // must not linger into the following prompt zone.
+                self.toggle_provenance_ok = false;
             } else if let Some(zone) = classify_osc133(&self.osc_buf) {
                 match zone {
                     Zone::Prompt | Zone::Input => {
@@ -468,6 +532,7 @@ impl Osc133Scanner {
                         self.zone = Zone::Unknown;
                         self.command_marker_allowed = false;
                         self.output_start_allowed = false;
+                        self.toggle_provenance_ok = false;
                     }
                 }
             }
@@ -566,6 +631,26 @@ fn trim_ascii(bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toggle_provenance_matches_only_a_bare_glimps_toggle_invocation() {
+        assert!(command_is_glimps_toggle(b"glimps off"));
+        assert!(command_is_glimps_toggle(b"glimps on"));
+        assert!(command_is_glimps_toggle(b"/usr/local/bin/glimps on"));
+        assert!(command_is_glimps_toggle(b"  glimps\toff"));
+        // Compound lines must NOT grant provenance to their untrusted tail.
+        assert!(!command_is_glimps_toggle(b"glimps off; cat evil.txt"));
+        assert!(!command_is_glimps_toggle(b"glimps doctor; cat evil.txt"));
+        // Non-toggle glimps subcommands never emit the OSC, so they get none.
+        assert!(!command_is_glimps_toggle(b"glimps doctor"));
+        assert!(!command_is_glimps_toggle(b"glimps"));
+        assert!(!command_is_glimps_toggle(b"cat evil.txt"));
+        assert!(!command_is_glimps_toggle(b"glimpsy off"));
+        assert!(!command_is_glimps_toggle(b"sudo glimps off"));
+        assert!(!command_is_glimps_toggle(b"ssh host glimps off"));
+        assert!(!command_is_glimps_toggle(b""));
+        assert!(!command_is_glimps_toggle(b"   "));
+    }
 
     /// `ESC ] 133 ; <c> BEL`
     fn marker_bel(c: char) -> Vec<u8> {

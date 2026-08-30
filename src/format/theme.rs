@@ -103,6 +103,39 @@ impl Theme {
     }
 }
 
+impl Theme {
+    /// Palette for light terminal backgrounds (`theme = "light"`). Same semantic
+    /// roles as [`default_colored`](Self::default_colored), with the pale tones
+    /// (sky blue, pale gold, pale blue-gray) swapped for darker ones that stay
+    /// readable on white. Colors that already read well on both backgrounds
+    /// (red errors, dark green success, magenta keywords) are kept identical so
+    /// the two themes feel like the same product.
+    pub const fn light() -> Self {
+        Theme {
+            key: "\x1b[38;5;30m",              // dark teal (cyan is washy on white)
+            string: "\x1b[38;5;25m",           // deep blue content
+            number: "\x1b[38;5;130m",          // dark orange numbers
+            keyword: "\x1b[35m",               // magenta
+            html_delim: "\x1b[2m",             // dim brackets / punctuation
+            html_name: "\x1b[38;2;176;42;90m", // darker rose for element names
+            html_attr: "\x1b[38;5;130m",       // dark orange attributes
+            html_value: "\x1b[38;5;25m",       // deep blue quoted values
+            html_raw: "\x1b[38;5;25m",         // deep blue CSS/JS/title text
+            comment: "\x1b[2m",                // dim
+            muted: "\x1b[38;5;60m",            // slate for low-priority text
+            action: "\x1b[38;2;4;98;153m",     // darker action blue
+            path: "\x1b[38;2;29;111;165m",     // readable path blue
+            hidden: "\x1b[38;5;245m",          // mid gray (dark charcoal is too loud on white)
+            folder: "\x1b[38;2;52;84;175m",    // deep indigo folders
+            error: "\x1b[31m",                 // red    (ERROR / 5xx)
+            warn: "\x1b[38;5;130m",            // dark orange (WARN / 4xx)
+            info: "\x1b[38;2;39;135;51m",      // same semantic green
+            debug: "\x1b[2m",                  // dim    (DEBUG/TRACE / 3xx)
+            reset: "\x1b[0m",
+        }
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Self::default_colored()
