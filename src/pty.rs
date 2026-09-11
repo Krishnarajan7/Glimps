@@ -4,7 +4,8 @@
 //! own the *master* side. Three jobs run concurrently:
 //!   1. stdin  -> PTY master   (forward the user's keystrokes to the shell)
 //!   2. PTY master -> Formatter -> stdout   (the shell's output, reformatted)
-//!   3. SIGWINCH -> resize the PTY   (keep the inner shell's size in sync)
+//!   3. window resize -> resize the PTY   (keep the inner shell's size in sync;
+//!      SIGWINCH on Unix, size polling on Windows where no such signal exists)
 //!
 //! Job #2 still defaults to pass-through unless the formatter confidently claims
 //! an output run, so the session should feel identical to a normal terminal for
@@ -12,7 +13,9 @@
 
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGWINCH};
+#[cfg(unix)]
+use signal_hook::consts::{SIGHUP, SIGWINCH};
+use signal_hook::consts::{SIGINT, SIGTERM};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -20,15 +23,27 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::config::Config;
+use crate::config::{shell_name, Config};
 use crate::format::{Clock, Formatter};
 use crate::metadata::MetadataChannel;
+#[cfg(not(unix))]
+use crate::terminal::try_term_size;
 use crate::terminal::{term_size, RawGuard};
 
 /// Maximum time formatter-held output may remain invisible while the PTY is
 /// quiet. This small coalescing window preserves coloring for lines split across
 /// adjacent reads while ensuring no-newline interactive prompts appear promptly.
 const INTERACTIVE_FLUSH_DELAY: Duration = Duration::from_millis(40);
+
+/// Signals that ask GLIMPS to end the session. Catching them is what lets `kill`
+/// actually work: we exit through the normal path so the `RawGuard` restores the
+/// terminal (a default-handled signal would leave it in raw mode). Windows has
+/// no `SIGHUP`; console close is delivered differently and the console dies with
+/// it anyway.
+#[cfg(unix)]
+const TERMINATION_SIGNALS: &[i32] = &[SIGINT, SIGTERM, SIGHUP];
+#[cfg(not(unix))]
+const TERMINATION_SIGNALS: &[i32] = &[SIGINT, SIGTERM];
 
 /// How the wrapped shell session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,9 +84,10 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit>
     //     login one — and the integration line lives in `.bashrc`. `-i` is what
     //     makes the inner bash actually load the hooks.
     // The shell is interactive anyway (its stdio is this PTY); `-i` just makes it
-    // explicit and picks the right rc file.
+    // explicit and picks the right rc file. PowerShell and cmd.exe have no `-i`
+    // (see `interactive_shell_args`).
     let mut cmd = CommandBuilder::new(shell);
-    cmd.arg("-i");
+    cmd.args(interactive_shell_args(shell));
     cmd.env("GLIMPS_ACTIVE", "1");
     match metadata_channel.as_ref() {
         Some(channel) => cmd.env("GLIMPS_META_PATH", channel.path()),
@@ -176,18 +192,14 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit>
     });
 
     // Job #3 + lifecycle: on the main thread, watch for window resizes, the shell
-    // exiting, and termination signals. Catching SIGTERM/SIGINT/SIGHUP is what
-    // lets `kill` actually work: we exit through the normal path so the RawGuard
-    // restores the terminal (a default-handled signal would leave it in raw mode).
-    // Atomic flags set by the signal handlers are the simplest reliable mechanism.
+    // exiting, and termination signals (see `TERMINATION_SIGNALS`). Atomic flags
+    // set by the signal handlers are the simplest reliable mechanism.
     let terminate = Arc::new(AtomicBool::new(false));
-    for sig in [SIGINT, SIGTERM, SIGHUP] {
-        signal_hook::flag::register(sig, Arc::clone(&terminate))
+    for sig in TERMINATION_SIGNALS {
+        signal_hook::flag::register(*sig, Arc::clone(&terminate))
             .context("failed to register termination signal handler")?;
     }
-    let resized = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(SIGWINCH, Arc::clone(&resized))
-        .context("failed to register SIGWINCH handler")?;
+    let mut resize = ResizeWatch::new((cols, rows))?;
 
     let mut signaled = false;
     let exit_code = loop {
@@ -206,8 +218,7 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit>
             terminate_shell_session(child.as_mut(), pair.master.as_ref());
             break 130;
         }
-        if resized.swap(false, Ordering::Acquire) {
-            let (cols, rows) = term_size();
+        if let Some((cols, rows)) = resize.changed() {
             let _ = pair.master.resize(PtySize {
                 rows,
                 cols,
@@ -245,6 +256,65 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit>
         code: exit_code,
         signaled,
     })
+}
+
+/// Arguments that start `shell` as an interactive, non-login shell.
+///
+/// `-i` is the POSIX-shell convention and what zsh/bash need to read their
+/// interactive rc (where the GLIMPS integration lives). PowerShell is
+/// interactive by default; `-NoLogo` only suppresses the banner the outer
+/// shell already printed. `cmd.exe` takes no such flag at all. Chosen by shell
+/// name on every platform: a `pwsh` on macOS/Linux gets `-NoLogo` too (it
+/// was never a supported shell before, so nothing that worked changes).
+fn interactive_shell_args(shell: &str) -> &'static [&'static str] {
+    match shell_name(std::path::Path::new(shell)) {
+        Some("pwsh" | "powershell") => &["-NoLogo"],
+        Some("cmd") => &[],
+        _ => &["-i"],
+    }
+}
+
+/// Detects window-size changes for job #3. Unix learns them from `SIGWINCH`;
+/// Windows has no resize signal, so the supervisor loop (which already ticks
+/// every 40 ms) compares the console size against the last one it applied.
+struct ResizeWatch {
+    #[cfg(unix)]
+    flag: Arc<AtomicBool>,
+    #[cfg(not(unix))]
+    last: (u16, u16),
+}
+
+impl ResizeWatch {
+    #[cfg(unix)]
+    fn new(_initial: (u16, u16)) -> Result<Self> {
+        let flag = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(SIGWINCH, Arc::clone(&flag))
+            .context("failed to register SIGWINCH handler")?;
+        Ok(Self { flag })
+    }
+
+    #[cfg(not(unix))]
+    fn new(initial: (u16, u16)) -> Result<Self> {
+        Ok(Self { last: initial })
+    }
+
+    /// The new `(cols, rows)` if the terminal was resized since the last call.
+    #[cfg(unix)]
+    fn changed(&mut self) -> Option<(u16, u16)> {
+        self.flag.swap(false, Ordering::Acquire).then(term_size)
+    }
+
+    /// A failed size query is skipped, never treated as a change: polling
+    /// happens 25 times a second, and applying the 80x24 fallback on a
+    /// transient failure would reflow the user's screen.
+    #[cfg(not(unix))]
+    fn changed(&mut self) -> Option<(u16, u16)> {
+        let now = try_term_size()?;
+        (now != self.last).then(|| {
+            self.last = now;
+            now
+        })
+    }
 }
 
 /// Terminate the inner PTY session without leaving its foreground job behind.
@@ -306,10 +376,36 @@ fn signal_distinct_groups(
     }
 }
 
+/// Windows: ConPTY has no process groups to signal. `kill` terminates the shell
+/// process; closing the pseudo-console (when `pair.master` drops) is what ends
+/// whatever it was running.
 #[cfg(not(unix))]
 fn terminate_shell_session(
     child: &mut dyn portable_pty::Child,
     _master: &dyn portable_pty::MasterPty,
 ) {
     let _ = child.kill();
+    let reap_end = std::time::Instant::now() + Duration::from_millis(300);
+    while std::time::Instant::now() < reap_end {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::interactive_shell_args;
+
+    #[test]
+    fn posix_shells_get_interactive_flag_and_windows_shells_do_not() {
+        assert_eq!(interactive_shell_args("/bin/zsh"), &["-i"]);
+        assert_eq!(interactive_shell_args("bash"), &["-i"]);
+        assert_eq!(interactive_shell_args("/usr/local/bin/fish"), &["-i"]);
+        assert_eq!(interactive_shell_args("pwsh"), &["-NoLogo"]);
+        assert_eq!(interactive_shell_args("pwsh.exe"), &["-NoLogo"]);
+        assert_eq!(interactive_shell_args("powershell.EXE"), &["-NoLogo"]);
+        assert!(interactive_shell_args("cmd.exe").is_empty());
+    }
 }

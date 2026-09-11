@@ -1338,3 +1338,119 @@ fn percent_value(word: &[u8]) -> Option<f64> {
 fn float_value(word: &[u8]) -> Option<f32> {
     std::str::from_utf8(word).ok()?.parse().ok()
 }
+
+/// Color one line of `<tool> --version` output.
+///
+/// Version banners are prose, not a table: `mysql  Ver 9.5.0 for macos26.1 on
+/// arm64 (Homebrew)`. Only the two things a reader actually looks for are
+/// painted — the version number and any parenthesized build/vendor note —
+/// plus the leading tool name when the line opens with one. Connective words
+/// (`Ver`, `for`, `on`) are deliberately left uncoloured so the line still
+/// reads as a sentence instead of a wall of colour.
+pub fn colorize_version_line(line: &[u8], theme: &Theme, first_line: bool) -> Option<Vec<u8>> {
+    if theme.reset.is_empty() {
+        return None;
+    }
+    let (content, ending) = split_line(line);
+    if trim_ascii_start(content).is_empty() {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(line.len() + 96);
+    let mut cursor = 0usize;
+    let mut painted_any = false;
+    // Tracks whether an unclosed `(` is open, counted per byte rather than per
+    // word so `(GNU coreutils)` stays one colour and `b)c` closes correctly.
+    let mut depth = 0usize;
+
+    for (index, (start, end)) in word_spans(content).iter().copied().enumerate() {
+        out.extend_from_slice(&content[cursor..start]);
+        let word = &content[start..end];
+        cursor = end;
+
+        let opened_before = depth > 0;
+        let opens_here = word.contains(&b'(');
+        depth = depth
+            .saturating_add(word.iter().filter(|byte| **byte == b'(').count())
+            .saturating_sub(word.iter().filter(|byte| **byte == b')').count());
+
+        // Split trailing sentence punctuation off the number so only the
+        // version itself carries the number colour.
+        let (core, trailer) = split_version_trailer(word);
+
+        // A version wins over the paren branch when it *opens* the group, so
+        // bash's `5.2.15(1)-release` reads as a version rather than a note.
+        // Once a group is genuinely open, everything inside it stays one
+        // colour — a version nested in `(Library: OpenSSL 3.2.1)` belongs to
+        // the note, not to the banner.
+        if !opened_before && is_version_token(core) {
+            paint_bytes(&mut out, theme.number, core, theme.reset);
+            out.extend_from_slice(trailer);
+            painted_any = true;
+        } else if opened_before || opens_here {
+            // A parenthesized note is painted whole, however many words it spans.
+            paint_bytes(&mut out, theme.muted, word, theme.reset);
+            painted_any = true;
+        } else if first_line && index == 0 && is_tool_name(word) {
+            paint_bytes(&mut out, theme.key, word, theme.reset);
+            painted_any = true;
+        } else {
+            out.extend_from_slice(word);
+        }
+    }
+    out.extend_from_slice(&content[cursor..]);
+    out.extend_from_slice(ending);
+    painted_any.then_some(out)
+}
+
+/// Split trailing sentence punctuation (`1.2.3,` / `1.2.3.` / `1.2.3;`) off a
+/// word so the punctuation is not painted as part of the version.
+fn split_version_trailer(word: &[u8]) -> (&[u8], &[u8]) {
+    let end = word
+        .iter()
+        .rposition(|byte| !matches!(byte, b',' | b';' | b':' | b'.'))
+        .map_or(0, |last| last + 1);
+    word.split_at(end)
+}
+
+/// Whether a word carries a version number: after an optional `v`/`V` prefix it
+/// starts with a digit, has at least two digits and at least one `.`, and
+/// contains only the characters versions are built from (alphanumerics, `.`,
+/// `-`, `_`, `+`, and the parens of `5.2.15(1)-release`).
+///
+/// So `9.5.0`, `v1.2.3`, `1.2.3-beta`, and bash's `5.2.15(1)-release` qualify.
+/// `arm64` and prose words do not — they fail the leading-digit test. Note
+/// that a bare `26.1` *would* qualify; `macos26.1` is rejected only because it
+/// starts with `m`. That is deliberate: the dotted-number rule is what keeps a
+/// year (`2026`) or a plain count out, and widening it past that is what turns
+/// this into a false positive.
+fn is_version_token(word: &[u8]) -> bool {
+    let core = match word.split_first() {
+        Some((b'v' | b'V', rest)) => rest,
+        _ => word,
+    };
+    if !core.first().is_some_and(u8::is_ascii_digit) {
+        return false;
+    }
+    let mut digits = 0usize;
+    let mut dots = 0usize;
+    for byte in core {
+        match byte {
+            b'0'..=b'9' => digits += 1,
+            b'.' => dots += 1,
+            b'-' | b'_' | b'+' | b'(' | b')' => {}
+            b'a'..=b'z' | b'A'..=b'Z' => {}
+            _ => return false,
+        }
+    }
+    digits >= 2 && dots >= 1
+}
+
+/// Whether the first word looks like a program name rather than prose. Only
+/// reached when the word is not a version token, so it does not re-test that.
+fn is_tool_name(word: &[u8]) -> bool {
+    word.first().is_some_and(u8::is_ascii_alphabetic)
+        && word
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-' | b'.' | b'+'))
+}

@@ -289,6 +289,11 @@ pub struct Formatter {
     /// rename and reorder columns, and rows for kernel objects leave some of
     /// them empty, so values are placed by byte position against this schema.
     lsof_columns: Vec<linefmt::LsofColumn>,
+    /// What the `mysql`/`psql`/`sqlite3` view learned from the lines so far:
+    /// table edges and open multi-line cells. Interactive shells print many
+    /// tables inside one command, so header detection is structural, not
+    /// positional. Reset with the rest of the per-command line state.
+    sql_result: linefmt::SqlResultState,
     /// Read-only error-line observer for the failure footer (F3). Fed the
     /// output zone's bytes — including in-zone Pass escapes, which is where
     /// colored compiler errors live — and never emits a byte itself.
@@ -370,6 +375,7 @@ impl Formatter {
             ps_columns: Vec::new(),
             df_columns: Vec::new(),
             lsof_columns: Vec::new(),
+            sql_result: linefmt::SqlResultState::default(),
             pin: pin::ErrorPin::new(),
             pin_armed: false,
             markdown_fence: None,
@@ -1085,6 +1091,16 @@ impl Formatter {
                     debug_assert!(line.is_empty());
                     out.extend_from_slice(&seg[start..=i]);
                     self.command_output_line_count += 1;
+                    // Inside a database shell this is every prompt+echo line
+                    // (`mysql> desc t;`). The line formatters never saw it, so
+                    // tell the one that tracks structure across lines that
+                    // continuity is broken — otherwise the next result's
+                    // header row would be judged against the previous table.
+                    // The reset also re-arms header detection, deliberately:
+                    // in sqlite3 every result's header follows a prompt line.
+                    // The cost is a client that streams rows across a stall,
+                    // whose next all-text row may be keyed as a header.
+                    self.sql_result.reset();
                     emitted_prefix = false;
                 } else {
                     line.extend_from_slice(&seg[start..=i]);
@@ -1187,6 +1203,7 @@ impl Formatter {
         self.ps_columns.clear();
         self.df_columns.clear();
         self.lsof_columns.clear();
+        self.sql_result.reset();
         self.markdown_fence = None;
     }
 
@@ -1250,13 +1267,16 @@ impl Formatter {
             CommandView::NetworkSetup => linefmt::colorize_networksetup_line(line, &self.theme),
             CommandView::Man => linefmt::format_man_line(line, &self.theme),
             CommandView::ManIndex => linefmt::colorize_man_index_line(line, &self.theme),
-            CommandView::File(view) => self.format_file_line(line, view),
-            CommandView::Nl(view) => self.format_nl_line(line, view),
-            CommandView::SqlResult => linefmt::colorize_sql_result_line(
+            CommandView::Version => linefmt::colorize_version_line(
                 line,
                 &self.theme,
-                self.command_output_line_count <= 1,
+                self.command_output_line_count == 0,
             ),
+            CommandView::File(view) => self.format_file_line(line, view),
+            CommandView::Nl(view) => self.format_nl_line(line, view),
+            CommandView::SqlResult => {
+                linefmt::colorize_sql_result_line(line, &self.theme, &mut self.sql_result)
+            }
             CommandView::Git(view) => linefmt::colorize_git_line(line, &self.theme, view),
             CommandView::Grep(view) => linefmt::colorize_grep_line(line, &self.theme, view),
         }
@@ -1355,6 +1375,7 @@ impl Formatter {
             Some(
                 CommandView::Man
                     | CommandView::ManIndex
+                    | CommandView::Version
                     | CommandView::Whereis
                     | CommandView::History
                     | CommandView::HistoryCounts
@@ -1667,6 +1688,7 @@ enum CommandView {
     Pmset,
     Man,
     ManIndex,
+    Version,
     File(FileView),
     Nl(NlView),
     SqlResult,
@@ -1793,6 +1815,12 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
     let name = cmdline::first_word(cmd)?;
     if let Some(view) = file_content_view(&name, cmd) {
         return Some(view);
+    }
+    // Before the name registry: `mysql --version` prints a one-line banner, not
+    // a result table, and a registered view would otherwise paint that prose
+    // with the table-cell palette.
+    if version_command_view(cmd) {
+        return Some(CommandView::Version);
     }
     if let Some(view) = registered_command_view(&name) {
         return Some(view);
@@ -2709,6 +2737,29 @@ fn starts_with_complete_json_line(bytes: &[u8]) -> bool {
         .iter()
         .any(|b| !b.is_ascii_whitespace());
     has_more_content && linefmt::is_json_line(&bytes[..=newline])
+}
+
+/// Whether the command is a bare version query — exactly `<tool> --version`.
+///
+/// Deliberately narrow, and only the long flag. The short forms are not
+/// version queries often enough to be safe: `-v` is "verbose" or "invert
+/// match" (`grep -v`, `ls -v`), and `-V` is "version sort" for `sort`, and
+/// "verify" for `dpkg`/`rpm` — all of which emit arbitrary user data that
+/// would then be painted as a banner. `sort -V` is the sharpest case, since
+/// its output *is* version-like tokens. A third word is excluded too, because
+/// it usually means the tool is doing real work (`docker version --format …`).
+/// Missing a banner costs nothing; misreading real output as one is the
+/// failure that matters (invariant #2).
+fn version_command_view(command: &[u8]) -> bool {
+    // `command_view` is re-evaluated for every output line, so refuse the
+    // allocating `shell_words` parse unless the flag is actually present.
+    if !command.ends_with(b"--version") {
+        return false;
+    }
+    let Some(words) = shell_words(command) else {
+        return false;
+    };
+    matches!(words.as_slice(), [_, flag] if flag.as_slice() == b"--version")
 }
 
 fn command_requests_help(command: &[u8]) -> bool {

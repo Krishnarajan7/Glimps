@@ -109,11 +109,16 @@ works."
 - ☐ URL highlighting / clickable hyperlinks (OSC 8)
 - ☑ Error-line pinning and deterministic failure summaries for long output
 - ◐ Shell breadth: bash is beta; fish remains TODO
-- ☐ Windows support (PTY + ANSI differences)
+- ◐ Windows support: experimental ConPTY spike landed (raw-mode + VT console
+      flags, size polling for resize, `pwsh`/`powershell` defaults, `glimps init
+      pwsh`, `.exe` command names, `scripts/dogfood-windows.ps1`). Untested on real
+      hardware; `docs/windows.md` step 2 (the ConPTY byte-fidelity probe) is the
+      gate before it can be offered for download.
 - ◐ More formatters via the `add-formatter` skill: **diffs ☑** (unified-diff
       coloring, hunk-anchored detection) and **stack traces ☑** (Rust panics +
       Python tracebacks, streaming); YAML, CSV/TSV, SQL, JSON-lines, source files,
-      config files, and database result tables ☑
+      config files, and database result tables ☑ (REPL-aware: every table in an
+      interactive `mysql`/`psql` session, `SHOW CREATE TABLE` bodies, status lines)
 
 ## v2.0 - Ambition (only if v1 has real traction)
 - ☐ Optional, **local/offline**, opt-in AI output summarization (privacy-preserving)

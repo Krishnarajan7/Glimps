@@ -108,15 +108,17 @@ fn main() -> Result<()> {
         Clock::Off
     };
 
-    // The shell to wrap. An explicit CLI choice wins over $SHELL. Unsupported
+    // The shell to wrap. An explicit CLI choice wins over $SHELL (and over the
+    // platform default where $SHELL is not set, as on Windows). Unsupported
     // shells still get a transparent PTY session, but no formatting is promised
     // because GLIMPS cannot install command boundaries for them.
-    let shell = shell_override
-        .or_else(|| std::env::var("SHELL").ok())
-        .unwrap_or_else(|| "/bin/zsh".to_string());
+    let Some(shell) = shell_override.or_else(glimps::config::default_shell) else {
+        eprintln!("glimps: no shell to wrap; set SHELL or pass --shell PATH.");
+        std::process::exit(2);
+    };
     if !is_supported_shell(&shell) {
         eprintln!(
-            "GLIMPS warning: shell '{}' has no GLIMPS integration; running transparent pass-through. Supported: zsh, bash.",
+            "GLIMPS warning: shell '{}' has no GLIMPS integration; running transparent pass-through. Supported: zsh, bash, pwsh.",
             shell
         );
     }
@@ -148,10 +150,8 @@ fn print_farewell(signaled: bool, enabled: bool) {
 }
 
 fn is_supported_shell(shell: &str) -> bool {
-    Path::new(shell)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| matches!(name, "zsh" | "bash"))
+    glimps::config::shell_name(Path::new(shell))
+        .is_some_and(|name| glimps::config::SUPPORTED_SHELLS.contains(&name))
 }
 
 fn choose_farewell(now: SystemTime) -> &'static str {
@@ -177,6 +177,7 @@ fn print_help() {
          \x20   glimps on           Resume formatting for this session.\n\
          \x20   glimps init zsh     Print zsh shell integration (for ~/.zshrc).\n\
          \x20   glimps init bash    Print bash shell integration (for ~/.bashrc).\n\
+         \x20   glimps init pwsh    Print PowerShell integration (for $PROFILE; experimental).\n\
          \x20   glimps --help       Show this help.\n\
          \x20   glimps --version    Show the version.\n\
          \n\
@@ -214,7 +215,9 @@ mod tests {
     fn supported_shell_check_uses_the_executable_basename() {
         assert!(is_supported_shell("/bin/zsh"));
         assert!(is_supported_shell("bash"));
+        assert!(is_supported_shell("pwsh.exe"));
         assert!(!is_supported_shell("/usr/local/bin/fish"));
+        assert!(!is_supported_shell("cmd.exe"));
         assert!(!is_supported_shell(""));
     }
 }

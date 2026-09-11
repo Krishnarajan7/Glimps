@@ -268,17 +268,139 @@ fn no_color_requested(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some_and(|v| !v.is_empty())
 }
 
-/// `$GLIMPSRC` if set, else `~/.glimpsrc`. `None` if `HOME` is also unset.
+/// `$GLIMPSRC` if set, else `~/.glimpsrc`. `None` if no home directory is known.
 pub(crate) fn config_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("GLIMPSRC") {
         return Some(PathBuf::from(p));
     }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".glimpsrc"))
+    home_dir().map(|home| home.join(".glimpsrc"))
+}
+
+/// The user's home directory: `HOME` (Unix; also set by Git Bash / MSYS on
+/// Windows). On Windows only, the native `USERPROFILE` and then
+/// `HOMEDRIVE`+`HOMEPATH` are consulted when `HOME` is unset — Unix behaviour
+/// is unchanged.
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        return Some(PathBuf::from(home));
+    }
+    if !cfg!(windows) {
+        return None;
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        return Some(PathBuf::from(profile));
+    }
+    let mut home = std::env::var_os("HOMEDRIVE")?;
+    home.push(std::env::var_os("HOMEPATH")?);
+    Some(PathBuf::from(home))
+}
+
+/// Shells GLIMPS ships an integration for (`glimps init <name>`).
+pub const SUPPORTED_SHELLS: &[&str] = &["zsh", "bash", "pwsh", "powershell"];
+
+/// The shell's bare name: the executable's basename without a Windows `.exe`
+/// suffix (`/bin/zsh` -> `zsh`, `C:\\...\\pwsh.exe` -> `pwsh`). Windows paths
+/// use `\\`, which `Path` only splits on Windows, so the suffix strip is what
+/// makes a bare `pwsh.exe` match either way.
+pub fn shell_name(shell: &std::path::Path) -> Option<&str> {
+    let stem = strip_exe_suffix(shell.file_name()?.to_str()?);
+    (!stem.is_empty()).then_some(stem)
+}
+
+/// `mysql.exe` -> `mysql`, case-insensitively. Only a real suffix is removed:
+/// a name that *is* `.exe`, or merely contains it, is untouched. Shared by the
+/// shell-name and command-name lookups so the two can never drift.
+pub(crate) fn strip_exe_suffix(name: &str) -> &str {
+    name.len()
+        .checked_sub(4)
+        .filter(|split| {
+            *split > 0
+                && name.is_char_boundary(*split)
+                && name[*split..].eq_ignore_ascii_case(".exe")
+        })
+        .map_or(name, |split| &name[..split])
+}
+
+/// The shell GLIMPS wraps when none is given: `$SHELL` where the platform sets
+/// it, else the platform's usual interactive shell. Windows sets no `SHELL`;
+/// PowerShell 7 (`pwsh`) is preferred when it is on `PATH`, then the in-box
+/// Windows PowerShell 5.1 if *it* is on `PATH`. `None` when nothing can be
+/// found (Windows with neither on `PATH`), never a guess.
+pub fn default_shell() -> Option<String> {
+    if let Ok(shell) = std::env::var("SHELL") {
+        if !shell.is_empty() {
+            return Some(shell);
+        }
+    }
+    if !cfg!(windows) {
+        return Some("/bin/zsh".to_string());
+    }
+    let path = std::env::var_os("PATH")?;
+    ["pwsh", "powershell"]
+        .into_iter()
+        .find(|name| find_on_path(name, &path).next().is_some())
+        .map(str::to_string)
+}
+
+/// The shell the user actually has, for diagnostics and rc-file setup:
+/// `SHELL` where the platform sets it, else — on Windows only, which never
+/// sets it — the platform default. The flag is `true` when the default stood
+/// in, so callers can say so instead of asserting something unverified.
+/// Unix with `SHELL` unset yields `None`: never guess before editing a file.
+pub(crate) fn configured_shell() -> Option<(String, bool)> {
+    match std::env::var("SHELL") {
+        Ok(shell) if !shell.is_empty() => Some((shell, false)),
+        _ if cfg!(windows) => default_shell().map(|shell| (shell, true)),
+        _ => None,
+    }
+}
+
+/// Every file named `name` in the `PATH`-style list `path`, in order. On
+/// Windows the bare name and `name.exe` are both tried, since that is how
+/// the shell resolves commands there; the `.exe` rule lives here and in
+/// `strip_exe_suffix` only.
+pub(crate) fn find_on_path<'a>(
+    name: &'a str,
+    path: &'a std::ffi::OsStr,
+) -> impl Iterator<Item = PathBuf> + 'a {
+    std::env::split_paths(path).flat_map(move |dir| {
+        let bare = dir.join(name);
+        let exe = cfg!(windows).then(|| dir.join(format!("{name}.exe")));
+        std::iter::once(bare)
+            .chain(exe)
+            .filter(|candidate| candidate.is_file())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_name_strips_only_a_real_exe_suffix() {
+        use std::path::Path;
+        assert_eq!(shell_name(Path::new("/bin/zsh")), Some("zsh"));
+        assert_eq!(shell_name(Path::new("pwsh.exe")), Some("pwsh"));
+        assert_eq!(shell_name(Path::new("POWERSHELL.EXE")), Some("POWERSHELL"));
+        assert_eq!(shell_name(Path::new(".exe")), Some(".exe"));
+        assert_eq!(shell_name(Path::new("")), None);
+        assert_eq!(strip_exe_suffix("mysql.exe.bak"), "mysql.exe.bak");
+        assert_eq!(strip_exe_suffix("exercise"), "exercise");
+    }
+
+    #[test]
+    fn find_on_path_lists_only_existing_files_in_order() {
+        let dir = std::env::temp_dir().join(format!("glimps-path-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::fs::write(dir.join("b").join("tool"), b"").unwrap();
+        let path =
+            std::env::join_paths([dir.join("a"), dir.join("b"), dir.join("missing")]).unwrap();
+        let found = find_on_path("tool", &path).collect::<Vec<_>>();
+        assert_eq!(found, vec![dir.join("b").join("tool")]);
+        assert!(find_on_path("other", &path).next().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn default_is_everything_on() {

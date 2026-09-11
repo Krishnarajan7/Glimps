@@ -1,0 +1,45 @@
+mysql> use krishna_stores_db
+Reading table information for completion of table and column names
+You can turn off this feature to get a quicker startup with -A
+
+Database changed
+mysql> show tables;
++-----------------------------+
+| Tables_in_krishna_stores_db |
++-----------------------------+
+| brands                      |
+| carts                       |
++-----------------------------+
+2 rows in set (0.002 sec)
+
+mysql> desc brands;
++-------------+--------------+------+-----+---------+----------------+
+| Field       | Type         | Null | Key | Default | Extra          |
++-------------+--------------+------+-----+---------+----------------+
+| id          | int          | NO   | PRI | NULL    | auto_increment |
+| name        | varchar(100) | NO   | UNI | NULL    |                |
+| is_active   | tinyint(1)   | YES  |     | 1       |                |
++-------------+--------------+------+-----+---------+----------------+
+3 rows in set (0.002 sec)
+
+mysql> show create table brands;
++--------+------------------------------------------------------------------+
+| Table  | Create Table                                                     |
++--------+------------------------------------------------------------------+
+| brands | CREATE TABLE `brands` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  `is_active` tinyint(1) DEFAULT '1',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `name` (`name`)
+) ENGINE=InnoDB AUTO_INCREMENT=21 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci |
++--------+------------------------------------------------------------------+
+1 row in set (0.001 sec)
+
+mysql> cls;
+ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'cls' at line 1
+mysql> select * from carts;
+Empty set (0.00 sec)
+
+mysql> exit
+Bye

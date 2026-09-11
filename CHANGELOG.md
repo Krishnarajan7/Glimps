@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Database shell awareness** — inside an interactive `mysql`/`psql`/`sqlite3`
+  session every result table is understood structurally, not just the first:
+  header rows are keyed under each table's top rule (including `desc`'s `Null`
+  column and single-column `show tables`), multi-line SQL cells such as
+  `SHOW CREATE TABLE` are syntax-colored (keywords, backtick identifiers,
+  numbers, strings), the client's own status lines (`13 rows in set`,
+  `Empty set`, `Database changed`, `Query OK`, `Bye`) are dimmed, and
+  `ERROR 1064 (42000):` prefixes are painted red with the message left
+  readable. The prompt and the echo of what you type pass through as-is.
+
+- **Windows (experimental, untested on real hardware)** — the crate builds
+  and lints for `x86_64-pc-windows-msvc`: ConPTY through `portable-pty`,
+  console VT input/output flags enabled for the session and restored exactly
+  on exit and panic, window-size polling in place of `SIGWINCH`, `pwsh` /
+  `powershell` as the default shell, `glimps init pwsh` shell integration
+  with the same OSC-133 marker contract as zsh, `.exe`-suffixed command names
+  resolving to the same views, a ConPTY byte-fidelity probe
+  (`examples/pty_probe.rs`) and `scripts/dogfood-windows.ps1`. See
+  `docs/windows.md` for the decision gate before this is offered for download.
+
+### Fixed
+
+- `mysql --version` (and other `<tool> --version` banners) are no longer
+  painted as a result table; the version number and vendor note are colored
+  instead.
+
 ## [0.1.0] - 2026-08-30
 
 First public release. GLIMPS is a zero-config smart terminal output formatter:

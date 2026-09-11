@@ -36,8 +36,8 @@ pub use command_views::{
     colorize_cargo_line, colorize_curl_header_line, colorize_curl_progress_line, colorize_df_line,
     colorize_du_line, colorize_find_line, colorize_getfileinfo_line, colorize_grep_line,
     colorize_history_count_line, colorize_history_line, colorize_kubectl_pods_line,
-    colorize_ls_line, colorize_ps_line, colorize_whereis_line, colorize_whois_line,
-    colorize_xattr_line, GrepView,
+    colorize_ls_line, colorize_ps_line, colorize_version_line, colorize_whereis_line,
+    colorize_whois_line, colorize_xattr_line, GrepView,
 };
 pub(crate) use command_views::{DfColumn, PsColumnRole};
 pub(crate) use common::{
@@ -64,7 +64,8 @@ pub use streaming::{colorize_line, Http, Logs, StackTrace};
 pub(crate) use streaming::{is_error_log_line, is_exception_line, ltrim};
 pub(crate) use tables::AUTO_DELIMITER;
 pub use tables::{
-    colorize_delimited_line, colorize_sql_line, colorize_sql_result_line, format_delimited_document,
+    colorize_delimited_line, colorize_sql_line, colorize_sql_result_line,
+    format_delimited_document, SqlResultState,
 };
 pub(crate) use tables::{find_sql_block_comment_end, lower_ascii, split_unquoted};
 

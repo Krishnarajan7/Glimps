@@ -341,6 +341,7 @@ dependencies = [
  "anyhow",
  "criterion",
  "crossterm",
+ "crossterm_winapi",
  "libc",
  "portable-pty",
  "proptest",

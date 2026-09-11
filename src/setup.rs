@@ -6,7 +6,8 @@
 //! same-directory temp file + rename so the rc is never left half-written.
 //! `glimps init <shell>` plus a manual edit remains the documented alternative.
 
-use crate::doctor::{has_active_integration, integration_path, read_small_text, shell_name};
+use crate::config::shell_name;
+use crate::doctor::{has_active_integration, integration_path, read_small_text};
 use anyhow::{Context, Result};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -15,12 +16,28 @@ use std::path::{Path, PathBuf};
 pub fn run(shell_arg: Option<&str>) -> Result<i32> {
     let shell = match shell_arg {
         Some(s) => s.to_string(),
-        None => std::env::var("SHELL").unwrap_or_default(),
+        // Editing an rc file must never rest on a guessed shell: on Unix an
+        // unset SHELL bails out below. Windows never sets SHELL, and there the
+        // platform default (pwsh/powershell) only selects the manual
+        // instructions, never a file edit.
+        None => crate::config::configured_shell()
+            .map(|(shell, _)| shell)
+            .unwrap_or_default(),
     };
     let Some(name) = shell_name(Path::new(&shell)).map(str::to_string) else {
         eprintln!("glimps: cannot tell which shell to set up; run `glimps setup zsh` or `glimps setup bash`.");
         return Ok(2);
     };
+    if matches!(name.as_str(), "pwsh" | "powershell") {
+        // `$PROFILE` may live under a redirected Documents folder; only the
+        // running shell knows where. Point at it rather than guess and edit.
+        eprintln!(
+            "glimps: PowerShell setup is manual (experimental). Add this line near the TOP of \
+             your profile (`notepad $PROFILE`, creating it if needed):"
+        );
+        eprintln!("  {}", integration_line(&name));
+        return Ok(2);
+    }
     if !matches!(name.as_str(), "zsh" | "bash") {
         eprintln!(
             "glimps: {name} is not supported yet (zsh and bash are). fish is on the roadmap."
@@ -36,7 +53,7 @@ pub fn run(shell_arg: Option<&str>) -> Result<i32> {
         return Ok(2);
     }
 
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::config::home_dir();
     let Some(rc) = integration_path(Path::new(&shell), home.as_deref()) else {
         eprintln!("glimps: HOME is not set; cannot locate an rc file.");
         return Ok(2);
@@ -116,8 +133,16 @@ pub fn run(shell_arg: Option<&str>) -> Result<i32> {
 }
 
 /// The guarded one-liner the README documents, plus the comment that explains it.
+/// The one guarded line that loads the integration, in the target shell's own
+/// syntax. PowerShell has neither `command -v` nor `eval`, and `&&` is a parse
+/// error in Windows PowerShell 5.1 that would stop the whole profile loading.
 fn integration_line(shell: &str) -> String {
-    format!("command -v glimps >/dev/null 2>&1 && eval \"$(glimps init {shell})\"")
+    match shell {
+        "pwsh" | "powershell" => format!(
+            "if (Get-Command glimps -ErrorAction SilentlyContinue) {{ glimps init {shell} | Out-String | Invoke-Expression }}"
+        ),
+        _ => format!("command -v glimps >/dev/null 2>&1 && eval \"$(glimps init {shell})\""),
+    }
 }
 
 /// New rc content with the integration inserted at the very top, under a short
@@ -153,16 +178,40 @@ fn sibling(rc: &Path, suffix: &str) -> std::io::Result<PathBuf> {
     Ok(rc.with_file_name(name))
 }
 
+/// Create `path` exclusively (`create_new`), with the same permission bits as
+/// `like` from the very first byte. An `0600` rc (people keep API keys in rc
+/// files) must never get a world-readable backup or temp copy. The open mode is
+/// masked by umask, so the exact original mode is applied afterwards too.
+#[cfg(unix)]
+fn create_new_like(path: &Path, like: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mode = std::fs::metadata(like)
+        .map(|meta| meta.permissions().mode())
+        .unwrap_or(0o600);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    Ok(file)
+}
+
+/// Windows has no Unix mode bits: a new file in the user's profile inherits
+/// the directory's ACL, which is already private to the user.
+#[cfg(not(unix))]
+fn create_new_like(path: &Path, _like: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
 /// Write `text` to a fresh backup next to the rc and return its path.
 /// `create_new` refuses to clobber an existing backup (two runs in the same
 /// second, or a retry) — on collision the suffix is bumped instead. The backup
-/// is created with the rc's own mode, so an `0600` rc (people keep API keys in
-/// rc files) never gets a world-readable copy.
+/// is created with the rc's own mode (see `create_new_like`).
 fn write_backup(rc: &Path, text: &str) -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mode = std::fs::metadata(rc)
-        .map(|meta| meta.permissions().mode())
-        .unwrap_or(0o600);
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -174,12 +223,7 @@ fn write_backup(rc: &Path, text: &str) -> std::io::Result<PathBuf> {
             format!(".glimps-backup-{secs}-{attempt}")
         };
         let path = sibling(rc, &suffix)?;
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&path)
-        {
+        match create_new_like(&path, rc) {
             Ok(mut file) => {
                 file.write_all(text.as_bytes())?;
                 file.sync_all()?;
@@ -198,22 +242,12 @@ fn write_backup(rc: &Path, text: &str) -> std::io::Result<PathBuf> {
 /// Write `bytes` to `path` via a same-directory temp file, fsync, and rename
 /// (atomic on the same filesystem), preserving the original file's exact
 /// permissions. The temp file is created with the original's mode from the
-/// start so a `0600` rc's content is never exposed through a looser temp file,
-/// and it is removed if any step fails.
+/// start (see `create_new_like`) so a `0600` rc's content is never exposed
+/// through a looser temp file, and it is removed if any step fails.
 fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let tmp = sibling(path, &format!(".glimps-tmp-{}", std::process::id()))?;
-    let mode = std::fs::metadata(path)
-        .map(|meta| meta.permissions().mode())
-        .unwrap_or(0o600);
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&tmp)?;
-        // The open mode is masked by umask; set the exact original mode.
-        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        let mut file = create_new_like(&tmp, path)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)
@@ -239,6 +273,17 @@ mod tests {
         let glimps_at = updated.find("glimps init zsh").unwrap();
         let omz_at = updated.find("oh-my-zsh.sh").unwrap();
         assert!(glimps_at < omz_at);
+    }
+
+    #[test]
+    fn powershell_integration_line_is_powershell_not_posix() {
+        let line = integration_line("pwsh");
+        assert!(line.contains("glimps init pwsh | Out-String | Invoke-Expression"));
+        assert!(line.starts_with("if (Get-Command glimps"));
+        assert!(!line.contains("&&"));
+        assert!(!line.contains("eval"));
+        assert!(!line.contains("command -v"));
+        assert!(integration_line("zsh").contains("eval \"$(glimps init zsh)\""));
     }
 
     #[test]

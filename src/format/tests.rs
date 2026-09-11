@@ -6053,6 +6053,7 @@ proptest::proptest! {
             b"ping -c 1 127.0.0.1",
             b"lsof",
             b"lsof -i -P -n",
+            b"mysql --version",
         ] {
             let mut f = Formatter::build(Clock::Off, true, Config::default());
             if !f.is_enabled() {
@@ -6153,7 +6154,9 @@ const CORPUS_COMMANDS: &[(&str, &str, &str)] = &[
     ("npm_install.txt", "npm install", ""),
     ("ping.txt", "ping -c 3 github.com", "Ping"),
     ("ps.txt", "ps aux", "Ps"),
-    ("rustc_version.txt", "rustc --version", ""),
+    ("rustc_version.txt", "rustc --version --verbose", ""),
+    ("mysql_version.txt", "mysql --version", "Version"),
+    ("mysql_repl.txt", "mysql", "SqlResult"),
     ("source_code.txt", "cat src/terminal.rs", "File"),
     ("sqlite_table.txt", "sqlite3 app.db", "SqlResult"),
     ("stacktrace_python.txt", "python3 -m pytest", ""),
@@ -6257,7 +6260,7 @@ fn corpus_fixtures_keep_their_content_through_the_colored_command_views() {
     // view" until the slack runs out. Changing this number should be a visible
     // line in the diff, in either direction.
     assert_eq!(
-        views_exercised, 23,
+        views_exercised, 25,
         "the number of corpus fixtures exercising a command view changed"
     );
 }
@@ -7002,4 +7005,443 @@ fn light_theme_config_uses_the_light_palette() {
         !contains(&out, Theme::default_colored().string.as_bytes()),
         "dark-theme pale string color must not appear"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `<tool> --version` banners (CommandView::Version)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mysql_version_banner_is_not_painted_as_a_result_table() {
+    // REGRESSION: `mysql` is registered as a SQL result view, so this prose
+    // banner used to be split into whitespace "columns" and painted with the
+    // table data-cell palette — one flat colour across the whole line.
+    let mut f = Formatter::with_clock(Clock::Off);
+    let banner = b"mysql  Ver 9.5.0 for macos26.1 on arm64 (Homebrew)\r\n";
+    let stream = [&cmd_marker(b"mysql --version"), C, banner.as_slice(), D0].concat();
+    let out = f.process(&stream).into_owned();
+
+    // The version number and the parenthesized vendor each get their own
+    // colour; the connective words stay uncoloured.
+    let theme = Theme::default_colored();
+    assert!(
+        contains(
+            &out,
+            &[theme.number.as_bytes(), b"9.5.0", theme.reset.as_bytes()].concat()
+        ),
+        "version number must use the number colour: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(
+        contains(
+            &out,
+            &[
+                theme.muted.as_bytes(),
+                b"(Homebrew)",
+                theme.reset.as_bytes()
+            ]
+            .concat()
+        ),
+        "parenthesized vendor must use the muted colour: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(
+        contains(
+            &out,
+            &[theme.key.as_bytes(), b"mysql", theme.reset.as_bytes()].concat()
+        ),
+        "leading tool name must use the key colour"
+    );
+    // `for` / `on` / `Ver` are prose and must not be painted.
+    assert!(
+        contains(&out, b" Ver "),
+        "connective words must survive uncoloured: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
+#[test]
+fn version_view_only_fires_for_a_bare_version_query() {
+    assert!(version_command_view(b"mysql --version"));
+    assert!(version_command_view(b"python3 --version"));
+    assert!(version_command_view(b"/usr/local/bin/psql --version"));
+    // A third word means the tool is doing real work.
+    assert!(!version_command_view(
+        b"docker version --format '{{.Server}}'"
+    ));
+    // Short flags are NOT version queries often enough to be safe: `-V` is
+    // version-SORT for `sort` — whose output *is* version-like tokens, the
+    // worst case — and "verify" for dpkg/rpm; `-v` is verbose or invert-match.
+    assert!(!version_command_view(b"sort -V"));
+    assert!(!version_command_view(b"dpkg -V"));
+    assert!(!version_command_view(b"psql -V"));
+    assert!(!version_command_view(b"grep -v foo"));
+    assert!(!version_command_view(b"ls -v"));
+    // Real result-table work still reaches the SQL view.
+    assert!(!version_command_view(b"mysql -e 'select 1'"));
+    assert!(!version_command_view(b"mysql"));
+}
+
+#[test]
+fn sql_result_view_still_applies_to_real_mysql_queries() {
+    // The version fix must not disarm the table view for actual queries.
+    assert_eq!(
+        command_view(&Some(b"mysql -e 'select id,name from users'".to_vec())),
+        Some(CommandView::SqlResult)
+    );
+    assert_eq!(
+        command_view(&Some(b"mysql --version".to_vec())),
+        Some(CommandView::Version)
+    );
+}
+
+#[test]
+fn version_line_declines_prose_without_a_version_number() {
+    let theme = Theme::default_colored();
+    // Nothing version-shaped and no parens: decline rather than paint prose.
+    assert!(linefmt::colorize_version_line(b"unknown option\r\n", &theme, false).is_none());
+    // `arm64` and `macos26.1` are not version tokens on their own.
+    assert!(linefmt::colorize_version_line(b"built on arm64\r\n", &theme, false).is_none());
+    // Plain theme never colours anything.
+    assert!(
+        linefmt::colorize_version_line(b"mysql Ver 9.5.0\r\n", &Theme::plain(), true).is_none()
+    );
+}
+
+#[test]
+fn version_line_covers_common_real_banners() {
+    let theme = Theme::default_colored();
+    for banner in [
+        &b"git version 2.39.5 (Apple Git-154)\r\n"[..],
+        b"Python 3.12.4\r\n",
+        b"cargo 1.88.0 (b00c68b4f 2026-05-15)\r\n",
+        b"OpenSSL 3.2.1 30 Jan 2024 (Library: OpenSSL 3.2.1)\r\n",
+        // bash embeds parens in the version itself, and Docker ends it with a
+        // comma — both must still register as version tokens.
+        b"GNU bash, version 5.2.15(1)-release (arm64-apple-darwin23)\r\n",
+        b"Docker version 27.0.3, build 7d4bcd8\r\n",
+    ] {
+        let out = linefmt::colorize_version_line(banner, &theme, true)
+            .unwrap_or_else(|| panic!("should colour: {}", String::from_utf8_lossy(banner)));
+        // Byte-preserving: stripping every escape restores the input exactly.
+        assert_eq!(strip_sgr(&out), banner, "must preserve every original byte");
+    }
+}
+
+proptest::proptest! {
+    /// The version view never panics and never loses a byte on arbitrary input,
+    /// and with the plain theme it always declines (so output is untouched).
+    #[test]
+    fn prop_version_line_is_byte_safe(
+        // ESC is excluded from the alphabet rather than filtered afterwards:
+        // `strip_sgr` would eat an ESC the *input* supplied, making the
+        // comparison meaningless, and a reject-based filter would burn most of
+        // the local budget. Already-ANSI output never reaches a colorizer
+        // anyway — the seam routes it to pass-through.
+        line in proptest::collection::vec(
+            proptest::prop_oneof![0u8..=0x1a, 0x1cu8..=0xff],
+            0..256,
+        ),
+        // Every line after the first takes the `false` branch, so fuzz both.
+        first_line: bool,
+    ) {
+        let theme = Theme::default_colored();
+        if let Some(out) = linefmt::colorize_version_line(&line, &theme, first_line) {
+            prop_assert_eq!(strip_sgr(&out), line.clone());
+        }
+        prop_assert!(
+            linefmt::colorize_version_line(&line, &Theme::plain(), first_line).is_none()
+        );
+    }
+}
+
+/// Run a whole `mysql` session transcript through the SQL result view and
+/// return the coloured bytes. Interactive shells are one command: every table
+/// in the transcript lands inside a single output run.
+fn mysql_session(transcript: &[u8]) -> Option<String> {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return None;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"mysql")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(transcript));
+    out.extend_from_slice(&f.process(D0));
+    Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+#[test]
+fn mysql_repl_keys_the_header_of_every_table_not_just_the_first() {
+    // REGRESSION: the header hint used to be "first two lines of the command",
+    // so inside an interactive `mysql` the second table's header row was
+    // painted with the value palette — `Null` came out magenta as a keyword.
+    let Some(s) = mysql_session(
+        b"+----+\n| id |\n+----+\n|  1 |\n+----+\n1 row in set (0.00 sec)\n\n\
+          mysql> desc brands;\n\
+          +-------+------+------+\n| Field | Type | Null |\n+-------+------+------+\n\
+          | id    | int  | NO   |\n+-------+------+------+\n",
+    ) else {
+        return;
+    };
+    let theme = Theme::default_colored();
+    let key = |cell: &str| format!("{}{}{}", theme.key, cell, theme.reset);
+    assert!(s.contains(&key(" Field ")), "{s:?}");
+    assert!(s.contains(&key(" Null ")), "{s:?}");
+    assert!(!s.contains(&format!("{} Null {}", theme.keyword, theme.reset)));
+    // Data rows after the divider still take the value palette.
+    assert!(s.contains(&format!("{} int  {}", theme.string, theme.reset)));
+    assert!(s.contains(&format!("{} NO   {}", theme.string, theme.reset)));
+    // The prompt echo is left alone.
+    assert!(s.contains("\nmysql> desc brands;\n"), "{s:?}");
+}
+
+#[test]
+fn mysql_status_lines_are_dimmed() {
+    let Some(s) = mysql_session(
+        b"Database changed\n13 rows in set (0.002 sec)\nEmpty set (0.00 sec)\n\
+          Query OK, 1 row affected (0.01 sec)\nRecords: 3  Duplicates: 0  Warnings: 0\nBye\n",
+    ) else {
+        return;
+    };
+    for line in [
+        "Database changed",
+        "13 rows in set (0.002 sec)",
+        "Empty set (0.00 sec)",
+        "Query OK, 1 row affected (0.01 sec)",
+        "Records: 3  Duplicates: 0  Warnings: 0",
+        "Bye",
+    ] {
+        assert!(
+            s.contains(&format!("\x1b[2m{line}\x1b[0m")),
+            "{line}: {s:?}"
+        );
+    }
+}
+
+#[test]
+fn mysql_error_line_paints_code_state_and_position() {
+    let Some(s) = mysql_session(
+        b"ERROR 1064 (42000): You have an error in your SQL syntax\n\
+          ERROR 1146 (42S02) at line 3: Table 'x.y' doesn't exist\n\
+          ERROR: 'system' command received, but the --system-command option is off.\n",
+    ) else {
+        return;
+    };
+    assert!(
+        s.contains("\x1b[31mERROR 1064 (42000):\x1b[0m You have an error"),
+        "{s:?}"
+    );
+    assert!(
+        s.contains("\x1b[31mERROR 1146 (42S02) at line 3:\x1b[0m Table"),
+        "{s:?}"
+    );
+    // The bare `ERROR:` form is not ours; the log-severity pass keeps it.
+    assert!(s.contains("\x1b[31mERROR\x1b[0m:"), "{s:?}");
+}
+
+#[test]
+fn mysql_show_create_table_body_is_lexed_as_sql() {
+    let Some(s) = mysql_session(
+        b"+--------+--------------+\n| Table  | Create Table |\n+--------+--------------+\n\
+          | brands | CREATE TABLE `brands` (\n  `id` int NOT NULL AUTO_INCREMENT,\n\
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 |\n+--------+--------------+\n\
+          1 row in set (0.001 sec)\n",
+    ) else {
+        return;
+    };
+    let theme = Theme::default_colored();
+    // The opening row: `brands` is a value cell, the open cell is lexed.
+    assert!(
+        s.contains(&format!("{} brands {}", theme.string, theme.reset)),
+        "{s:?}"
+    );
+    assert!(
+        s.contains(&format!(
+            "{}CREATE{} {}TABLE{} {}`brands`{}",
+            theme.keyword, theme.reset, theme.keyword, theme.reset, theme.key, theme.reset
+        )),
+        "{s:?}"
+    );
+    // Continuation: identifier keyed, keywords magenta.
+    assert!(
+        s.contains(&format!(
+            "  {}`id`{} int {}NOT{} {}NULL{}",
+            theme.key, theme.reset, theme.keyword, theme.reset, theme.keyword, theme.reset
+        )),
+        "{s:?}"
+    );
+    // Closing line: body lexed, the trailing border dimmed, and the bottom
+    // rule after it is still recognised as a rule (the cell closed).
+    assert!(
+        s.contains(&format!("utf8mb4 {}|{}\n", theme.html_delim, theme.reset)),
+        "{s:?}"
+    );
+    assert!(
+        s.contains(
+            "\x1b[2m+--------+--------------+\x1b[0m\n\x1b[2m1 row in set (0.001 sec)\x1b[0m"
+        ),
+        "{s:?}"
+    );
+}
+
+#[test]
+fn mysql_open_cell_without_sql_stays_uncoloured_and_a_rule_closes_it() {
+    // A multi-line text value must not have its prose painted as SQL, and a
+    // row that never closes must not swallow the next table.
+    let Some(s) = mysql_session(
+        b"+----+-------+\n| id | note  |\n+----+-------+\n|  1 | hello on the\n\
+          second line as well\n+----+-------+\n| id |\n+----+\n",
+    ) else {
+        return;
+    };
+    let theme = Theme::default_colored();
+    assert!(s.contains("\nsecond line as well\n"), "{s:?}");
+    assert!(
+        !s.contains(&format!("{}on{}", theme.keyword, theme.reset)),
+        "{s:?}"
+    );
+    // The rule after the runaway row is still dimmed and the row after it is
+    // a header again.
+    assert!(
+        s.contains("\x1b[2m+----+-------+\x1b[0m\n\x1b[2m|\x1b[0m\x1b[36m id \x1b[0m"),
+        "{s:?}"
+    );
+}
+
+proptest::proptest! {
+    /// Arbitrary lines fed in sequence through one SQL result state never
+    /// panic, never lose a byte, and with the plain theme are never touched.
+    #[test]
+    fn prop_sql_result_state_is_byte_safe(
+        lines in proptest::collection::vec(
+            proptest::collection::vec(
+                proptest::prop_oneof![
+                    8 => proptest::sample::select(b"|+-= \t\n:()`'ERO0123abcNULrowsinset".to_vec()),
+                    1 => 0u8..=0x1a,
+                    1 => 0x1cu8..=0xff,
+                ],
+                0..96,
+            ),
+            0..12,
+        ),
+    ) {
+        let theme = Theme::default_colored();
+        let mut state = linefmt::SqlResultState::default();
+        let mut plain_state = linefmt::SqlResultState::default();
+        for line in &lines {
+            if let Some(out) = linefmt::colorize_sql_result_line(line, &theme, &mut state) {
+                prop_assert_eq!(strip_sgr(&out), line.clone());
+            }
+            prop_assert!(
+                linefmt::colorize_sql_result_line(line, &Theme::plain(), &mut plain_state).is_none()
+            );
+        }
+    }
+}
+
+#[test]
+fn psql_row_with_an_empty_first_column_does_not_open_a_phantom_cell() {
+    // REGRESSION: `        | alice | hi` trimmed starts with `|` and has no
+    // trailing pipe, which used to read as a box row leaving a cell open —
+    // every later line of the table, and the `(2 rows)` footer, lost colour.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"psql")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b" id | name  | note\n----+-------+------\n    | alice | hi\n  2 | bob   | yo\n(2 rows)\n",
+    ));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[38;5;117m bob   \x1b[0m"), "{s:?}");
+    assert!(s.contains("\x1b[2m(2 rows)\x1b[0m"), "{s:?}");
+}
+
+#[test]
+fn a_prompt_line_released_by_a_stall_resets_table_continuity() {
+    // In a real REPL the prompt (`sqlite> `) is a partial line exposed by the
+    // quiescence flush; the rest of that line then passes verbatim without
+    // the SQL view seeing it. Without a reset the previous result's `Row`
+    // state would make the next result's header row read as data.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"sqlite3 app.db")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"id|name\n1|Ada\nsqlite> "));
+    out.extend_from_slice(&f.flush_stalled_output());
+    out.extend_from_slice(&f.process(b"select * from t;\nsize|owner\n7|root\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("sqlite> select * from t;\n"), "{s:?}");
+    assert!(
+        s.contains("\x1b[36msize\x1b[0m\x1b[2m|\x1b[0m\x1b[36mowner\x1b[0m"),
+        "{s:?}"
+    );
+}
+
+#[test]
+fn blank_and_bare_rule_lines_do_not_rearm_the_header() {
+    // A newline inside a value produces a blank line mid-result; a bare
+    // `-----` under prose is a separator. Neither may promote the next row.
+    let Some(s) = mysql_session(
+        b"alpha|beta\ngamma|delta\n\nepsilon|zeta\nnotes\n-----------\n| free text here that is prose |\n",
+    ) else {
+        return;
+    };
+    assert!(s.contains("\x1b[38;5;117mepsilon\x1b[0m"), "{s:?}");
+    assert!(!s.contains("\x1b[36mepsilon\x1b[0m"), "{s:?}");
+    assert!(
+        !s.contains("\x1b[36m free text here that is prose \x1b[0m"),
+        "{s:?}"
+    );
+}
+
+#[test]
+fn a_headerless_first_row_of_value_words_is_still_data() {
+    // `mysql -N` prints no header; a first row of NULL/true under the top
+    // rule must keep the value palette even with the relaxed header check.
+    let Some(s) = mysql_session(b"+------+------+\n| NULL | true |\n+------+------+\n") else {
+        return;
+    };
+    assert!(s.contains("\x1b[35m NULL \x1b[0m"), "{s:?}");
+    assert!(!s.contains("\x1b[36m NULL \x1b[0m"), "{s:?}");
+}
+
+#[test]
+fn a_pipe_operator_inside_an_open_sql_cell_does_not_close_it() {
+    let Some(s) = mysql_session(
+        b"+---+--------------+\n| t | Create Table |\n+---+--------------+\n\
+          | t | CREATE TABLE `t` (\n  `c` int DEFAULT (1|2)\n) ENGINE=InnoDB |\n+---+--------------+\n",
+    ) else {
+        return;
+    };
+    // The `) ENGINE=InnoDB |` line is still the cell's closing line: its
+    // border is dimmed, not painted as a value cell.
+    assert!(s.contains("InnoDB \x1b[2m|\x1b[0m\n"), "{s:?}");
+}
+
+#[test]
+fn sqlite_list_row_with_an_empty_first_field_does_not_open_a_phantom_cell() {
+    // `.mode list` prints an empty first column as a bare leading `|`. That
+    // is not a padded box border, so the row must not leave a cell open —
+    // every later row of the result would lose its colour otherwise.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"sqlite3 app.db")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"a|b|c\n|alice|1\n2|bob|2\n"));
+    out.extend_from_slice(&f.process(D0));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[38;5;117malice\x1b[0m"), "{s:?}");
+    assert!(s.contains("\x1b[38;5;117mbob\x1b[0m"), "{s:?}");
 }

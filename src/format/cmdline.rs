@@ -111,7 +111,8 @@ fn render_env_assignment(out: &mut Vec<u8>, word: &[u8], theme: &Theme) -> bool 
 
 /// The command's name (basename), looking past wrapper commands and env
 /// assignments, for name-based bypass. `sudo vim` -> `vim`, `/usr/bin/less` ->
-/// `less`. `None` if the command is empty or not valid UTF-8.
+/// `less`, `mysql.exe` -> `mysql`. `None` if the command is empty or not valid
+/// UTF-8.
 pub fn first_word(cmd: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(cmd).ok()?;
     for word in text.split_whitespace() {
@@ -120,7 +121,15 @@ pub fn first_word(cmd: &[u8]) -> Option<String> {
         if WRAPPERS.contains(&word) || word.starts_with('-') || is_env_assignment(word) {
             continue;
         }
-        let base = word.rsplit('/').next().unwrap_or(word);
+        let mut base = word.rsplit('/').next().unwrap_or(word);
+        // Windows paths use `\` and commands resolve with or without `.exe`.
+        // On Unix a backslash inside a word is an escape and `foo.exe` is a
+        // literal name, so both stay part of the name there (invariant #2:
+        // never widen what gets formatted on a platform that was fine).
+        if cfg!(windows) {
+            base = base.rsplit('\\').next().unwrap_or(base);
+            base = crate::config::strip_exe_suffix(base);
+        }
         if base.is_empty() {
             continue;
         }
@@ -347,6 +356,24 @@ mod tests {
         assert_eq!(first_word(b"  git   status ").as_deref(), Some("git"));
         assert_eq!(first_word(b"").as_deref(), None);
         assert_eq!(first_word(b"sudo").as_deref(), None); // only a wrapper
+    }
+
+    #[test]
+    fn first_word_handles_windows_names_only_on_windows() {
+        if cfg!(windows) {
+            assert_eq!(first_word(b"mysql.exe -u root").as_deref(), Some("mysql"));
+            assert_eq!(
+                first_word(b"C:\\tools\\mysql\\bin\\mysql.exe -u root").as_deref(),
+                Some("mysql")
+            );
+        } else {
+            // On Unix `foo.exe` is a literal name (e.g. a wine target) and must
+            // not pick up `foo`'s command view.
+            assert_eq!(
+                first_word(b"mysql.exe -u root").as_deref(),
+                Some("mysql.exe")
+            );
+        }
     }
 
     #[test]

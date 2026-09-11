@@ -35,13 +35,22 @@ impl MetadataChannel {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let nonce = random_nonce().unwrap_or_else(|| {
+            // No `/dev/urandom` (Windows, or a Unix sandbox without one): mix the
+            // OS-seeded hasher keys the standard library draws at first use with
+            // the clock and a counter.
+            // The name is one layer; the directory location (`channel_root`)
+            // is the one that has to be private.
+            use std::hash::{BuildHasher, Hasher};
+            let seeded = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| duration.as_nanos())
                 .unwrap_or_default();
-            format!("{nanos:032x}{seq:016x}")
+            format!("{seeded:016x}{nanos:032x}{seq:016x}")
         });
-        let dir = std::env::temp_dir().join(format!("glimps-meta-{nonce}"));
+        let dir = channel_root().join(format!("glimps-meta-{nonce}"));
         create_private_dir(&dir).context("failed to create metadata directory")?;
         let path = dir.join("events");
         let file = open_private_file(&path).context("failed to create metadata channel")?;
@@ -64,7 +73,17 @@ impl MetadataChannel {
 impl Drop for MetadataChannel {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
-        let _ = std::fs::remove_dir(&self.dir);
+        // The reader thread may still hold the file open for a few more
+        // milliseconds. Unix unlinks regardless; Windows only marks the file
+        // delete-pending, so the directory is briefly non-empty. Retry the
+        // directory removal for a bounded moment rather than leak one
+        // `glimps-meta-*` directory per session.
+        for _ in 0..10 {
+            if std::fs::remove_dir(&self.dir).is_ok() || !self.dir.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -143,6 +162,26 @@ fn random_nonce() -> Option<String> {
     Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+/// Where the channel directory lives. The channel carries every command line
+/// the user runs, so the parent must be private to the user.
+///   * Unix: the temp dir, with the channel itself created `0o700`.
+///   * Windows: there are no mode bits here (see `create_private_dir`), so the
+///     channel inherits its parent's ACL. `%LOCALAPPDATA%\Temp` sits inside the
+///     user profile, whose default ACL is owner-only; `%TEMP%` usually points
+///     there too but can be redirected to a shared path (CI images, managed
+///     desktops), so it is only the fallback.
+fn channel_root() -> PathBuf {
+    if cfg!(windows) {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let temp = PathBuf::from(local).join("Temp");
+            if temp.is_dir() {
+                return temp;
+            }
+        }
+    }
+    std::env::temp_dir()
+}
+
 #[cfg(unix)]
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
@@ -150,6 +189,8 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
     builder.mode(0o700).create(path)
 }
 
+/// Windows has no mode bits; the directory inherits its parent's ACL, which is
+/// why `channel_root` anchors it inside the user profile.
 #[cfg(not(unix))]
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir(path)

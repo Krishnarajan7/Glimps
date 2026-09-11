@@ -33,7 +33,9 @@ kind of output is coming.
 > primary early-adopter path; bash integration is beta, and Linux is a supported
 > build target covered by CI. Prebuilt binaries for Apple Silicon and Intel
 > (macOS and Linux) ship with each release, alongside Homebrew and crates.io
-> packages. Broader shell support (fish) is on the roadmap.
+> packages. Broader shell support (fish) is on the roadmap. Windows (PowerShell
+> over ConPTY) builds and lints in CI but is **experimental and unverified** —
+> see [`docs/windows.md`](docs/windows.md) before trying it.
 
 > **Want to help?** GLIMPS is beta and there's real, scoped work with clear
 > acceptance criteria waiting for you. Browse the

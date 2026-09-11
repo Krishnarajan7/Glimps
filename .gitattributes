@@ -1,0 +1,5 @@
+# Golden/corpus files are compared byte-for-byte; a CRLF checkout (the default
+# git setting on Windows runners) would break every fixture. Keep LF everywhere.
+* text=auto eol=lf
+*.gif binary
+*.png binary

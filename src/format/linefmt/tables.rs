@@ -1,7 +1,7 @@
 //! Delimited tables, database result tables, and SQL syntax views.
 
 use super::super::theme::Theme;
-use super::{paint_bytes, paint_whole, split_line, trim_ascii};
+use super::{paint_bytes, paint_whole, split_line, trim_ascii, trim_ascii_end, trim_ascii_start};
 
 const DELIMITED_TABLE_WIDTH: usize = 100;
 pub(crate) const AUTO_DELIMITER: u8 = 0;
@@ -357,43 +357,280 @@ pub fn colorize_delimited_line(
     Some(out)
 }
 
+/// Per-command memory for [`colorize_sql_result_line`].
+///
+/// An interactive database shell (`mysql`, `psql`, `sqlite3`) is ONE command
+/// from GLIMPS's point of view: every table the session prints lands inside a
+/// single output run, so "is this the header row?" cannot be answered from a
+/// line's position in the command's output. It is answered by structure — a
+/// header is the first row after a box table's top rule, or after prose for
+/// the borderless `psql`/`sqlite3` shapes — and by remembering that a box row
+/// left its last cell open across lines (`SHOW CREATE TABLE`). The state is
+/// a couple of bytes, reset at every command boundary, and only ever steers
+/// *which colour* a line gets; it never withholds or reorders bytes.
+#[derive(Debug, Default)]
+pub struct SqlResultState {
+    prev: SqlLineKind,
+    /// Lines consumed inside an open multi-line cell; bounds the hold so a
+    /// row that never closes cannot lex the rest of the session as SQL.
+    open_lines: usize,
+}
+
+impl SqlResultState {
+    /// Forget everything. Called when the command whose tables were being
+    /// tracked ends, and when a line went out that this view never saw (a
+    /// prompt released verbatim by a stall flush): an unclassified line
+    /// breaks table continuity, so whatever follows starts from prose.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn enter_open_cell(&mut self, lexed: bool) {
+        self.prev = SqlLineKind::OpenCell(lexed);
+        self.open_lines = 0;
+    }
+
+    fn leave_open_cell(&mut self, next: SqlLineKind) {
+        self.prev = next;
+        self.open_lines = 0;
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum SqlLineKind {
+    /// Prose, a status line, a blank line, or nothing yet.
+    #[default]
+    Other,
+    /// A `+---+` rule not preceded by a row: the top edge of a box table.
+    TopRule,
+    /// A rule preceded by a row: the header/data divider or the bottom edge.
+    InnerRule,
+    Row,
+    /// Inside a box-drawn row whose last cell continues on following lines.
+    /// `true` when that cell opened with a SQL statement and is being lexed;
+    /// `false` when it is some other multi-line value left uncoloured.
+    OpenCell(bool),
+}
+
+/// Longest multi-line cell we follow before giving up on the row. A
+/// `SHOW CREATE TABLE` body is dozens of lines; a stored routine may be a few
+/// hundred. Past this, the row is assumed never to close.
+const OPEN_CELL_CAP: usize = 1024;
+
+/// How far into a line the `:` of `ERROR 1064 (42000): …` may sit.
+const SQL_ERROR_HEAD_CAP: usize = 64;
+
 /// Color common database CLI result tables (`psql`, `sqlite3`, `mysql`/MariaDB)
 /// without reflowing columns. Borders and row-count/status lines are dimmed;
-/// header cells are keyed; data cells reuse the CSV/TSV value palette.
-pub fn colorize_sql_result_line(line: &[u8], theme: &Theme, header_hint: bool) -> Option<Vec<u8>> {
+/// header cells are keyed; data cells reuse the CSV/TSV value palette; the
+/// body of a multi-line SQL cell (`SHOW CREATE TABLE`) gets the query lexer;
+/// `ERROR 1064 (42000):` prefixes are painted as errors.
+///
+/// `state` carries what the previous lines of the same command established
+/// (see [`SqlResultState`]). Every line this view sees — coloured or
+/// declined — updates it; a line the stream released verbatim without
+/// consulting the view resets it (see `push_stream`).
+pub fn colorize_sql_result_line(
+    line: &[u8],
+    theme: &Theme,
+    state: &mut SqlResultState,
+) -> Option<Vec<u8>> {
     if theme.reset.is_empty() {
         return None;
     }
     let (content, ending) = split_line(line);
-    if content.is_empty() {
-        return None;
-    }
     let trimmed = trim_ascii(content);
+    if let SqlLineKind::OpenCell(lexed) = state.prev {
+        return continue_open_cell(content, ending, theme, state, lexed);
+    }
     if trimmed.is_empty() {
+        // A blank line inside a result is what a value containing a newline
+        // produces; it neither confirms nor breaks the table, so the previous
+        // classification stands and the next row is not re-armed as a header.
         return None;
     }
-    if is_sql_table_rule(trimmed) || is_sql_result_meta(trimmed) {
+    if is_sql_table_rule(trimmed) {
+        state.prev = if state.prev == SqlLineKind::Row {
+            SqlLineKind::InnerRule
+        } else if is_box_top_rule(trimmed) {
+            SqlLineKind::TopRule
+        } else {
+            // A bare `-----` under prose is a separator, not a table edge;
+            // it must not hand the next row the relaxed header check.
+            SqlLineKind::Other
+        };
         return Some(paint_whole(content, ending, theme.debug, theme.reset));
     }
+    if is_sql_result_meta(trimmed) {
+        state.prev = SqlLineKind::Other;
+        return Some(paint_whole(content, ending, theme.debug, theme.reset));
+    }
+    if let Some(painted) = colorize_sql_error_line(content, ending, theme) {
+        state.prev = SqlLineKind::Other;
+        return Some(painted);
+    }
+    // The first row after a top rule (mysql) or after prose (psql/sqlite) is
+    // the header; anything after the divider or another row is data.
+    let header_hint = matches!(state.prev, SqlLineKind::Other | SqlLineKind::TopRule);
+    // A row directly under a box table's top rule IS the header by
+    // construction, so the cell-shape test relaxes: `desc` has a `Null`
+    // column and `show tables` a single one, and neither may read as data.
+    let under_top_rule = state.prev == SqlLineKind::TopRule;
     if content.contains(&b'|') {
-        return colorize_pipe_table_line(content, ending, theme, header_hint);
+        // A box row that does not close on this line (`| brands | CREATE TABLE
+        // `brands` (`) continues its last cell below. Only box rows qualify,
+        // recognised by their padded border — `|` in column 0 followed by
+        // whitespace. A borderless psql row is indented, and a sqlite list
+        // row with an empty first field (`|alice|1`) is unpadded; neither
+        // ends with a pipe, and neither may open a phantom cell.
+        let opens = matches!(content, [b'|', pad, ..] if pad.is_ascii_whitespace())
+            && !trimmed.ends_with(b"|");
+        let lex_last = opens && opens_sql_statement(last_pipe_cell(trimmed));
+        let painted = colorize_pipe_table_line(
+            content,
+            ending,
+            theme,
+            header_hint && !opens,
+            under_top_rule,
+            lex_last,
+        );
+        match (&painted, opens) {
+            (None, _) => state.prev = SqlLineKind::Other,
+            (Some(_), true) => state.enter_open_cell(lex_last),
+            (Some(_), false) => state.prev = SqlLineKind::Row,
+        }
+        return painted;
     }
     if content.contains(&b'\t') {
-        return colorize_delimited_line(
+        let painted = colorize_delimited_line(
             line,
             theme,
             b'\t',
             header_hint && looks_sql_header_row(content, b'\t'),
         );
+        state.prev = if painted.is_some() {
+            SqlLineKind::Row
+        } else {
+            SqlLineKind::Other
+        };
+        return painted;
     }
-    let spans = whitespace_table_spans(content)?;
-    if spans.len() < 2 {
+    let Some(spans) = whitespace_table_spans(content).filter(|spans| spans.len() >= 2) else {
+        state.prev = SqlLineKind::Other;
+        return None;
+    };
+    let is_header = header_hint && looks_header_spans(content, &spans, false);
+    state.prev = SqlLineKind::Row;
+    Some(colorize_spanned_cells(
+        content, ending, &spans, theme, is_header, false,
+    ))
+}
+
+/// `+-----+-----+`: the top or bottom edge of a box-drawn table. A rule
+/// without the corner `+` (`-----`) is psql's header divider or plain prose.
+fn is_box_top_rule(trimmed: &[u8]) -> bool {
+    trimmed.starts_with(b"+") && trimmed.ends_with(b"+")
+}
+
+/// The bytes after the last `|` of a box row: the cell that stays open.
+fn last_pipe_cell(trimmed: &[u8]) -> &[u8] {
+    match trimmed.iter().rposition(|&b| b == b'|') {
+        Some(pipe) => trim_ascii(&trimmed[pipe + 1..]),
+        None => trimmed,
+    }
+}
+
+/// Whether a cell opens with a SQL statement worth lexing across lines. Kept
+/// to statement heads: a multi-line JSON or text value must stay uncoloured
+/// rather than have its `in`/`on`/`as` painted as keywords.
+fn opens_sql_statement(cell: &[u8]) -> bool {
+    const HEADS: &[&[u8]] = &[
+        b"CREATE ", b"SELECT ", b"INSERT ", b"UPDATE ", b"DELETE ", b"ALTER ", b"WITH ", b"BEGIN",
+    ];
+    let upper = upper_ascii(cell);
+    HEADS.iter().any(|head| upper.starts_with(head))
+}
+
+/// One line inside a box row's open multi-line cell.
+///
+/// A SQL body is lexed like a `.sql` file; the closing ` |` (when the cell
+/// ends on this line) is dimmed as a border. The border is mysql's padded
+/// form — whitespace then `|` at the end of the line — so a `|` operator
+/// inside the SQL (`(1|2)`) does not close the cell early. A rule line closes
+/// any open cell on sight — a real cell never contains one — so a row we
+/// misjudged as open cannot swallow the rest of the table. The line cap gives
+/// up on a row that never closes, and the line that trips it is left plain.
+fn continue_open_cell(
+    content: &[u8],
+    ending: &[u8],
+    theme: &Theme,
+    state: &mut SqlResultState,
+    lexed: bool,
+) -> Option<Vec<u8>> {
+    let trimmed = trim_ascii(content);
+    if is_sql_table_rule(trimmed) {
+        state.leave_open_cell(SqlLineKind::InnerRule);
+        return Some(paint_whole(content, ending, theme.debug, theme.reset));
+    }
+    let body = trim_ascii_end(content);
+    let closes = matches!(body, [.., gap, b'|'] if gap.is_ascii_whitespace());
+    state.open_lines = state.open_lines.saturating_add(1);
+    if closes {
+        state.leave_open_cell(SqlLineKind::Row);
+    } else if state.open_lines > OPEN_CELL_CAP {
+        state.leave_open_cell(SqlLineKind::Other);
         return None;
     }
-    let is_header = header_hint && looks_header_spans(content, &spans);
-    Some(colorize_spanned_cells(
-        content, ending, &spans, theme, is_header,
-    ))
+    if !lexed || trimmed.is_empty() {
+        return None;
+    }
+    // `closes` guarantees `body` ends with the border byte, so the body is
+    // everything before it; otherwise the whole line is SQL.
+    let body_end = if closes {
+        body.len().saturating_sub(1)
+    } else {
+        content.len()
+    };
+    let mut out = Vec::with_capacity(content.len() + ending.len() + 64);
+    lex_sql(&content[..body_end], theme, &mut out);
+    if body_end < content.len() {
+        paint_bytes(
+            &mut out,
+            theme.html_delim,
+            &content[body_end..],
+            theme.reset,
+        );
+    }
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+/// `ERROR 1064 (42000): You have an error…` / `ERROR 1146 (42S02) at line 3: …`
+/// — paint the code, SQLSTATE and position red, leave the message readable.
+fn colorize_sql_error_line(content: &[u8], ending: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    let lead = content.len() - trim_ascii_start(content).len();
+    let trimmed = &content[lead..];
+    let after_error = trimmed.strip_prefix(b"ERROR ")?;
+    if !after_error.first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    let colon = trimmed
+        .iter()
+        .take(SQL_ERROR_HEAD_CAP)
+        .position(|&b| b == b':')?;
+    let head = &trimmed[..colon];
+    if !head
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'(' | b')'))
+    {
+        return None;
+    }
+    let mut out = Vec::with_capacity(content.len() + ending.len() + 16);
+    out.extend_from_slice(&content[..lead]);
+    paint_bytes(&mut out, theme.error, &trimmed[..=colon], theme.reset);
+    out.extend_from_slice(&trimmed[colon + 1..]);
+    out.extend_from_slice(ending);
+    Some(out)
 }
 
 /// Color SQL query text from `.sql` reader commands. This is a small visual lexer:
@@ -408,45 +645,62 @@ pub fn colorize_sql_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity(content.len() + ending.len() + 64);
+    if !lex_sql(content, theme, &mut out) {
+        return None;
+    }
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+/// Append `content` to `out` with SQL syntax colour. Returns whether anything
+/// was painted; either way every byte of `content` is appended in order.
+fn lex_sql(content: &[u8], theme: &Theme, out: &mut Vec<u8>) -> bool {
     let mut i = 0;
     let mut colored_any = false;
     while i < content.len() {
         let b = content[i];
         if i + 1 < content.len() && content[i] == b'-' && content[i + 1] == b'-' {
-            paint_sql(&mut out, theme.comment, &content[i..], theme.reset);
+            paint_sql(out, theme.comment, &content[i..], theme.reset);
             colored_any = true;
             i = content.len();
         } else if i + 1 < content.len() && content[i] == b'/' && content[i + 1] == b'*' {
             let end = find_sql_block_comment_end(&content[i + 2..])
                 .map(|rel| i + 4 + rel)
                 .unwrap_or(content.len());
-            paint_sql(&mut out, theme.comment, &content[i..end], theme.reset);
+            paint_sql(out, theme.comment, &content[i..end], theme.reset);
             colored_any = true;
             i = end;
         } else if b == b'\'' || b == b'"' {
             let end = sql_quoted_end(content, i, b);
-            paint_sql(&mut out, theme.string, &content[i..end], theme.reset);
+            paint_sql(out, theme.string, &content[i..end], theme.reset);
+            colored_any = true;
+            i = end;
+        } else if b == b'`' {
+            // MySQL identifier quoting: `id`, `my table`. Painted as a key so
+            // column names stand apart from the types and keywords around them.
+            let end = sql_quoted_end(content, i, b);
+            paint_sql(out, theme.key, &content[i..end], theme.reset);
             colored_any = true;
             i = end;
         } else if b.is_ascii_digit()
             || (matches!(b, b'-' | b'+') && content.get(i + 1).is_some_and(u8::is_ascii_digit))
         {
             let end = sql_number_end(content, i);
-            paint_sql(&mut out, theme.number, &content[i..end], theme.reset);
+            paint_sql(out, theme.number, &content[i..end], theme.reset);
             colored_any = true;
             i = end;
         } else if is_sql_ident_start(b) {
             let end = sql_ident_end(content, i);
             let word = &content[i..end];
             if is_sql_keyword(word) {
-                paint_sql(&mut out, theme.keyword, word, theme.reset);
+                paint_sql(out, theme.keyword, word, theme.reset);
                 colored_any = true;
             } else {
                 out.extend_from_slice(word);
             }
             i = end;
         } else if is_sql_punctuation(b) {
-            paint_sql(&mut out, theme.html_delim, &content[i..i + 1], theme.reset);
+            paint_sql(out, theme.html_delim, &content[i..i + 1], theme.reset);
             colored_any = true;
             i += 1;
         } else {
@@ -454,11 +708,7 @@ pub fn colorize_sql_line(line: &[u8], theme: &Theme) -> Option<Vec<u8>> {
             i += 1;
         }
     }
-    if !colored_any {
-        return None;
-    }
-    out.extend_from_slice(ending);
-    Some(out)
+    colored_any
 }
 
 fn color_for_delimited_cell(cell: &[u8], theme: &Theme) -> &'static str {
@@ -519,19 +769,25 @@ pub(crate) fn split_unquoted(
     Some(spans)
 }
 
+/// `relaxed_header`: structural evidence (a top rule right above) already
+/// says this is the header, so only the cell-shape sanity check remains.
+/// `lex_last`: the final cell opens a multi-line SQL statement and gets the
+/// query lexer instead of the value palette.
 fn colorize_pipe_table_line(
     content: &[u8],
     ending: &[u8],
     theme: &Theme,
     header_hint: bool,
+    relaxed_header: bool,
+    lex_last: bool,
 ) -> Option<Vec<u8>> {
     let spans = split_unquoted(content, b'|', false)?;
     if spans.len() < 2 {
         return None;
     }
-    let is_header = header_hint && looks_header_spans(content, &spans);
+    let is_header = header_hint && looks_header_spans(content, &spans, relaxed_header);
     Some(colorize_spanned_cells(
-        content, ending, &spans, theme, is_header,
+        content, ending, &spans, theme, is_header, lex_last,
     ))
 }
 
@@ -541,10 +797,11 @@ fn colorize_spanned_cells(
     spans: &[(usize, usize)],
     theme: &Theme,
     is_header: bool,
+    lex_last: bool,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(content.len() + ending.len() + spans.len() * 12);
     let mut cursor = 0;
-    for &(start, end) in spans {
+    for (index, &(start, end)) in spans.iter().enumerate() {
         if cursor < start {
             out.extend_from_slice(theme.html_delim.as_bytes());
             out.extend_from_slice(&content[cursor..start]);
@@ -553,6 +810,8 @@ fn colorize_spanned_cells(
         let cell = &content[start..end];
         if cell.is_empty() {
             out.extend_from_slice(cell);
+        } else if lex_last && index + 1 == spans.len() {
+            lex_sql(cell, theme, &mut out);
         } else {
             let color = if is_header {
                 theme.key
@@ -601,10 +860,21 @@ fn whitespace_table_spans(content: &[u8]) -> Option<Vec<(usize, usize)>> {
 }
 
 fn looks_sql_header_row(content: &[u8], delimiter: u8) -> bool {
-    delimited_spans(content, delimiter).is_some_and(|spans| looks_header_spans(content, &spans))
+    delimited_spans(content, delimiter)
+        .is_some_and(|spans| looks_header_spans(content, &spans, false))
 }
 
-fn looks_header_spans(content: &[u8], spans: &[(usize, usize)]) -> bool {
+/// Whether a row's cells all read as column names. Without structural
+/// evidence (`relaxed` false) this is the only thing standing between a data
+/// row and the header colour, so it wants two named columns and no
+/// value-shaped words. With a box table's top rule directly above (`relaxed`
+/// true) the position already decided: one column is enough (`show tables`),
+/// and the mixed-case `Null` that `desc` names its column is accepted while
+/// the value words (`NULL`, `true`, `t`, …) still mark a headerless
+/// `mysql -N` first row as data. Known residual: a `mysql -N` first row of
+/// plain words (`| alice | admin |`) is indistinguishable from a header and
+/// is keyed; the client's own output gives nothing to tell them apart.
+fn looks_header_spans(content: &[u8], spans: &[(usize, usize)], relaxed: bool) -> bool {
     let mut meaningful = 0;
     for &(start, end) in spans {
         let cell = trim_ascii(&content[start..end]);
@@ -612,20 +882,21 @@ fn looks_header_spans(content: &[u8], spans: &[(usize, usize)]) -> bool {
             continue;
         }
         meaningful += 1;
-        if !looks_like_header_cell(cell) {
+        if !looks_like_header_cell(cell, relaxed) {
             return false;
         }
     }
-    meaningful >= 2
+    meaningful >= if relaxed { 1 } else { 2 }
 }
 
-fn looks_like_header_cell(cell: &[u8]) -> bool {
+fn looks_like_header_cell(cell: &[u8], relaxed: bool) -> bool {
     !cell.is_empty()
         && !looks_numeric(cell)
-        && !matches!(
-            lower_ascii(cell).as_slice(),
-            b"true" | b"false" | b"t" | b"f" | b"null" | b"nil"
-        )
+        && ((relaxed && cell == b"Null")
+            || !matches!(
+                lower_ascii(cell).as_slice(),
+                b"true" | b"false" | b"t" | b"f" | b"null" | b"nil"
+            ))
         && cell.iter().all(|b| {
             b.is_ascii_alphanumeric()
                 || matches!(b, b'_' | b'-' | b'.' | b' ' | b'/' | b'(' | b')' | b'%')
@@ -656,6 +927,9 @@ fn is_sql_result_meta(trimmed: &[u8]) -> bool {
     if trimmed.starts_with(b"Time: ") || trimmed.starts_with(b"Query OK") {
         return true;
     }
+    if is_mysql_status_line(trimmed) {
+        return true;
+    }
     matches!(
         upper_ascii(trimmed).as_slice(),
         b"BEGIN"
@@ -668,6 +942,25 @@ fn is_sql_result_meta(trimmed: &[u8]) -> bool {
             | b"DROP INDEX"
             | b"ALTER TABLE"
     ) || starts_with_sql_command_tag(trimmed)
+}
+
+/// The mysql/MariaDB client's own chatter after a statement: `13 rows in set
+/// (0.002 sec)`, `1 row in set`, `Empty set (0.00 sec)`, `Database changed`,
+/// `Records: 3  Duplicates: 0  Warnings: 0`, `Rows matched: 1  Changed: 1
+/// Warnings: 0`, and the `Bye` on exit. Dimmed like psql's `(1 row)`.
+fn is_mysql_status_line(trimmed: &[u8]) -> bool {
+    let digits = trimmed.iter().take_while(|b| b.is_ascii_digit()).count();
+    if digits > 0 {
+        let rest = &trimmed[digits..];
+        if rest.starts_with(b" row in set") || rest.starts_with(b" rows in set") {
+            return true;
+        }
+    }
+    trimmed.starts_with(b"Empty set")
+        || trimmed == b"Database changed"
+        || trimmed == b"Bye"
+        || trimmed.starts_with(b"Records: ")
+        || trimmed.starts_with(b"Rows matched: ")
 }
 
 fn starts_with_sql_command_tag(trimmed: &[u8]) -> bool {

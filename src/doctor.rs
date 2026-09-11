@@ -1,6 +1,8 @@
 //! Read-only installation and runtime diagnostics for `glimps doctor`.
 
-use crate::config::{config_path, Config};
+use crate::config::{
+    config_path, configured_shell, find_on_path, shell_name, Config, SUPPORTED_SHELLS,
+};
 use crate::metadata::MetadataChannel;
 use anyhow::Result;
 use std::env;
@@ -54,8 +56,13 @@ impl Check {
 /// No check changes shell files, configuration, or machine state.
 pub fn run() -> Result<i32> {
     let current_exe = env::current_exe()?;
-    let shell = env::var_os("SHELL").map(PathBuf::from);
-    let home = env::var_os("HOME").map(PathBuf::from);
+    // Diagnose the shell the user actually has; on Windows the platform
+    // default stands in for the never-set SHELL, and the report says so.
+    let (shell, defaulted) = match configured_shell() {
+        Some((shell, defaulted)) => (Some(PathBuf::from(shell)), defaulted),
+        None => (None, false),
+    };
+    let home = crate::config::home_dir();
     let mut checks = vec![
         Check::pass(
             "binary",
@@ -69,7 +76,7 @@ pub fn run() -> Result<i32> {
             "platform",
             format!("{} / {}", env::consts::OS, env::consts::ARCH),
         ),
-        check_shell(shell.as_deref()),
+        check_shell(shell.as_deref(), defaulted),
         check_integration(shell.as_deref(), home.as_deref()),
         check_config(config_path().as_deref()),
         check_path(&current_exe, env::var_os("PATH").as_deref()),
@@ -150,15 +157,20 @@ pub fn run() -> Result<i32> {
     }
 }
 
-pub(crate) fn shell_name(shell: &Path) -> Option<&str> {
-    shell.file_name()?.to_str()
-}
-
-fn check_shell(shell: Option<&Path>) -> Check {
+fn check_shell(shell: Option<&Path>, defaulted: bool) -> Check {
     match shell.and_then(shell_name) {
-        Some(name @ ("zsh" | "bash")) => Check::pass("shell", format!("{name} is supported")),
-        Some(name) => Check::fail("shell", format!("{name} is unsupported; use zsh or bash")),
-        None => Check::fail("shell", "SHELL is missing or invalid"),
+        Some(name) if SUPPORTED_SHELLS.contains(&name) && defaulted => Check::pass(
+            "shell",
+            format!("{name} is supported (SHELL unset; platform default)"),
+        ),
+        Some(name) if SUPPORTED_SHELLS.contains(&name) => {
+            Check::pass("shell", format!("{name} is supported"))
+        }
+        Some(name) => Check::fail(
+            "shell",
+            format!("{name} is unsupported; use zsh, bash, or PowerShell"),
+        ),
+        None => Check::fail("shell", "no shell found: set SHELL or pass --shell"),
     }
 }
 
@@ -172,6 +184,20 @@ pub(crate) fn integration_path(shell: &Path, home: Option<&Path>) -> Option<Path
                 .join(".zshrc"),
         ),
         "bash" => Some(home.join(".bashrc")),
+        // PowerShell's `$PROFILE` lives under Documents, which Windows may
+        // redirect (OneDrive). Only the shell itself knows the real path, so
+        // `glimps doctor` reports the conventional location and `glimps setup`
+        // asks the user to edit `$PROFILE` by hand.
+        "pwsh" => Some(
+            home.join("Documents")
+                .join("PowerShell")
+                .join("Microsoft.PowerShell_profile.ps1"),
+        ),
+        "powershell" => Some(
+            home.join("Documents")
+                .join("WindowsPowerShell")
+                .join("Microsoft.PowerShell_profile.ps1"),
+        ),
         _ => None,
     }
 }
@@ -381,10 +407,7 @@ fn check_path(current_exe: &Path, path: Option<&std::ffi::OsStr>) -> Check {
     let Some(path) = path else {
         return Check::warning("PATH", "PATH is not set");
     };
-    let matches = env::split_paths(path)
-        .map(|dir| dir.join("glimps"))
-        .filter(|candidate| candidate.is_file())
-        .collect::<Vec<_>>();
+    let matches = find_on_path("glimps", path).collect::<Vec<_>>();
     if matches.is_empty() {
         return Check::warning("PATH", "no glimps executable found on PATH");
     }
@@ -433,9 +456,30 @@ mod tests {
 
     #[test]
     fn recognizes_supported_shells_by_basename() {
-        assert_eq!(check_shell(Some(Path::new("/bin/zsh"))).level, Level::Pass);
-        assert_eq!(check_shell(Some(Path::new("bash"))).level, Level::Pass);
-        assert_eq!(check_shell(Some(Path::new("/bin/fish"))).level, Level::Fail);
+        assert_eq!(
+            check_shell(Some(Path::new("/bin/zsh")), false).level,
+            Level::Pass
+        );
+        assert_eq!(
+            check_shell(Some(Path::new("bash")), false).level,
+            Level::Pass
+        );
+        assert_eq!(
+            check_shell(Some(Path::new("pwsh.exe")), true).level,
+            Level::Pass
+        );
+        assert!(check_shell(Some(Path::new("pwsh.exe")), true)
+            .detail
+            .contains("SHELL unset"));
+        assert_eq!(
+            check_shell(Some(Path::new("/bin/fish")), false).level,
+            Level::Fail
+        );
+        assert_eq!(
+            check_shell(Some(Path::new("cmd.exe")), false).level,
+            Level::Fail
+        );
+        assert_eq!(check_shell(None, true).level, Level::Fail);
     }
 
     #[test]

@@ -1,0 +1,1 @@
+mysql  Ver 9.5.0 for macos26.1 on arm64 (Homebrew)
