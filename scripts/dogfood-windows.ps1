@@ -3,7 +3,12 @@
   Fresh-clone dogfood helper for GLIMPS on Windows (experimental).
 
 .DESCRIPTION
-  Usage: scripts\dogfood-windows.ps1 [check|session|probe]
+  Usage (PowerShell):  .\scripts\dogfood-windows.ps1 [check|session|probe]
+  Usage (cmd.exe):     scripts\dogfood-windows.cmd [check|session|probe]
+
+  Typing the .ps1 path in cmd.exe opens it in Notepad (file association) rather
+  than running it; use the .cmd wrapper there, or from any shell:
+    powershell -ExecutionPolicy Bypass -File scripts\dogfood-windows.ps1 check
 
   check     Build and run the repo-local automated checks. Installs nothing.
   session   Build and start a disposable GLIMPS-wrapped PowerShell.
@@ -40,14 +45,18 @@ function Require-Cargo {
   Require-Tool 'cargo' 'Install rustup (https://rustup.rs) with the default stable-x86_64-pc-windows-msvc toolchain; it needs the Visual Studio Build Tools "Desktop development with C++" workload.'
 }
 
-# Run a native command and fail loudly on a non-zero exit. The command is a
-# script block so callers can use the stop-parsing token (--%), which is the
-# one reliable way to hand `--` through to cargo on every PowerShell version.
-function Invoke-Native([string]$Label, [scriptblock]$Command) {
-  Write-Host ">> $Label" -ForegroundColor Cyan
-  & $Command
+# Run a native command and fail loudly on a non-zero exit. Arguments come as
+# an array: a literal `--` token on a command line is eaten by Windows
+# PowerShell 5.1 before the native command sees it, but an array element is
+# passed through untouched, which is what `cargo clippy -- -D warnings` needs.
+function Invoke-Native([string[]]$Command) {
+  $label = $Command -join ' '
+  Write-Host ">> $label" -ForegroundColor Cyan
+  $exe = $Command[0]
+  $rest = @($Command | Select-Object -Skip 1)
+  & $exe @rest
   if ($LASTEXITCODE -ne 0) {
-    throw "command failed with exit $LASTEXITCODE`: $Label"
+    throw "command failed with exit $LASTEXITCODE`: $label"
   }
 }
 
@@ -60,12 +69,12 @@ function Pick-Shell {
 function Run-Check {
   Require-Cargo
   Set-Location $Root
-  Invoke-Native 'cargo fmt --all --check' { cargo --% fmt --all --check }
-  Invoke-Native 'cargo clippy --all-targets --all-features -- -D warnings' { cargo --% clippy --all-targets --all-features -- -D warnings }
-  Invoke-Native 'cargo test --all --all-features' { cargo --% test --all --all-features }
-  Invoke-Native 'cargo bench --no-run' { cargo --% bench --no-run }
+  Invoke-Native @('cargo', 'fmt', '--all', '--check')
+  Invoke-Native @('cargo', 'clippy', '--all-targets', '--all-features', '--', '-D', 'warnings')
+  Invoke-Native @('cargo', 'test', '--all', '--all-features')
+  Invoke-Native @('cargo', 'bench', '--no-run')
   if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
-    Invoke-Native 'cargo audit' { cargo --% audit }
+    Invoke-Native @('cargo', 'audit')
   } else {
     Write-Warning 'cargo-audit is not installed; skipping dependency advisory check.'
   }
@@ -75,19 +84,25 @@ function Run-Check {
 function Run-Probe {
   Require-Cargo
   Set-Location $Root
-  $env:GLIMPS_PROBE_SHELL = Pick-Shell
-  Write-Host "Probing ConPTY through $env:GLIMPS_PROBE_SHELL. Run this once inside Windows Terminal and once inside a legacy conhost window (Win+R, cmd) and compare." -ForegroundColor Yellow
+  $shell = Pick-Shell
+  Write-Host "Probing ConPTY through $shell. Run this once inside Windows Terminal and once inside a legacy conhost window (Win+R, cmd) and compare." -ForegroundColor Yellow
   Write-Host ''
   Write-Host '--- probe 1: a JSON line longer than a 40-column console. Expect: 0 cursor moves, one visible line longer than 40 cells.' -ForegroundColor Cyan
-  cargo --% run --quiet --example pty_probe -- --cols 40 %GLIMPS_PROBE_SHELL% -NoLogo -Command "'{""a"":1,""name"":""a fairly long json line that exceeds forty columns"",""n"":[1,2,3]}'"
+  # Built inside the probed shell with ConvertTo-Json so no argument carries a
+  # double quote: Windows PowerShell 5.1 does not escape embedded quotes when
+  # passing arguments to native programs, and the probe would see them mangled.
+  $inner = "ConvertTo-Json -Compress @{a=1; name='a fairly long json line that exceeds forty columns'; n=1,2,3}"
+  Invoke-Native @('cargo', 'run', '--quiet', '--example', 'pty_probe', '--', '--cols', '40', $shell, '-NoLogo', '-Command', $inner)
   Write-Host ''
   Write-Host '--- probe 2: shell-integration markers. Expect: OSC 133;C, 133;D and 7337 sequences present in the capture.' -ForegroundColor Cyan
   $env:GLIMPS_ACTIVE = '1'
   try {
-    cargo --% run --quiet --example pty_probe -- --send "glimps init %GLIMPS_PROBE_SHELL% | Out-String | Invoke-Expression\r" --send "echo hi\r" --send "exit\r" %GLIMPS_PROBE_SHELL% -NoLogo
+    # The probe expands `\r` itself; these are literal backslash-r sequences.
+    Invoke-Native @('cargo', 'run', '--quiet', '--example', 'pty_probe', '--',
+      '--send', "glimps init $shell | Out-String | Invoke-Expression\r",
+      '--send', 'echo hi\r', '--send', 'exit\r', $shell, '-NoLogo')
   } finally {
     Remove-Item Env:\GLIMPS_ACTIVE -ErrorAction SilentlyContinue
-    Remove-Item Env:\GLIMPS_PROBE_SHELL -ErrorAction SilentlyContinue
   }
   Write-Host ''
   Write-Host 'Read the verdict table in docs/windows.md, step 2.' -ForegroundColor Yellow
@@ -96,7 +111,7 @@ function Run-Probe {
 function Run-Session {
   Require-Cargo
   Set-Location $Root
-  Invoke-Native 'cargo build' { cargo --% build }
+  Invoke-Native @('cargo', 'build')
 
   $shell = Pick-Shell
   $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('glimps-dogfood-' + [System.IO.Path]::GetRandomFileName())

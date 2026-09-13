@@ -3,3 +3,6 @@
 * text=auto eol=lf
 *.gif binary
 *.png binary
+# cmd.exe batch files misparse LF-only line endings in some constructs.
+*.cmd text eol=crlf
+*.bat text eol=crlf
