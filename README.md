@@ -313,6 +313,7 @@ logs = true         # ERROR/WARN/INFO/DEBUG coloring
 http = true         # HTTP status coloring
 diff = true         # unified-diff coloring (added/removed/hunk lines)
 stacktrace = true   # stack-trace / panic highlighting (Rust, Python)
+reports = true      # field names of plain `Label: value` / `KEY=value` lines
 
 [limits]
 buffer_cap = 1048576   # bytes buffered to detect JSON/HTML
@@ -425,7 +426,8 @@ doctor` warns if the line sits below a plugin manager or prompt framework.
   `scutil --dns`, `route get default`, `netstat -rn`, `networksetup`),
   open files and sockets (`lsof` and its flags, read from the table schema each
   invocation prints), macOS disk and file metadata (`diskutil info`, `GetFileInfo`, `xattr -l`), system status
-  output (`launchctl list`, `pmset -g`),
+  output (`launchctl list`, `pmset -g`), Homebrew listings (`brew services list`,
+  `brew list --versions`, `brew outdated`, `brew leaves`, `brew tap`, `brew deps --tree`),
   `man`/help output and manual-index searches (`whatis`, `apropos`, `man -k`, `man -f`), Markdown project files, YAML/TOML/INI/dotenv-style config
   files, `.gitignore` patterns, `.gitleaksignore` fingerprints, adaptive CSV/TSV/PSV tables, SQL query files,
   JSON-lines streams/files, common source-code extensions shown through reader

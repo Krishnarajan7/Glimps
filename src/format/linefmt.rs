@@ -19,6 +19,7 @@
 use super::theme::Theme;
 #[cfg(test)]
 use super::StreamingFormatter;
+mod brew;
 mod code;
 mod command_views;
 mod common;
@@ -28,9 +29,11 @@ mod documents;
 mod git;
 mod json_lines;
 mod network;
+mod report;
 mod streaming;
 mod tables;
 
+pub use brew::{colorize_brew_line, BrewView};
 pub use code::{colorize_code_line, CodeLanguage};
 pub use command_views::{
     colorize_cargo_line, colorize_curl_header_line, colorize_curl_progress_line, colorize_df_line,
@@ -41,8 +44,8 @@ pub use command_views::{
 };
 pub(crate) use command_views::{DfColumn, PsColumnRole};
 pub(crate) use common::{
-    colorize_size_path_line, colorize_words, contains_ascii, paint_bytes, paint_span, paint_whole,
-    split_line, trim_ascii, trim_ascii_end, trim_ascii_start, word_spans,
+    colorize_size_path_line, colorize_spans, colorize_words, contains_ascii, paint_bytes,
+    paint_span, paint_whole, split_line, trim_ascii, trim_ascii_end, trim_ascii_start, word_spans,
 };
 pub use diagnostics::colorize_cli_diagnostic_line;
 pub(crate) use diagnostics::is_cli_error_line;
@@ -60,6 +63,7 @@ pub use network::{
     colorize_netstat_line, colorize_networksetup_line, colorize_ping_line, colorize_pmset_line,
     colorize_route_line, colorize_scutil_dns_line,
 };
+pub use report::colorize_report_line;
 pub use streaming::{colorize_line, Http, Logs, StackTrace};
 pub(crate) use streaming::{is_error_log_line, is_exception_line, ltrim};
 pub(crate) use tables::AUTO_DELIMITER;

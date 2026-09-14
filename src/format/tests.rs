@@ -2968,7 +2968,7 @@ fn psql_result_table_gets_value_coloring() {
     );
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
-    assert!(s.contains("\x1b[36m id \x1b[0m\x1b[2m|\x1b[0m\x1b[36m name \x1b[0m"));
+    assert!(s.contains("\x1b[1;38;5;231m id \x1b[0m\x1b[2m|\x1b[0m\x1b[1;38;5;231m name \x1b[0m"));
     assert!(s.contains("\x1b[2m----+------+--------\x1b[0m"));
     assert!(s.contains("\x1b[38;5;220m  1 \x1b[0m\x1b[2m|\x1b[0m\x1b[38;5;117m Ada  \x1b[0m"));
     assert!(s.contains("\x1b[2m(1 row)\x1b[0m"));
@@ -2989,7 +2989,7 @@ fn mysql_boxed_result_table_gets_value_coloring() {
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[2m+----+--------+\x1b[0m"));
-    assert!(s.contains("\x1b[2m|\x1b[0m\x1b[36m id \x1b[0m"));
+    assert!(s.contains("\x1b[2m|\x1b[0m\x1b[1;38;5;231m id \x1b[0m"));
     assert!(s.contains("\x1b[38;5;220m  2 \x1b[0m\x1b[2m|\x1b[0m\x1b[38;5;117m Grace  \x1b[0m"));
 }
 
@@ -3007,7 +3007,7 @@ fn sqlite_pipe_result_table_gets_value_coloring() {
     out.extend_from_slice(&f.process(b"id|name|ok\n1|Ada|true\n"));
     out.extend_from_slice(&f.process(D0));
     let s = String::from_utf8_lossy(&out);
-    assert!(s.contains("\x1b[36mid\x1b[0m\x1b[2m|\x1b[0m\x1b[36mname\x1b[0m"));
+    assert!(s.contains("\x1b[1;38;5;231mid\x1b[0m\x1b[2m|\x1b[0m\x1b[1;38;5;231mname\x1b[0m"));
     assert!(s.contains("\x1b[38;5;220m1\x1b[0m\x1b[2m|\x1b[0m\x1b[38;5;117mAda\x1b[0m"));
     assert!(s.contains("\x1b[35mtrue\x1b[0m"));
 }
@@ -3587,6 +3587,379 @@ fn kubectl_get_pods_colors_failing_status() {
     out.extend_from_slice(&f.process(D));
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[31mCrashLoopBackOff\x1b[0m"));
+}
+
+#[test]
+fn brew_services_list_colors_plain_rows() {
+    // The piped shape (`brew services list | grep mysql`): Homebrew emits no
+    // color of its own, so every cell is GLIMPS's to paint.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"brew services list")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"Name          Status User   File\nmysql         started         krishv ~/Library/LaunchAgents/homebrew.mxcl.mysql.plist\nphp           none                   \n",
+    ));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[2mName          Status User   File\x1b[0m"));
+    assert!(s.contains("\x1b[36mmysql\x1b[0m"));
+    assert!(s.contains("\x1b[38;2;39;135;51mstarted\x1b[0m"));
+    assert!(
+        s.contains("\x1b[38;2;142;202;230m~/Library/LaunchAgents/homebrew.mxcl.mysql.plist\x1b[0m")
+    );
+    assert!(s.contains("\x1b[36mphp\x1b[0m           \x1b[2mnone\x1b[0m"));
+}
+
+#[test]
+fn brew_services_list_keeps_brews_own_color_and_paints_the_rest() {
+    // On a terminal Homebrew paints the status cell itself. Its escapes must
+    // survive byte-for-byte, and the plain user + service file after them
+    // still get the view.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let row = b"mysql         \x1b[32mstarted\x1b[0m krishv ~/Library/LaunchAgents/homebrew.mxcl.mysql.plist\r\nphp           \x1b[39mnone\x1b[0m           \r\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"brew services list")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(row));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("mysql         \x1b[32mstarted\x1b[0m \x1b[38;5;153mkrishv\x1b[0m \x1b[38;2;142;202;230m~/Library/LaunchAgents/homebrew.mxcl.mysql.plist\x1b[0m\r\n"));
+    assert!(s.contains("php           \x1b[39mnone\x1b[0m           \r\n"));
+    let want = strip_sgr(row);
+    assert_eq!(
+        strip_sgr(&out)
+            .windows(want.len())
+            .filter(|window| *window == want.as_slice())
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn brew_outdated_paints_names_and_versions() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"brew outdated")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"curl (8.16.0) < 8.22.0\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains(
+        "\x1b[36mcurl\x1b[0m \x1b[38;5;220m(8.16.0)\x1b[0m \x1b[2m<\x1b[0m \x1b[38;5;220m8.22.0\x1b[0m\n"
+    ));
+}
+
+#[test]
+fn brew_usage_text_after_a_mistyped_subcommand_passes_through() {
+    // `brew service start mysql` (no `s`) prints the generic usage block and
+    // a red `Error:` of Homebrew's own. No view claims it, so nothing is
+    // painted over.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let body = b"Example usage:\n  brew search TEXT|/REGEX/\n  brew install FORMULA|CASK...\n\n\x1b[31mError:\x1b[0m Invalid usage: Unknown command: brew service\nDid you mean services?\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"brew service start mysql")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D));
+    assert!(
+        out.windows(body.len()).any(|window| window == body),
+        "usage block was altered: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
+#[test]
+fn ssh_with_a_remote_command_is_not_bypassed() {
+    let cfg = Config::default();
+    for (command, expected) in [
+        (&b"ssh host"[..], CommandTrust::InteractiveBypass),
+        (b"ssh user@host", CommandTrust::InteractiveBypass),
+        (b"ssh -p 2222 user@host", CommandTrust::InteractiveBypass),
+        (b"ssh -t host vim", CommandTrust::InteractiveBypass),
+        (b"ssh -tt host top", CommandTrust::InteractiveBypass),
+        (
+            b"ssh -N -L 8080:localhost:80 host",
+            CommandTrust::InteractiveBypass,
+        ),
+        (b"ssh host df -h", CommandTrust::Normal),
+        (
+            b"ssh -p 2222 -i ~/.ssh/key user@host 'df -h'",
+            CommandTrust::Normal,
+        ),
+        (
+            b"ssh -o StrictHostKeyChecking=no host uptime",
+            CommandTrust::Normal,
+        ),
+        (b"ssh -p22 host uptime", CommandTrust::Normal),
+        (b"ssh host uptime | head -3", CommandTrust::Normal),
+        (b"! ssh host uptime", CommandTrust::Normal),
+        (b"ssh host -- uptime", CommandTrust::Normal),
+        // A remote dotenv read is classified like the local one.
+        (b"ssh host cat .env", CommandTrust::SensitiveText),
+    ] {
+        assert_eq!(
+            command::classify(command, &cfg.bypass, &cfg.sensitive_commands).trust,
+            expected,
+            "{:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
+    // A remote pipeline is trusted exactly as the same pipeline run locally —
+    // no more, no less — and is never an interactive session.
+    let remote =
+        b"ssh host 'grep -E \"^GOOGLE_CLIENT_(ID|SECRET)=\" /srv/app/.env | sed s/=.*/=<set>/'";
+    let local = b"grep -E \"^GOOGLE_CLIENT_(ID|SECRET)=\" /srv/app/.env | sed s/=.*/=<set>/";
+    let trust =
+        |command: &[u8]| command::classify(command, &cfg.bypass, &cfg.sensitive_commands).trust;
+    assert_eq!(trust(remote), trust(local));
+    assert_ne!(trust(remote), CommandTrust::InteractiveBypass);
+}
+
+#[test]
+fn ssh_remote_command_selects_the_remote_view() {
+    for (command, expected) in [
+        (&b"ssh host df -h"[..], "Df"),
+        (b"ssh -p 22 user@host 'ls -la'", "Ls"),
+        (b"ssh host \"kubectl get pods\"", "KubectlPods"),
+        (b"! ssh host brew outdated", "Brew"),
+        (b"ssh host df -h 2>/dev/null", "Df"),
+    ] {
+        let view = command_view(&Some(command.to_vec()));
+        let name = view.map(|view| format!("{view:?}")).unwrap_or_default();
+        assert!(
+            name.starts_with(expected),
+            "{:?} selected {name:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
+    for command in [
+        &b"ssh host"[..],
+        b"ssh -t host vim",
+        b"ssh host timedatectl",
+        b"ssh host 'df -h' | head",
+    ] {
+        assert_eq!(
+            command_view(&Some(command.to_vec())),
+            None,
+            "{:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn remote_report_output_gets_its_field_names_painted() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"! ssh root@host 'timedatectl | head -5'")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"GOOGLE_CLIENT_ID=\n               Local time: Sun 2026-09-13 13:58:40 UTC\nSystem clock synchronized: yes\nERROR: boom\nhttps://example.com\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("\x1b[38;5;183mGOOGLE_CLIENT_ID\x1b[0m\x1b[2m=\x1b[0m\n"));
+    assert!(s.contains("               \x1b[38;5;183mLocal time\x1b[0m\x1b[2m:\x1b[0m Sun 2026-09-13 13:58:40 UTC\n"));
+    assert!(s.contains("\x1b[38;5;183mSystem clock synchronized\x1b[0m\x1b[2m:\x1b[0m yes\n"));
+    // The log pass still owns severities, and a URL is left alone.
+    assert!(s.contains("\x1b[31mERROR\x1b[0m: boom"), "{s:?}");
+    assert!(s.contains("\nhttps://example.com\n"));
+}
+
+#[test]
+fn report_pass_can_be_switched_off() {
+    let mut cfg = Config::default();
+    cfg.formatters.reports = false;
+    let mut f = Formatter::build(Clock::Off, true, cfg);
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"timedatectl")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"Local time: now\n"));
+    out.extend_from_slice(&f.process(D));
+    assert!(!String::from_utf8_lossy(&out).contains("\x1b[38;5;183m"));
+}
+
+#[test]
+fn brew_command_view_selection() {
+    for (command, expected) in [
+        (&b"brew services"[..], "Brew(Services)"),
+        (b"brew services list", "Brew(Services)"),
+        (b"brew services ls", "Brew(Services)"),
+        (b"brew services list | grep mysql", "Brew(Services)"),
+        (b"brew services list 2>/dev/null", "Brew(Services)"),
+        (b"brew services --debug list", "Brew(Services)"),
+        (b"brew services list | grep -h mysql", "Brew(Services)"),
+        (b"HOMEBREW_NO_AUTO_UPDATE=1 brew outdated", "Brew(Packages)"),
+        (b"env HOMEBREW_NO_ENV_HINTS=1 brew leaves", "Brew(Packages)"),
+        (b"brew list | grep help", "Brew(Packages)"),
+        (b"brew list", "Brew(Packages)"),
+        (b"brew ls --versions", "Brew(Packages)"),
+        (
+            b"brew list --versions | sort | head -n 20",
+            "Brew(Packages)",
+        ),
+        (b"brew list --cask", "Brew(Packages)"),
+        (b"brew list curl", "Brew(Packages)"),
+        (b"brew outdated", "Brew(Packages)"),
+        (b"brew outdated --verbose --cask", "Brew(Packages)"),
+        (b"brew leaves", "Brew(Packages)"),
+        (b"brew tap", "Brew(Packages)"),
+        (b"brew deps --tree curl", "Brew(Packages)"),
+        (b"brew uses --installed openssl@3", "Brew(Packages)"),
+        (b"/opt/homebrew/bin/brew outdated", "Brew(Packages)"),
+        (b"brew help", "Man"),
+        (b"brew services --help", "Man"),
+        (b"brew help services", "Man"),
+        (b"brew list -h", "Man"),
+        (b"brew --version", "Version"),
+    ] {
+        let view = command_view(&Some(command.to_vec()));
+        let name = view.map(|view| format!("{view:?}")).unwrap_or_default();
+        assert_eq!(
+            name,
+            expected,
+            "{:?} selected {name:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
+    for command in [
+        &b"brew install curl"[..],
+        b"brew upgrade",
+        b"brew update",
+        b"brew info curl",
+        b"brew doctor",
+        b"brew search ripgrep",
+        b"brew services start mysql",
+        b"brew services info mysql",
+        b"brew service start mysql",
+        b"brew list -l curl",
+        b"brew deps --json=v2 curl",
+        b"brew outdated --json",
+        b"brew list | wc -l",
+        b"brew deps --tree curl | grep -c openssl",
+        b"brew list | uniq --count",
+        b"brew tap homebrew/cask",
+        b"brew tap --repair",
+        b"brew search help",
+        b"brew list > formulae.txt",
+        b"brew services list | xargs echo",
+        b"echo brew list",
+    ] {
+        assert_eq!(
+            command_view(&Some(command.to_vec())),
+            None,
+            "expected no view for {:?}",
+            String::from_utf8_lossy(command)
+        );
+    }
+}
+
+#[test]
+fn an_overlong_streamed_line_does_not_disable_the_rest_of_a_repl_session() {
+    // Regression: inside an interactive `mysql` session a single row wider than
+    // `line_cap` used to latch the whole run to pass-through, so every table
+    // printed afterwards rendered plain until the shell was exited. A long line
+    // must degrade only itself; the next result still gets the SQL view.
+    let mut cfg = Config::default();
+    cfg.limits.line_cap = 256;
+    let mut f = Formatter::build(Clock::Off, true, cfg);
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"mysql")));
+    out.extend_from_slice(&f.process(C));
+    // A result whose single cell is far longer than the 256-byte cap.
+    let wide = format!("bigcol\n{}\n", "x".repeat(1000));
+    out.extend_from_slice(&f.process(wide.as_bytes()));
+    // Then an ordinary box table, exactly as a later `desc` would print.
+    out.extend_from_slice(&f.process(
+        b"+-------+------+\n| Field | Type |\n+-------+------+\n| id    | int  |\n+-------+------+\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    // The oversized line is preserved verbatim (no color, no loss).
+    assert!(s.contains(&"x".repeat(1000)), "wide line was altered");
+    // The table after it is colored again: dim rules and a keyed header.
+    assert!(
+        s.contains("\x1b[2m+-------+------+\x1b[0m"),
+        "table after a wide line lost its rule coloring: {s:?}"
+    );
+    assert!(
+        s.contains("\x1b[1;38;5;231m Field \x1b[0m"),
+        "table after a wide line lost its header coloring: {s:?}"
+    );
+}
+
+#[test]
+fn mysql_status_report_separates_labels_from_values() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"mysql")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(
+        b"--------------\nmysql  Ver 9.5.0 for macos26.1 on arm64 (Homebrew)\n\nConnection id:\t\t16\nUNIX socket:\t\t/tmp/mysql.sock\nUptime:\t\t\t25 min 54 sec\nUsing outfile:\t\t''\n\nThreads: 3  Questions: 68  Slow queries: 0  Queries per second avg: 0.043\n",
+    ));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    // The banner is no longer a cyan header row: the client name takes the
+    // label colour and the version its number colour.
+    assert!(!s.contains("\x1b[36mVer 9.5.0"), "{s:?}");
+    assert!(s.contains("\x1b[38;5;183mmysql\x1b[0m  Ver \x1b[38;5;220m9.5.0\x1b[0m for macos26.1 on arm64 \x1b[38;5;153m(Homebrew)\x1b[0m"));
+    // Label, dim colon, untouched tabs, value by kind.
+    assert!(s.contains(
+        "\x1b[38;5;183mConnection id\x1b[0m\x1b[2m:\x1b[0m\t\t\x1b[38;5;220m16\x1b[0m\n"
+    ));
+    assert!(s.contains("\x1b[38;5;183mUNIX socket\x1b[0m\x1b[2m:\x1b[0m\t\t\x1b[38;2;142;202;230m/tmp/mysql.sock\x1b[0m\n"));
+    assert!(s.contains(
+        "\x1b[38;5;183mUptime\x1b[0m\x1b[2m:\x1b[0m\t\t\t\x1b[38;5;117m25 min 54 sec\x1b[0m\n"
+    ));
+    assert!(s.contains(
+        "\x1b[38;5;183mUsing outfile\x1b[0m\x1b[2m:\x1b[0m\t\t\x1b[38;5;117m''\x1b[0m\n"
+    ));
+    // The pairs line keeps its two-space gaps and paints every pair.
+    assert!(s.contains("\x1b[38;5;183mThreads\x1b[0m\x1b[2m:\x1b[0m \x1b[38;5;220m3\x1b[0m  \x1b[38;5;183mQuestions\x1b[0m\x1b[2m:\x1b[0m \x1b[38;5;220m68\x1b[0m  \x1b[38;5;183mSlow queries\x1b[0m\x1b[2m:\x1b[0m \x1b[38;5;220m0\x1b[0m  \x1b[38;5;183mQueries per second avg\x1b[0m\x1b[2m:\x1b[0m \x1b[38;5;220m0.043\x1b[0m\n"));
+}
+
+#[test]
+fn mysql_tab_rows_without_labels_stay_data_rows() {
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"mysql")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"id\tname\n1\talice\nnote\tsee: the docs\n"));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        !s.contains("\x1b[38;5;183m"),
+        "no label colour in plain TSV rows: {s:?}"
+    );
+    assert!(s.contains("\x1b[38;5;117malice\x1b[0m"));
 }
 
 #[test]
@@ -5607,6 +5980,7 @@ proptest::proptest! {
         http: bool,
         diff: bool,
         stacktrace: bool,
+        reports: bool,
         buffer_cap in 0usize..2048,
         line_cap in 0usize..2048,
         sniff_cap in 0usize..128,
@@ -5633,7 +6007,15 @@ proptest::proptest! {
             farewell: false,
             bypass: Vec::new(),
             sensitive_commands: Vec::new(),
-            formatters: crate::config::Formatters { json, html, logs, http, diff, stacktrace },
+            formatters: crate::config::Formatters {
+                json,
+                html,
+                logs,
+                http,
+                diff,
+                stacktrace,
+                reports,
+            },
             failures: crate::config::Failures {
                 enabled: failures_enabled,
                 on_success: if success_off {
@@ -6044,6 +6426,8 @@ proptest::proptest! {
             b"cat notes.md",
             b"cat main.rs",
             b"kubectl get pods",
+            b"brew services list",
+            b"brew outdated",
             b"GetFileInfo /tmp/example",
             b"xattr -l /tmp/example",
             b"diskutil info /dev/disk1",
@@ -6111,7 +6495,10 @@ const CORPUS_COMMANDS: &[(&str, &str, &str)] = &[
     ("app_log.txt", "tail -n 40 app.log", ""),
     ("base64.txt", "base64 payload.bin", ""),
     ("binary_dump.txt", "cat /bin/ls", ""),
-    ("brew_list.txt", "brew list --versions", ""),
+    ("brew_list.txt", "brew list --versions", "Brew"),
+    ("brew_outdated.txt", "brew outdated --verbose", "Brew"),
+    ("brew_services.txt", "brew services list", "Brew"),
+    ("brew_services_color.txt", "brew services list", "Brew"),
     ("cargo_build.txt", "cargo build", "Cargo"),
     ("cargo_test.txt", "cargo test", "Cargo"),
     ("cargo_tree.txt", "cargo tree", ""),
@@ -6157,11 +6544,13 @@ const CORPUS_COMMANDS: &[(&str, &str, &str)] = &[
     ("rustc_version.txt", "rustc --version --verbose", ""),
     ("mysql_version.txt", "mysql --version", "Version"),
     ("mysql_repl.txt", "mysql", "SqlResult"),
+    ("mysql_status.txt", "mysql", "SqlResult"),
     ("source_code.txt", "cat src/terminal.rs", "File"),
     ("sqlite_table.txt", "sqlite3 app.db", "SqlResult"),
     ("stacktrace_python.txt", "python3 -m pytest", ""),
     ("stacktrace_rust.txt", "cargo run", ""),
     ("systemctl.txt", "systemctl status glimps", ""),
+    ("timedatectl.txt", "ssh root@example.com timedatectl", ""),
     ("tabs_table.txt", "cat data.txt", ""),
     ("top.txt", "top -l 1", ""),
     ("tree.txt", "tree", ""),
@@ -6260,7 +6649,7 @@ fn corpus_fixtures_keep_their_content_through_the_colored_command_views() {
     // view" until the slack runs out. Changing this number should be a visible
     // line in the diff, in either direction.
     assert_eq!(
-        views_exercised, 25,
+        views_exercised, 30,
         "the number of corpus fixtures exercising a command view changed"
     );
 }
@@ -6724,12 +7113,14 @@ fn a_bypassed_command_stays_bypassed_even_when_its_arguments_look_sensitive() {
     let trust =
         |command: &[u8]| command::classify(command, &cfg.bypass, &cfg.sensitive_commands).trust;
 
+    // `-t` makes these ssh sessions; without it a remote command is
+    // classified like the same command run locally.
     for command in [
-        &b"ssh myserver cat .env"[..],
-        b"ssh myserver /bin/cat .env",
-        b"ssh myserver ./scripts/cat .env",
+        &b"ssh -t myserver cat .env"[..],
+        b"ssh -t myserver /bin/cat .env",
+        b"ssh -t myserver ./scripts/cat .env",
         b"vim ./scripts/cat .env",
-        b"ssh myserver tail .env.local",
+        b"ssh -t myserver tail .env.local",
     ] {
         assert_eq!(
             trust(command),
@@ -7185,7 +7576,7 @@ fn mysql_repl_keys_the_header_of_every_table_not_just_the_first() {
         return;
     };
     let theme = Theme::default_colored();
-    let key = |cell: &str| format!("{}{}{}", theme.key, cell, theme.reset);
+    let key = |cell: &str| format!("{}{}{}", theme.table_header, cell, theme.reset);
     assert!(s.contains(&key(" Field ")), "{s:?}");
     assert!(s.contains(&key(" Null ")), "{s:?}");
     assert!(!s.contains(&format!("{} Null {}", theme.keyword, theme.reset)));
@@ -7304,7 +7695,7 @@ fn mysql_open_cell_without_sql_stays_uncoloured_and_a_rule_closes_it() {
     // The rule after the runaway row is still dimmed and the row after it is
     // a header again.
     assert!(
-        s.contains("\x1b[2m+----+-------+\x1b[0m\n\x1b[2m|\x1b[0m\x1b[36m id \x1b[0m"),
+        s.contains("\x1b[2m+----+-------+\x1b[0m\n\x1b[2m|\x1b[0m\x1b[1;38;5;231m id \x1b[0m"),
         "{s:?}"
     );
 }
@@ -7381,7 +7772,7 @@ fn a_prompt_line_released_by_a_stall_resets_table_continuity() {
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("sqlite> select * from t;\n"), "{s:?}");
     assert!(
-        s.contains("\x1b[36msize\x1b[0m\x1b[2m|\x1b[0m\x1b[36mowner\x1b[0m"),
+        s.contains("\x1b[1;38;5;231msize\x1b[0m\x1b[2m|\x1b[0m\x1b[1;38;5;231mowner\x1b[0m"),
         "{s:?}"
     );
 }
@@ -7398,7 +7789,7 @@ fn blank_and_bare_rule_lines_do_not_rearm_the_header() {
     assert!(s.contains("\x1b[38;5;117mepsilon\x1b[0m"), "{s:?}");
     assert!(!s.contains("\x1b[36mepsilon\x1b[0m"), "{s:?}");
     assert!(
-        !s.contains("\x1b[36m free text here that is prose \x1b[0m"),
+        !s.contains("\x1b[1;38;5;231m free text here that is prose \x1b[0m"),
         "{s:?}"
     );
 }
@@ -7411,7 +7802,7 @@ fn a_headerless_first_row_of_value_words_is_still_data() {
         return;
     };
     assert!(s.contains("\x1b[35m NULL \x1b[0m"), "{s:?}");
-    assert!(!s.contains("\x1b[36m NULL \x1b[0m"), "{s:?}");
+    assert!(!s.contains("\x1b[1;38;5;231m NULL \x1b[0m"), "{s:?}");
 }
 
 #[test]
@@ -7444,4 +7835,27 @@ fn sqlite_list_row_with_an_empty_first_field_does_not_open_a_phantom_cell() {
     let s = String::from_utf8_lossy(&out);
     assert!(s.contains("\x1b[38;5;117malice\x1b[0m"), "{s:?}");
     assert!(s.contains("\x1b[38;5;117mbob\x1b[0m"), "{s:?}");
+}
+
+#[test]
+fn zz_verifier_tmp_command_view_cost() {
+    use std::time::Instant;
+    for cmd in [
+        "brew outdated --verbose",
+        "lsof -i -P",
+        "ls -la",
+        "brew services list | grep -v none",
+    ] {
+        let c = Some(cmd.as_bytes().to_vec());
+        let n = 200_000u32;
+        let t = Instant::now();
+        let mut hits = 0usize;
+        for _ in 0..n {
+            if std::hint::black_box(super::command_view(&c)).is_some() {
+                hits += 1;
+            }
+        }
+        let per = t.elapsed().as_nanos() as f64 / n as f64;
+        eprintln!("VERIFIER {cmd:?}: {per:.0} ns/call (hits {hits})");
+    }
 }

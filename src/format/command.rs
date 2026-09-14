@@ -31,9 +31,12 @@ pub(super) fn classify(
     let name = cmdline::first_word(command);
     let custom_sensitive = is_custom_sensitive(command, sensitive_rules);
     let built_in_sensitive = is_builtin_sensitive(command);
+    // `ssh host cmd` prints a remote command's output and exits, like any
+    // local command; only a session (`ssh host`, `-t`, `-N`) needs the bypass.
     let on_bypass_list = name
         .as_ref()
-        .is_some_and(|name| bypass_names.iter().any(|bypass| bypass == name));
+        .is_some_and(|name| bypass_names.iter().any(|bypass| bypass == name))
+        && !(name.as_deref() == Some("ssh") && ssh_runs_remote_command(command));
     // Order matters, and the bypass list has to outrank `SensitiveText`.
     //
     // `is_builtin_sensitive` scans every word, so `ssh myserver cat .env` looks
@@ -66,6 +69,74 @@ pub(super) fn classify(
         CommandTrust::Normal
     };
     CommandPolicy { trust }
+}
+
+/// Whether an `ssh` command line carries a remote command, judged from a
+/// whitespace split so a trailing pipe (`ssh host cmd | head`) still counts.
+/// `-t` (a remote TTY, so a remote `vim` or `top`) and `-N` (no command,
+/// port forwarding only) keep the interactive bypass.
+pub(super) fn ssh_runs_remote_command(command: &[u8]) -> bool {
+    let words: Vec<Vec<u8>> = command
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|w| !w.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect();
+    ssh_remote_words(&words).is_some()
+}
+
+/// The remote command of `ssh [options] destination command…`, joined with
+/// single spaces, or `None` for a session. A quoted remote command arrives
+/// as one word and is returned exactly as the remote shell will see it.
+pub(super) fn ssh_remote_command(command: &[u8]) -> Option<Vec<u8>> {
+    let cleaned = without_stderr_redirection(command);
+    let words = shell_words(&cleaned)?;
+    let remote = ssh_remote_words(&words)?;
+    Some(remote.join(&b' '))
+}
+
+/// OpenSSH options that consume a value (attached or as the next word).
+const SSH_VALUE_OPTIONS: &[u8] = b"BbcDEeFIiJLlmOopQRSWw";
+
+fn ssh_remote_words(words: &[Vec<u8>]) -> Option<&[Vec<u8>]> {
+    let start = words.iter().position(|word| {
+        let text = std::str::from_utf8(word).ok();
+        !(text.is_some_and(|t| {
+            matches!(
+                t,
+                "!" | "sudo" | "env" | "command" | "nohup" | "time" | "doas" | "exec"
+            )
+        }) || cmdline::is_env_assignment_bytes(word))
+    })?;
+    let ssh = &words[start];
+    if ssh.rsplit(|&b| b == b'/').next() != Some(b"ssh".as_slice()) {
+        return None;
+    }
+    let mut index = start + 1;
+    while index < words.len() {
+        let word = words[index].as_slice();
+        if word == b"--" {
+            index += 1;
+            break;
+        }
+        if word.len() < 2 || word[0] != b'-' {
+            break;
+        }
+        let mut consumed_next = false;
+        for (offset, &flag) in word[1..].iter().enumerate() {
+            if SSH_VALUE_OPTIONS.contains(&flag) {
+                // `-p22` attaches its value; `-p 22` takes the next word.
+                consumed_next = offset + 2 == word.len();
+                break;
+            }
+            if matches!(flag, b't' | b'N') {
+                return None;
+            }
+        }
+        index += 1 + usize::from(consumed_next);
+    }
+    // `index` is the destination; the remote command follows it.
+    let remote = words.get(index + 1..)?;
+    (!remote.is_empty()).then_some(remote)
 }
 
 pub(super) fn silent_breadcrumb(command: &[u8]) -> Option<Vec<u8>> {

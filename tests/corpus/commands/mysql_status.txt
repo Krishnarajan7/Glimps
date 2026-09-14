@@ -1,0 +1,25 @@
+mysql> status;
+--------------
+mysql  Ver 9.5.0 for macos26.1 on arm64 (Homebrew)
+
+Connection id:		16
+Current database:	krishna_stores_db
+Current user:		root@localhost
+SSL:			Not in use
+Current pager:		stdout
+Using outfile:		''
+Using delimiter:	;
+Server version:		9.5.0 Homebrew
+Protocol version:	10
+Connection:		Localhost via UNIX socket
+Server characterset:	utf8mb4
+Db     characterset:	utf8mb4
+Client characterset:	utf8mb4
+Conn.  characterset:	utf8mb4
+UNIX socket:		/tmp/mysql.sock
+Binary data as:		Hexadecimal
+Uptime:			25 min 54 sec
+
+Threads: 3  Questions: 68  Slow queries: 0  Opens: 171  Flush tables: 3  Open tables: 92  Queries per second avg: 0.043
+--------------
+

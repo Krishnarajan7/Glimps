@@ -103,11 +103,11 @@ pub fn run() -> Result<i32> {
         Err(_) => Check::warning("TERM", "not set"),
     });
 
-    checks.push(if env::var_os("GLIMPS_ACTIVE").is_some() {
-        Check::pass("session", "currently inside a GLIMPS-managed shell")
-    } else {
-        Check::warning("session", "this shell is not currently managed by GLIMPS")
-    });
+    checks.push(check_session(
+        env::var_os("GLIMPS_ACTIVE").is_some(),
+        env::var_os("GLIMPS_BIN").map(PathBuf::from).as_deref(),
+        &current_exe,
+    ));
 
     checks.push(
         if env::var_os("GLIMPS").as_deref() == Some(std::ffi::OsStr::new("0")) {
@@ -212,14 +212,14 @@ fn check_integration(shell: Option<&Path>, home: Option<&Path>) -> Check {
             "no supported shell rc file could be selected",
         );
     };
-    let expected = format!("glimps init {}", shell_name(shell).unwrap_or_default());
+    let name = shell_name(shell).unwrap_or_default();
     match read_small_text(&path) {
-        Ok(Some(text)) if has_active_integration(&text, &expected) => {
+        Ok(Some(text)) if integration_line_index(&text, name).is_some() => {
             Check::pass("integration", format!("found in {}", path.display()))
         }
         Ok(Some(_)) => Check::fail(
             "integration",
-            format!("{expected:?} is missing from {}", path.display()),
+            format!("\"glimps init {name}\" is missing from {}", path.display()),
         ),
         Ok(None) => Check::fail("integration", format!("{} does not exist", path.display())),
         Err(err) => Check::fail(
@@ -234,6 +234,39 @@ pub(crate) fn has_active_integration(text: &str, expected: &str) -> bool {
         let line = line.trim_start();
         !line.starts_with('#') && line.contains(expected)
     })
+}
+
+/// The first non-comment line index that runs the GLIMPS integration for
+/// `shell`. The binary may be named directly (`glimps init zsh`), by path
+/// (`/opt/homebrew/bin/glimps init zsh`) or through a variable
+/// (`"$GLIMPS_DOGFOOD_BIN" init zsh`, as the dogfood rc does), so any mention
+/// of glimps before `init <shell>` counts — and `starship init zsh` does not.
+pub(crate) fn integration_line_index(text: &str, shell: &str) -> Option<usize> {
+    text.lines()
+        .position(|line| line_runs_integration(line, shell))
+}
+
+fn line_runs_integration(line: &str, shell: &str) -> bool {
+    let line = line.trim_start();
+    if line.starts_with('#') || shell.is_empty() {
+        return false;
+    }
+    let lower = line.to_ascii_lowercase();
+    let needle = format!("init {}", shell.to_ascii_lowercase());
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(&needle) {
+        let at = from + found;
+        let end = at + needle.len();
+        let word_ends = lower[end..]
+            .chars()
+            .next()
+            .is_none_or(|next| !next.is_ascii_alphanumeric() && next != '_');
+        if word_ends && lower[..at].contains("glimps") {
+            return true;
+        }
+        from = end;
+    }
+    false
 }
 
 /// The rc file's text, when a shell/home pair selects one that exists and is
@@ -279,8 +312,8 @@ fn active_line_index(text: &str, needle: &str) -> Option<usize> {
 /// framework, name the offender that appears earliest *in the file* (not in
 /// the hazard table). `None` means placement is fine (or the integration/rc is
 /// absent — the integration check already reports that).
-fn placement_hazard(text: &str, expected: &str) -> Option<&'static str> {
-    let glimps_at = active_line_index(text, expected)?;
+fn placement_hazard(text: &str, shell: &str) -> Option<&'static str> {
+    let glimps_at = integration_line_index(text, shell)?;
     REEXEC_HAZARDS
         .iter()
         .filter_map(|(name, needle)| Some((active_line_index(text, needle)?, *name)))
@@ -295,9 +328,8 @@ fn placement_hazard(text: &str, expected: &str) -> Option<&'static str> {
 fn check_rc_hygiene(shell: Option<&Path>, rc: Option<&str>) -> Option<Check> {
     let name = shell_name(shell?)?;
     let text = rc?;
-    let expected = format!("glimps init {name}");
-    active_line_index(text, &expected)?;
-    Some(match placement_hazard(text, &expected) {
+    integration_line_index(text, name)?;
+    Some(match placement_hazard(text, name) {
         Some(name) => Check::warning(
             "rc order",
             format!(
@@ -403,6 +435,33 @@ pub(crate) fn read_small_text(path: &Path) -> std::io::Result<Option<String>> {
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "file is not UTF-8"))
 }
 
+/// Inside a managed shell, say so — and say which binary is doing the
+/// managing when it is not this one. A dogfood session runs the repo build
+/// while `glimps` on PATH is the installed release, and a doctor report from
+/// the wrong binary otherwise reads as a diagnosis of the session.
+fn check_session(active: bool, session_bin: Option<&Path>, current_exe: &Path) -> Check {
+    if !active {
+        return Check::warning("session", "this shell is not currently managed by GLIMPS");
+    }
+    let same = match session_bin {
+        Some(bin) => match (bin.canonicalize(), current_exe.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => bin == current_exe,
+        },
+        None => true,
+    };
+    match session_bin {
+        Some(bin) if !same => Check::warning(
+            "session",
+            format!(
+                "inside a GLIMPS-managed shell run by {}, not by this binary",
+                bin.display()
+            ),
+        ),
+        _ => Check::pass("session", "currently inside a GLIMPS-managed shell"),
+    }
+}
+
 fn check_path(current_exe: &Path, path: Option<&std::ffi::OsStr>) -> Check {
     let Some(path) = path else {
         return Check::warning("PATH", "PATH is not set");
@@ -494,37 +553,70 @@ mod tests {
 
     #[test]
     fn commented_integration_does_not_count_as_enabled() {
-        assert!(has_active_integration(
-            "command -v glimps && eval \"$(glimps init zsh)\"\n",
-            "glimps init zsh"
-        ));
-        assert!(!has_active_integration(
-            "  # command -v glimps && eval \"$(glimps init zsh)\"\n",
-            "glimps init zsh"
-        ));
+        assert_eq!(
+            integration_line_index("command -v glimps && eval \"$(glimps init zsh)\"\n", "zsh"),
+            Some(0)
+        );
+        assert_eq!(
+            integration_line_index(
+                "  # command -v glimps && eval \"$(glimps init zsh)\"\n",
+                "zsh"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn integration_is_recognised_by_path_and_variable_not_by_other_tools() {
+        for rc in [
+            "eval \"$(/opt/homebrew/bin/glimps init zsh)\"\n",
+            "eval \"$(\"$GLIMPS_DOGFOOD_BIN\" init zsh)\"\n",
+            "GLIMPS_BIN=~/bin/glimps; eval \"$($GLIMPS_BIN init zsh)\"\n",
+            "eval \"$(Glimps.exe init zsh)\"\n",
+        ] {
+            assert_eq!(integration_line_index(rc, "zsh"), Some(0), "{rc:?}");
+        }
+        for rc in [
+            "eval \"$(starship init zsh)\"\n",
+            "eval \"$(glimps init bash)\"\n",
+            "eval \"$(glimps init zshrc)\"\n",
+            "# eval \"$(\"$GLIMPS_DOGFOOD_BIN\" init zsh)\"\n",
+            "echo glimps\neval \"$(starship init zsh)\"\n",
+        ] {
+            assert_eq!(integration_line_index(rc, "zsh"), None, "{rc:?}");
+        }
+        assert_eq!(integration_line_index("x\n", ""), None);
+    }
+
+    #[test]
+    fn session_check_names_a_foreign_supervisor_binary() {
+        let me = Path::new("/opt/homebrew/bin/glimps");
+        assert_eq!(check_session(false, None, me).level, Level::Warning);
+        assert_eq!(check_session(true, None, me).level, Level::Pass);
+        assert_eq!(check_session(true, Some(me), me).level, Level::Pass);
+        let other = check_session(true, Some(Path::new("/repo/target/debug/glimps")), me);
+        assert_eq!(other.level, Level::Warning);
+        assert!(other.detail.contains("/repo/target/debug/glimps"));
     }
 
     #[test]
     fn placement_hazard_flags_frameworks_above_the_glimps_line() {
         let below = "source $ZSH/oh-my-zsh.sh\n\
                      command -v glimps >/dev/null 2>&1 && eval \"$(glimps init zsh)\"\n";
-        assert_eq!(
-            placement_hazard(below, "glimps init zsh"),
-            Some("oh-my-zsh")
-        );
+        assert_eq!(placement_hazard(below, "zsh"), Some("oh-my-zsh"));
 
         let above = "command -v glimps >/dev/null 2>&1 && eval \"$(glimps init zsh)\"\n\
                      source $ZSH/oh-my-zsh.sh\n\
                      eval \"$(starship init zsh)\"\n";
-        assert_eq!(placement_hazard(above, "glimps init zsh"), None);
+        assert_eq!(placement_hazard(above, "zsh"), None);
 
         // Commented-out frameworks don't count.
         let commented = "# source $ZSH/oh-my-zsh.sh\n\
                          eval \"$(glimps init zsh)\"\n";
-        assert_eq!(placement_hazard(commented, "glimps init zsh"), None);
+        assert_eq!(placement_hazard(commented, "zsh"), None);
 
         // No integration line at all -> no placement verdict.
-        assert_eq!(placement_hazard("source x\n", "glimps init zsh"), None);
+        assert_eq!(placement_hazard("source x\n", "zsh"), None);
     }
 
     #[test]

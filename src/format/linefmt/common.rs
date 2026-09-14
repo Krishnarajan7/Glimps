@@ -28,19 +28,29 @@ pub(crate) fn colorize_size_path_line(line: &[u8], theme: &Theme) -> Option<Vec<
     }))
 }
 
-pub(crate) fn colorize_words<F>(
+pub(crate) fn colorize_words<F>(content: &[u8], ending: &[u8], theme: &Theme, color: F) -> Vec<u8>
+where
+    F: FnMut(usize, &[u8]) -> Option<&'static str>,
+{
+    let spans = word_spans(content);
+    colorize_spans(content, ending, &spans, theme, color)
+}
+
+/// [`colorize_words`] over spans the caller has already computed, so a view
+/// that inspected the words to decide whether to paint does not scan twice.
+pub(crate) fn colorize_spans<F>(
     content: &[u8],
     ending: &[u8],
+    spans: &[(usize, usize)],
     theme: &Theme,
     mut color: F,
 ) -> Vec<u8>
 where
     F: FnMut(usize, &[u8]) -> Option<&'static str>,
 {
-    let spans = word_spans(content);
     let mut out = Vec::with_capacity(content.len() + ending.len() + spans.len() * 8);
     let mut cursor = 0;
-    for (idx, (start, end)) in spans.into_iter().enumerate() {
+    for (idx, &(start, end)) in spans.iter().enumerate() {
         out.extend_from_slice(&content[cursor..start]);
         let word = &content[start..end];
         match color(idx, word) {

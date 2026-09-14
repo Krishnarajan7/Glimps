@@ -131,6 +131,9 @@ pub struct Formatters {
     pub diff: bool,
     /// Highlight stack traces / panics (Rust panics, Python tracebacks).
     pub stacktrace: bool,
+    /// Paint the field name of plain `Label: value` / `KEY=value` report
+    /// lines nothing else claims (`timedatectl`, `env`, remote `ssh` output).
+    pub reports: bool,
 }
 
 /// Buffering / streaming size limits.
@@ -201,6 +204,7 @@ impl Default for Formatters {
             http: true,
             diff: true,
             stacktrace: true,
+            reports: true,
         }
     }
 }

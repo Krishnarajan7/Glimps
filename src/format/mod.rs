@@ -305,6 +305,9 @@ pub struct Formatter {
     /// `cat README.md` color all lines inside ```bash / ```rust blocks
     /// consistently instead of treating each line as unrelated prose.
     markdown_fence: Option<Option<linefmt::MarkdownEmbeddedLanguage>>,
+    /// The start of the current physical line was already emitted verbatim
+    /// (an escape split it), so what follows is a fragment, not a line.
+    line_open: bool,
     /// Whether the previous chunk left a full-screen TUI on the alternate screen.
     /// Tracked so the chunk that *exits* alt-screen is also passed through.
     was_alt_screen: bool,
@@ -379,6 +382,7 @@ impl Formatter {
             pin: pin::ErrorPin::new(),
             pin_armed: false,
             markdown_fence: None,
+            line_open: false,
             was_alt_screen: false,
             buffered,
             streaming,
@@ -1101,11 +1105,13 @@ impl Formatter {
                     // The cost is a client that streams rows across a stall,
                     // whose next all-text row may be keyed as a header.
                     self.sql_result.reset();
+                    self.line_open = false;
                     emitted_prefix = false;
                 } else {
                     line.extend_from_slice(&seg[start..=i]);
                     self.emit_stream_line(out, &line);
                     line.clear();
+                    self.line_open = false;
                 }
                 start = i + 1;
             }
@@ -1118,8 +1124,16 @@ impl Formatter {
         }
         line.extend_from_slice(&seg[start..]);
         if line.len() > self.config.limits.line_cap {
+            // One overlong un-terminated line degrades only ITSELF: emit what we
+            // have and stream the rest of this line verbatim (the same
+            // `emitted_prefix` state a stall flush uses), then resume coloring
+            // at the next newline. Latching `Passthrough` here used to disable
+            // formatting for the whole rest of the run — and an interactive REPL
+            // (`mysql`/`psql`/`sqlite3`) is ONE long-lived command, so a single
+            // wide row (a big TEXT cell, `SHOW CREATE TABLE`, `GROUP_CONCAT`)
+            // turned every later table plain until the shell was exited.
             out.extend_from_slice(&line);
-            Collect::Passthrough
+            Collect::Stream(Vec::new(), true)
         } else {
             Collect::Stream(line, false)
         }
@@ -1205,6 +1219,7 @@ impl Formatter {
         self.lsof_columns.clear();
         self.sql_result.reset();
         self.markdown_fence = None;
+        self.line_open = false;
     }
 
     fn emit_stream_line(&mut self, out: &mut Vec<u8>, line: &[u8]) {
@@ -1220,7 +1235,14 @@ impl Formatter {
                 return;
             }
         }
-        emit_line(out, line, &self.theme, &self.streaming);
+        emit_line(
+            out,
+            line,
+            &self.theme,
+            &self.streaming,
+            // A fragment after an escape has no field name to find.
+            self.config.formatters.reports && !self.line_open,
+        );
         self.command_output_line_count += 1;
     }
 
@@ -1279,6 +1301,7 @@ impl Formatter {
             }
             CommandView::Git(view) => linefmt::colorize_git_line(line, &self.theme, view),
             CommandView::Grep(view) => linefmt::colorize_grep_line(line, &self.theme, view),
+            CommandView::Brew(view) => linefmt::colorize_brew_line(line, &self.theme, view),
         }
     }
 
@@ -1395,6 +1418,7 @@ impl Formatter {
                     | CommandView::Launchctl
                     | CommandView::Pmset
                     | CommandView::NetworkSetup
+                    | CommandView::Brew(_)
             )
         )
     }
@@ -1471,6 +1495,9 @@ impl Formatter {
             Collect::Stream(line, _) => {
                 // The trailing partial line has no newline; emit it verbatim (we
                 // only color complete lines). The separator was emitted at commit.
+                if !line.is_empty() {
+                    self.line_open = true;
+                }
                 out.extend_from_slice(&line);
             }
             Collect::Passthrough | Collect::Idle => {}
@@ -1695,6 +1722,7 @@ enum CommandView {
     Git(linefmt::GitView),
     Grep(linefmt::GrepView),
     NetworkSetup,
+    Brew(linefmt::BrewView),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1804,6 +1832,11 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
     // stdout redirects survive this call and keep declining downstream.
     let cleaned = command::without_stderr_redirection(command.as_deref()?);
     let cmd = cleaned.as_ref();
+    // `ssh host df -h` shows `df -h`'s output: the remote command picks the
+    // view. A session (`ssh host`, `-t`) is bypassed before this is reached.
+    if let Some(remote) = command::ssh_remote_command(cmd) {
+        return command_view(&Some(remote));
+    }
     // Cargo permits wrappers with quoted environment values. The generic
     // first-word helper is intentionally lightweight and can split those
     // values, so let the stricter shell-word parser recognize Cargo first.
@@ -1829,6 +1862,7 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "curl" => curl_command_view(cmd),
         "cd" => cd_command_view(cmd),
         "kubectl" => kubectl_command_view(cmd),
+        "brew" => brew_command_view(cmd),
         "scutil" => scutil_command_view(cmd),
         "route" => route_command_view(cmd),
         "netstat" => netstat_command_view(cmd),
@@ -2315,6 +2349,89 @@ fn kubectl_command_view(command: &[u8]) -> Option<CommandView> {
     match (words.next()?, words.next()?) {
         ("get", "pods") => Some(CommandView::KubectlPods),
         _ => None,
+    }
+}
+
+/// Homebrew listings whose output is plain text Homebrew never colors itself.
+///
+/// `brew services [list]` selects the service table; `list`/`ls`, `outdated`,
+/// `leaves`, bare `tap`, `deps` and `uses` select the package listing.
+/// Everything else — `install`, `upgrade`, `info`, `doctor`, `services start`,
+/// `tap <user/repo>` — is left to Homebrew, which paints its own headings,
+/// progress and diagnostics on a terminal. `--json` output belongs to the JSON
+/// formatter, and an `ls`-style short flag (`brew list -l curl`) prints a file
+/// table this view has no shape for. A pipe keeps the view only through
+/// filters that leave rows intact. Help is Homebrew's own prose and takes the
+/// same view every other tool's `--help` does.
+fn brew_command_view(command: &[u8]) -> Option<CommandView> {
+    let stages = shell_pipeline_words(command)?;
+    let stage = stages.first()?;
+    // `HOMEBREW_NO_AUTO_UPDATE=1 brew outdated` is the common scripted spelling.
+    let brew_index = stage.iter().position(|word| {
+        !cmdline::is_env_assignment_bytes(word) && !matches!(word.as_slice(), b"env" | b"command")
+    })?;
+    let brew = &stage[brew_index..];
+    if stage_name(brew) != Some("brew") {
+        return None;
+    }
+    let mut arguments = Vec::with_capacity(brew.len());
+    for word in &brew[1..] {
+        arguments.push(std::str::from_utf8(word).ok()?);
+    }
+    if arguments.first() == Some(&"help") || arguments.iter().any(|w| matches!(*w, "--help" | "-h"))
+    {
+        return Some(CommandView::Man);
+    }
+    if arguments
+        .iter()
+        .any(|word| *word == "--json" || word.starts_with("--json="))
+    {
+        return None;
+    }
+    if !stages
+        .iter()
+        .skip(1)
+        .all(|stage| brew_filter_keeps_rows(stage))
+    {
+        return None;
+    }
+    let mut positional = arguments
+        .iter()
+        .copied()
+        .filter(|word| !word.starts_with('-'));
+    match positional.next()? {
+        "services" => match positional.next() {
+            None | Some("list" | "ls") => Some(CommandView::Brew(linefmt::BrewView::Services)),
+            Some(_) => None,
+        },
+        "list" | "ls" => {
+            let ls_style_flag = arguments
+                .iter()
+                .any(|word| word.starts_with('-') && !word.starts_with("--") && word.len() > 1);
+            (!ls_style_flag).then_some(CommandView::Brew(linefmt::BrewView::Packages))
+        }
+        // `brew tap` alone lists taps; with anything else it clones one.
+        "tap" => (arguments.len() == 1).then_some(CommandView::Brew(linefmt::BrewView::Packages)),
+        "outdated" | "leaves" | "deps" | "uses" => {
+            Some(CommandView::Brew(linefmt::BrewView::Packages))
+        }
+        _ => None,
+    }
+}
+
+/// A downstream pipeline stage that still shows listing rows. Counting forms
+/// (`grep -c`, `uniq -c`) replace the rows with a number.
+fn brew_filter_keeps_rows(stage: &[Vec<u8>]) -> bool {
+    let counts = || {
+        stage.iter().skip(1).any(|arg| {
+            arg.as_slice() == b"--count"
+                || (arg.starts_with(b"-") && !arg.starts_with(b"--") && arg.contains(&b'c'))
+        })
+    };
+    match stage_name(stage) {
+        Some("head" | "tail" | "sort") => true,
+        Some("grep" | "egrep" | "fgrep" | "rg" | "uniq") => !counts(),
+        _ => false,
     }
 }
 
@@ -2897,8 +3014,21 @@ fn is_binary_byte(b: u8) -> bool {
 /// Emit one complete line, colored by log severity / HTTP status (per the enabled
 /// categories) if it matches, else verbatim. The user's bytes (content + line
 /// ending) are always preserved; only color codes are added.
-fn emit_line(out: &mut Vec<u8>, line: &[u8], theme: &Theme, streaming: &[&dyn StreamingFormatter]) {
-    if let Some(colored) = linefmt::colorize_line(line, theme, streaming) {
+fn emit_line(
+    out: &mut Vec<u8>,
+    line: &[u8],
+    theme: &Theme,
+    streaming: &[&dyn StreamingFormatter],
+    reports: bool,
+) {
+    // The report pass is the last resort: only a line no streaming
+    // formatter wanted gets its field name painted.
+    let colored = linefmt::colorize_line(line, theme, streaming).or_else(|| {
+        reports
+            .then(|| linefmt::colorize_report_line(line, theme))
+            .flatten()
+    });
+    if let Some(colored) = colored {
         // Only inject color into genuine text. A line that slipped binary control
         // bytes into a text stream (binary appearing mid-run, after a text commit)
         // is emitted verbatim — never wrap binary in SGR (invariant #3). The scan

@@ -37,6 +37,7 @@ logs = true        # color ERROR/WARN/INFO/DEBUG lines
 http = true        # color HTTP status lines by class (2xx/3xx/4xx/5xx)
 diff = true        # colorize unified diffs (added/removed/hunk lines)
 stacktrace = true  # highlight stack traces / panics (Rust, Python)
+reports = true     # paint the field name of plain `Label: value` / `KEY=value` lines
 
 # Command status footer — the line under a command's output when it ends.
 # Failures are loud (red, with a human decode of the exit code: "command not

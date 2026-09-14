@@ -60,6 +60,14 @@ fn lsof_redirected_stream() -> Vec<u8> {
     [head.as_slice(), C, heading.as_slice(), &row.repeat(64), D].concat()
 }
 
+/// A plain Homebrew listing under its command view: one name and two versions
+/// per row, every word classified, over a long installed list.
+fn brew_outdated_stream() -> Vec<u8> {
+    let head = b"\x1b]133;A\x07\x1b]7337;brew outdated --verbose\x07";
+    let row = b"ca-certificates (2026-03-19, 2026-05-14) < 2026-08-13\n";
+    [head.as_slice(), C, &row.repeat(128), D].concat()
+}
+
 fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("process");
 
@@ -71,6 +79,7 @@ fn bench(c: &mut Criterion) {
         ("stacktrace_output", stacktrace_stream()),
         ("lsof_output", lsof_stream()),
         ("lsof_output_redirected", lsof_redirected_stream()),
+        ("brew_outdated_output", brew_outdated_stream()),
     ] {
         group.throughput(Throughput::Bytes(data.len() as u64));
         group.bench_function(name, |b| {

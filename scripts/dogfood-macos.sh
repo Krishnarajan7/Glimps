@@ -171,6 +171,7 @@ EOF
     cd "$session_cwd"
     set +e
     ZDOTDIR="$DOGFOOD_TMP" \
+      PATH="$(dirname "$BIN"):$PATH" \
       GLIMPSRC="$DOGFOOD_TMP/.glimpsrc" \
       SHELL="$(command -v zsh)" \
       GLIMPS_DOGFOOD_TMP="$DOGFOOD_TMP" \

@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Table column headers recolored** — the header row of a result or CSV/TSV
+  table (mysql/psql/sqlite `desc`, `select`, delimited files) is now bold
+  white instead of cyan, so column names read clearly as headers and no
+  longer compete with the sky-blue string values below them. JSON keys and
+  command names keep their cyan. Applies on every platform (one shared theme).
+- **Remote commands over ssh** — `ssh host cmd` (no `-t`, no `-N`) is no
+  longer treated as an interactive session: the remote command's output gets
+  the same treatment the local command would, including its command view
+  (`ssh host df -h` is the `df` view) and the failure footer's decode. Plain
+  sessions (`ssh host`, `-t`) stay untouched, and a remote command that reads
+  secrets (`ssh host cat .env`) stays raw pass-through. A leading `!` no
+  longer hides the real command from the classifier.
+
+- **Report lines** — after every other formatter has declined, a plain
+  `Label: value` line (`timedatectl`, `hostnamectl`, `sw_vers`) or
+  `KEY=value` line (`env`) gets its field name painted and its separator
+  dimmed; the value is never touched. Off with `reports = false` under
+  `[formatters]`.
+
+- **Homebrew listings** — `brew services list` rows are colored (name, the
+  `started`/`none`/`error` status, user, launchd plist or systemd unit path)
+  and `brew list --versions`, `brew outdated`, `brew leaves`, `brew tap`,
+  `brew deps --tree` and `brew uses` get formula names, versions and
+  comparators told apart. Homebrew's own colors (`==>` headings, the green
+  `started`, red `Error:`) pass through untouched; `install`, `upgrade`,
+  `info`, `doctor`, `--json` output and `brew help` are left as they were.
+
 - **Database shell awareness** — inside an interactive `mysql`/`psql`/`sqlite3`
   session every result table is understood structurally, not just the first:
   header rows are keyed under each table's top rule (including `desc`'s `Null`
@@ -18,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Empty set`, `Database changed`, `Query OK`, `Bye`) are dimmed, and
   `ERROR 1064 (42000):` prefixes are painted red with the message left
   readable. The prompt and the echo of what you type pass through as-is.
+  The `status` report reads as a report, not a table: the client banner
+  keeps its version gold, each `Label:` takes a lavender label colour with
+  a dim colon, and values are painted by kind (numbers, paths, text) — the
+  same for the `Threads: 3  Questions: 68 …` summary line.
 
 - **Windows (experimental, untested on real hardware)** — the crate builds
   and lints for `x86_64-pc-windows-msvc`: ConPTY through `portable-pty`,
@@ -31,6 +62,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A wide row no longer disables an interactive SQL session** — one result
+  line longer than `line_cap` (64 KiB: a big `TEXT` cell, `SHOW CREATE TABLE`,
+  `GROUP_CONCAT`) used to latch the whole `mysql`/`psql`/`sqlite3` run to
+  pass-through, so every table printed afterwards rendered plain until you
+  exited the shell. The long line now degrades only itself and formatting
+  resumes on the next line.
+- **`glimps doctor` inside a dogfood session** — the integration check
+  recognises the rc line however the binary is spelled (`glimps init zsh`,
+  a full path, or a variable such as the dogfood rc's
+  `"$GLIMPS_DOGFOOD_BIN" init zsh`) instead of failing on the literal text.
+  The session check now names the binary that actually runs the session
+  (exported as `GLIMPS_BIN`) when `glimps` on PATH is a different install,
+  and `scripts/dogfood-macos.sh` puts the repo build first on PATH so the
+  doctor you run inside it is the one you just built.
 - `mysql --version` (and other `<tool> --version` banners) are no longer
   painted as a result table; the version number and vendor note are colored
   instead.

@@ -12,7 +12,7 @@ use super::theme::Theme;
 /// Wrapper commands to look past when finding the "real" command for bypass
 /// (`sudo vim`, `env X=1 less`, …).
 const WRAPPERS: &[&str] = &[
-    "sudo", "env", "command", "nohup", "time", "doas", "exec", "builtin", "stdbuf",
+    "sudo", "env", "command", "nohup", "time", "doas", "exec", "builtin", "stdbuf", "!",
 ];
 
 /// Shell operator bytes (best-effort; used only for coloring).
@@ -225,7 +225,7 @@ fn is_command_prefix(word: &[u8]) -> bool {
         || word.first() == Some(&b'-')
 }
 
-fn is_env_assignment_bytes(word: &[u8]) -> bool {
+pub(crate) fn is_env_assignment_bytes(word: &[u8]) -> bool {
     let Some(equals) = word.iter().position(|byte| *byte == b'=') else {
         return false;
     };

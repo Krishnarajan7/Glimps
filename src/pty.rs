@@ -89,6 +89,12 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit>
     let mut cmd = CommandBuilder::new(shell);
     cmd.args(interactive_shell_args(shell));
     cmd.env("GLIMPS_ACTIVE", "1");
+    // Which binary supervises this session, so `glimps doctor` run from a
+    // different install on PATH can say it is not looking at itself.
+    match std::env::current_exe() {
+        Ok(exe) => cmd.env("GLIMPS_BIN", exe),
+        Err(_) => cmd.env_remove("GLIMPS_BIN"),
+    }
     match metadata_channel.as_ref() {
         Some(channel) => cmd.env("GLIMPS_META_PATH", channel.path()),
         None => cmd.env_remove("GLIMPS_META_PATH"),

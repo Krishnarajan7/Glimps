@@ -33,6 +33,11 @@ pub struct Theme {
     pub hidden: &'static str,
     // Known directories in typed filesystem output
     pub folder: &'static str,
+    // Field names in `Label: value` reports (mysql `status`, sqlite `.show`)
+    pub label: &'static str,
+    // Column-name header row of a result/CSV table (kept apart from `key`,
+    // which also paints JSON keys and command names).
+    pub table_header: &'static str,
     // Log severity / HTTP status classes
     pub error: &'static str,
     pub warn: &'static str,
@@ -62,6 +67,8 @@ impl Theme {
             path: "",
             hidden: "",
             folder: "",
+            label: "",
+            table_header: "",
             error: "",
             warn: "",
             info: "",
@@ -91,6 +98,8 @@ impl Theme {
             path: "\x1b[38;2;142;202;230m",     // #8ecae6 filesystem paths
             hidden: "\x1b[38;2;69;73;85m",      // #454955 hidden files and folders
             folder: "\x1b[38;2;122;162;247m",   // #7aa2f7 visible folders
+            label: "\x1b[38;5;183m",            // lavender report labels
+            table_header: "\x1b[1;38;5;231m",   // bold bright white column headers
             error: "\x1b[31m",                  // red    (ERROR / 5xx)
             warn: "\x1b[38;5;220m",             // bright gold (WARN / 4xx)
             // Website brand green: --syn-string oklch(0.55 0.15 145),
@@ -127,6 +136,8 @@ impl Theme {
             path: "\x1b[38;2;29;111;165m",     // readable path blue
             hidden: "\x1b[38;5;245m",          // mid gray (dark charcoal is too loud on white)
             folder: "\x1b[38;2;52;84;175m",    // deep indigo folders
+            label: "\x1b[38;5;97m",            // medium purple report labels
+            table_header: "\x1b[1;38;5;236m",  // bold dark gray column headers
             error: "\x1b[31m",                 // red    (ERROR / 5xx)
             warn: "\x1b[38;5;130m",            // dark orange (WARN / 4xx)
             info: "\x1b[38;2;39;135;51m",      // same semantic green

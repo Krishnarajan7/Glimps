@@ -54,6 +54,22 @@ impl Session {
         contains(&self.snapshot(), needle)
     }
 
+    /// Like `wait_for`, but matched against the output with every CSI escape
+    /// removed, for a needle GLIMPS may legitimately paint (a `KEY=value`
+    /// line gets its key colored by the report pass).
+    fn wait_for_plain(&self, needle: &[u8], timeout: Duration) -> bool {
+        let end = Instant::now() + timeout;
+        loop {
+            if contains(&strip_csi(&self.snapshot()), needle) {
+                return true;
+            }
+            if Instant::now() >= end {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     fn wait_for_any(&self, needles: &[&[u8]], timeout: Duration) -> bool {
         let end = Instant::now() + timeout;
         while Instant::now() < end {
@@ -86,6 +102,25 @@ impl Drop for Session {
         // Don't let a failed test leak a process.
         let _ = self.child.kill();
     }
+}
+
+/// Remove CSI sequences (`ESC [ … final`), leaving every other byte in place.
+fn strip_csi(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'[') {
+            let mut j = i + 2;
+            while j < bytes.len() && !(0x40..=0x7e).contains(&bytes[j]) {
+                j += 1;
+            }
+            i = (j + 1).min(bytes.len());
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -649,7 +684,7 @@ fn private_metadata_path_is_not_inherited_by_commands() {
     assert_prompt_ready(&s);
     s.write(b"printf 'META_ENV=%s\\n' \"${GLIMPS_META_PATH-unset}\"\n");
     assert!(
-        s.wait_for(b"META_ENV=unset", FORMAT_BUDGET),
+        s.wait_for_plain(b"META_ENV=unset", FORMAT_BUDGET),
         "metadata capability leaked to child environment: {:?}",
         String::from_utf8_lossy(&s.snapshot())
     );

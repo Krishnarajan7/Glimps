@@ -337,7 +337,7 @@ pub fn colorize_delimited_line(
         }
         let cell = &content[start..end];
         let color = if is_header {
-            theme.key
+            theme.table_header
         } else {
             color_for_delimited_cell(cell, theme)
         };
@@ -469,6 +469,10 @@ pub fn colorize_sql_result_line(
         state.prev = SqlLineKind::Other;
         return Some(painted);
     }
+    if let Some(painted) = colorize_status_report_line(content, ending, theme) {
+        state.prev = SqlLineKind::Other;
+        return Some(painted);
+    }
     // The first row after a top rule (mysql) or after prose (psql/sqlite) is
     // the header; anything after the divider or another row is data.
     let header_hint = matches!(state.prev, SqlLineKind::Other | SqlLineKind::TopRule);
@@ -524,6 +528,159 @@ pub fn colorize_sql_result_line(
     Some(colorize_spanned_cells(
         content, ending, &spans, theme, is_header, false,
     ))
+}
+
+/// `status` in the mysql monitor (and sqlite's `.show`) prints a report, not
+/// a table: a version banner, `Label:<tabs>value` lines, then one line of
+/// `Label: n` pairs. Tab-separated, those lines would otherwise be keyed as
+/// TSV data — label and value in the same colour — and the banner as a
+/// header row. Here the label gets its own colour, the colon recedes, and the
+/// value is painted by kind (number, path, text).
+fn colorize_status_report_line(content: &[u8], ending: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    if content.contains(&b'|') {
+        return None;
+    }
+    if let Some(painted) = colorize_client_banner(content, ending, theme) {
+        return Some(painted);
+    }
+    let cells = report_cells(content);
+    let (first_start, first_end) = *cells.first()?;
+    let first = &content[first_start..first_end];
+    let mut out = Vec::with_capacity(content.len() + ending.len() + cells.len() * 24);
+    if let Some(label) = first
+        .strip_suffix(b":")
+        .filter(|label| is_report_label(label))
+    {
+        // `Connection id:\t\t16` — one label, the value in the cells after it.
+        out.extend_from_slice(&content[..first_start]);
+        paint_bytes(&mut out, theme.label, label, theme.reset);
+        paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+        let mut cursor = first_end;
+        for &(start, end) in &cells[1..] {
+            out.extend_from_slice(&content[cursor..start]);
+            paint_report_value(&content[start..end], theme, &mut out);
+            cursor = end;
+        }
+        out.extend_from_slice(&content[cursor..]);
+        out.extend_from_slice(ending);
+        return Some(out);
+    }
+    // `Threads: 3  Questions: 68  Slow queries: 0`: every cell is a pair. One
+    // cell alone is a sentence (`Note: …`), not a report.
+    if cells.len() < 2 {
+        return None;
+    }
+    let pair = |cell: &[u8]| -> Option<usize> {
+        let colon = cell.windows(2).position(|pair| pair == b": ")?;
+        let value = trim_ascii_start(&cell[colon + 2..]);
+        (is_report_label(&cell[..colon]) && !value.is_empty()).then_some(colon)
+    };
+    if !cells
+        .iter()
+        .all(|&(start, end)| pair(&content[start..end]).is_some())
+    {
+        return None;
+    }
+    let mut cursor = 0;
+    for &(start, end) in &cells {
+        let cell = &content[start..end];
+        let colon = pair(cell)?;
+        let gap = cell[colon + 1..].len() - trim_ascii_start(&cell[colon + 1..]).len();
+        out.extend_from_slice(&content[cursor..start]);
+        paint_bytes(&mut out, theme.label, &cell[..colon], theme.reset);
+        paint_bytes(&mut out, theme.html_delim, b":", theme.reset);
+        out.extend_from_slice(&cell[colon + 1..colon + 1 + gap]);
+        paint_report_value(&cell[colon + 1 + gap..], theme, &mut out);
+        cursor = end;
+    }
+    out.extend_from_slice(&content[cursor..]);
+    out.extend_from_slice(ending);
+    Some(out)
+}
+
+/// `mysql  Ver 9.5.0 for macos26.1 on arm64 (Homebrew)`: the client's own
+/// banner. The name takes the label colour and the rest reads like
+/// `mysql --version` — version number gold, vendor note muted, connective
+/// words plain.
+fn colorize_client_banner(content: &[u8], ending: &[u8], theme: &Theme) -> Option<Vec<u8>> {
+    let lead = content.len() - trim_ascii_start(content).len();
+    let name_end = content[lead..]
+        .iter()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+        .map(|len| lead + len)?;
+    if name_end == lead {
+        return None;
+    }
+    let rest = trim_ascii_start(&content[name_end..]);
+    if rest.len() == content[name_end..].len() || !rest.starts_with(b"Ver ") {
+        return None;
+    }
+    let tail = [&content[name_end..], ending].concat();
+    let painted_tail = super::colorize_version_line(&tail, theme, false)?;
+    let mut out = Vec::with_capacity(content.len() + ending.len() + 32);
+    out.extend_from_slice(&content[..lead]);
+    paint_bytes(&mut out, theme.label, &content[lead..name_end], theme.reset);
+    out.extend_from_slice(&painted_tail);
+    Some(out)
+}
+
+/// Cells of a report line: runs of text separated by a tab or by two or
+/// more spaces. A single space stays inside a cell (`Not in use`,
+/// `Slow queries: 0`).
+fn report_cells(content: &[u8]) -> Vec<(usize, usize)> {
+    let mut cells = Vec::new();
+    let mut start = None;
+    let mut i = 0;
+    while i < content.len() {
+        if content[i].is_ascii_whitespace() {
+            let gap_start = i;
+            let mut has_tab = false;
+            while i < content.len() && content[i].is_ascii_whitespace() {
+                has_tab |= content[i] == b'\t';
+                i += 1;
+            }
+            if has_tab || i - gap_start >= 2 {
+                if let Some(s) = start.take() {
+                    cells.push((s, gap_start));
+                }
+            } else if start.is_none() && i < content.len() {
+                start = Some(gap_start);
+            }
+        } else {
+            if start.is_none() {
+                start = Some(i);
+            }
+            i += 1;
+        }
+    }
+    if let Some(s) = start {
+        cells.push((s, content.len()));
+    }
+    cells
+}
+
+/// `Connection id`, `Conn.  characterset`, `Queries per second avg`: a short
+/// run of words starting with a letter. A value or SQL never fits.
+fn is_report_label(label: &[u8]) -> bool {
+    let label = trim_ascii(label);
+    !label.is_empty()
+        && label.len() <= 40
+        && label[0].is_ascii_alphabetic()
+        && label.iter().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b' ' | b'.' | b'/' | b'(' | b')' | b'-' | b'_')
+        })
+}
+
+fn paint_report_value(value: &[u8], theme: &Theme, out: &mut Vec<u8>) {
+    let color = if looks_numeric(value) {
+        theme.number
+    } else if value.starts_with(b"/") || value.starts_with(b"~/") {
+        theme.path
+    } else {
+        theme.string
+    };
+    paint_bytes(out, color, value, theme.reset);
 }
 
 /// `+-----+-----+`: the top or bottom edge of a box-drawn table. A rule
@@ -814,7 +971,7 @@ fn colorize_spanned_cells(
             lex_sql(cell, theme, &mut out);
         } else {
             let color = if is_header {
-                theme.key
+                theme.table_header
             } else {
                 color_for_delimited_cell(cell, theme)
             };

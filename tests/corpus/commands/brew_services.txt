@@ -1,0 +1,5 @@
+Name          Status User   File
+mysql         started         krishv ~/Library/LaunchAgents/homebrew.mxcl.mysql.plist
+php           none                   
+postgresql@18 started         krishv ~/Library/LaunchAgents/homebrew.mxcl.postgresql@18.plist
+unbound       none                   

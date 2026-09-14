@@ -1,0 +1,5 @@
+[1mName          Status  User   File[0m
+mysql         [32mstarted[0m krishv ~/Library/LaunchAgents/homebrew.mxcl.mysql.plist
+php           [39mnone[0m           
+postgresql@18 [32mstarted[0m krishv ~/Library/LaunchAgents/homebrew.mxcl.postgresql@18.plist
+unbound       [39mnone[0m           
