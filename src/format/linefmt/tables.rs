@@ -449,6 +449,16 @@ pub fn colorize_sql_result_line(
         // classification stands and the next row is not re-armed as a header.
         return None;
     }
+    if starts_with_repl_prompt(trimmed) {
+        // A prompt or its continuation (`mysql> …`, `    -> …`, `sqlite> …`)
+        // is the echo of what you TYPED, never result output — GLIMPS must not
+        // recolour typed input. Without this, a typed line whose indentation
+        // opens a two-space gap (`-> <spaces> col AS alias`) reads as a
+        // whitespace-aligned table and gets cell colouring. Declining it also
+        // breaks table continuity so the next real result starts fresh.
+        state.prev = SqlLineKind::Other;
+        return None;
+    }
     if is_sql_table_rule(trimmed) {
         state.prev = if state.prev == SqlLineKind::Row {
             SqlLineKind::InnerRule
@@ -685,6 +695,35 @@ fn paint_report_value(value: &[u8], theme: &Theme, out: &mut Vec<u8>) {
 
 /// `+-----+-----+`: the top or bottom edge of a box-drawn table. A rule
 /// without the corner `+` (`-----`) is psql's header divider or plain prose.
+/// Whether a line begins with an interactive database-shell prompt or its
+/// continuation, marking it as echoed input rather than result output. Covers
+/// mysql/MariaDB (`mysql>`, `mariadb>`, `->`), sqlite (`sqlite>`, `...>`), and
+/// psql (`db=>`, `db->`, `db(>`, `db*>`). Result rows never begin this way.
+fn starts_with_repl_prompt(trimmed: &[u8]) -> bool {
+    let end = trimmed
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(trimmed.len());
+    let Some(head) = trimmed[..end].strip_suffix(b">") else {
+        return false;
+    };
+    // mysql/sqlite continuation arrows.
+    if head == b"-" || head == b"..." {
+        return true;
+    }
+    // A prompt name, optionally followed by one of psql's mode markers.
+    let name = match head.last() {
+        Some(b'=' | b'-' | b'(' | b'*') => &head[..head.len() - 1],
+        _ => head,
+    };
+    !name.is_empty()
+        && name.len() <= 20
+        && name[0].is_ascii_alphabetic()
+        && name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 fn is_box_top_rule(trimmed: &[u8]) -> bool {
     trimmed.starts_with(b"+") && trimmed.ends_with(b"+")
 }
@@ -1047,18 +1086,29 @@ fn looks_header_spans(content: &[u8], spans: &[(usize, usize)], relaxed: bool) -
 }
 
 fn looks_like_header_cell(cell: &[u8], relaxed: bool) -> bool {
-    !cell.is_empty()
-        && !looks_numeric(cell)
-        && ((relaxed && cell == b"Null")
-            || !matches!(
-                lower_ascii(cell).as_slice(),
-                b"true" | b"false" | b"t" | b"f" | b"null" | b"nil"
-            ))
-        && cell.iter().all(|b| {
+    if cell.is_empty() || looks_numeric(cell) || !cell.iter().any(u8::is_ascii_alphabetic) {
+        return false;
+    }
+    // A bare value word is data, not a header — even directly under a top rule
+    // (a headerless `mysql -N` first row). `desc` names a column `Null`, so
+    // that one mixed-case spelling is allowed once position says header.
+    let value_word = matches!(
+        lower_ascii(cell).as_slice(),
+        b"true" | b"false" | b"t" | b"f" | b"null" | b"nil"
+    );
+    if value_word && !(relaxed && cell == b"Null") {
+        return false;
+    }
+    // Under a box table's top rule the position already proves this row is the
+    // header, so a column EXPRESSION header (`coalesce(a,'x')`, `count(*)`,
+    // `emp_name AS 'Full, Name'`) with commas, quotes or stars is accepted. A
+    // borderless table has no such proof, so there the cell must still look
+    // like a plain column identifier.
+    relaxed
+        || cell.iter().all(|b| {
             b.is_ascii_alphanumeric()
                 || matches!(b, b'_' | b'-' | b'.' | b' ' | b'/' | b'(' | b')' | b'%')
         })
-        && cell.iter().any(u8::is_ascii_alphabetic)
 }
 
 fn is_sql_table_rule(trimmed: &[u8]) -> bool {

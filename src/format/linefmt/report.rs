@@ -78,7 +78,8 @@ fn key_prefix(body: &[u8]) -> Option<(usize, usize)> {
         || key.len() > MAX_KEY_LEN
         || !(key[0].is_ascii_alphabetic() || key[0] == b'_')
         || !key.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
-        || body.get(equals + 1) == Some(&b'=')
+        // `==`, and the SQL-shell prompts `db=>` / `db=#`, are not assignments.
+        || matches!(body.get(equals + 1), Some(b'=' | b'>' | b'#'))
     {
         return None;
     }

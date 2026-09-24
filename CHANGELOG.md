@@ -62,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Expression column headers are keyed** — a bare `select coalesce(a,'x')`
+  names the column with the literal expression, so the header cell holds
+  commas, quotes and parens. That row sits directly under the top rule, which
+  proves it is the header, so it now takes the bold-white header colour
+  instead of sharing the sky-blue value colour of the data below it.
+- **Typed SQL is no longer recoloured** — an echoed database-shell prompt or
+  continuation (`mysql> …`, `    -> …`, `sqlite> …`, psql `db=> …`) is left
+  exactly as typed. An indented continuation line such as
+  `->            col AS alias` used to open a two-space gap that read as a
+  two-column table and got cell colour; GLIMPS now declines all prompt/echo
+  lines, and result tables keep their colouring.
 - **A wide row no longer disables an interactive SQL session** — one result
   line longer than `line_cap` (64 KiB: a big `TEXT` cell, `SHOW CREATE TABLE`,
   `GROUP_CONCAT`) used to latch the whole `mysql`/`psql`/`sqlite3` run to

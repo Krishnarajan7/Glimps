@@ -3874,6 +3874,83 @@ fn brew_command_view_selection() {
 }
 
 #[test]
+fn an_expression_column_header_is_keyed_not_valued() {
+    // A bare `select <expr>` names the column with the literal expression, so
+    // the header cell holds commas, quotes and parens. Sitting directly under
+    // the top rule proves it is the header; it must take the header colour, not
+    // the value palette.
+    let Some(s) = mysql_session(
+        b"+---------------------------------+
+          | coalesce(concat(a,b),\'NONE\') |
+          +---------------------------------+
+          | RAV43210                        |
+          +---------------------------------+
+",
+    ) else {
+        return;
+    };
+    let theme = Theme::default_colored();
+    // The expression header is bold white, not sky-blue like the data below.
+    assert!(
+        s.contains(&format!(
+            "{} coalesce(concat(a,b),\'NONE\') {}",
+            theme.table_header, theme.reset
+        )),
+        "expression header was not keyed: {s:?}"
+    );
+    assert!(
+        s.contains(&format!("{} RAV43210", theme.string)),
+        "data row lost its value colour: {s:?}"
+    );
+}
+
+#[test]
+fn a_typed_repl_continuation_line_is_never_recoloured() {
+    // The echo of a multi-line query must pass through untouched. An indented
+    // continuation such as `->            col AS alias` opens a two-space gap
+    // that used to read as a two-column whitespace table and get cell colour;
+    // GLIMPS must not recolour what you typed.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"mysql")));
+    out.extend_from_slice(&f.process(C));
+    // Arrives complete (pasted), so it reaches the colorizer rather than the
+    // stall path. Every line is a prompt/continuation echo.
+    out.extend_from_slice(&f.process(
+        b"    ->            mgr.emp_id AS mgr_id, mgr.emp_name AS mgr_name
+          mysql> SELECT a,   b FROM t;
+             ...> continued;
+          retail=> select 1;
+",
+    ));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    // No SGR was inserted into any of the echoed input lines.
+    for line in [
+        "    ->            mgr.emp_id AS mgr_id, mgr.emp_name AS mgr_name
+",
+        "mysql> SELECT a,   b FROM t;
+",
+        "   ...> continued;
+",
+        "retail=> select 1;
+",
+    ] {
+        assert!(
+            s.contains(line),
+            "typed continuation line was altered: {line:?} in {s:?}"
+        );
+    }
+    assert!(
+        !s.contains("\x1b[38;5;117m->\x1b[0m"),
+        "the -> arrow was coloured: {s:?}"
+    );
+}
+
+#[test]
 fn an_overlong_streamed_line_does_not_disable_the_rest_of_a_repl_session() {
     // Regression: inside an interactive `mysql` session a single row wider than
     // `line_cap` used to latch the whole run to pass-through, so every table
