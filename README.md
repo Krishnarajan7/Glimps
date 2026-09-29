@@ -19,7 +19,7 @@
   <a href="https://crates.io/crates/glimps"><img src="https://img.shields.io/crates/v/glimps.svg" alt="crates.io"></a>
   <a href="https://github.com/Krishnarajan7/Glimps/releases/latest"><img src="https://img.shields.io/github/v/release/Krishnarajan7/Glimps?include_prereleases" alt="GitHub release"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey" alt="macOS and Linux">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20(experimental)-lightgrey" alt="macOS, Linux, and Windows (experimental)">
 </p>
 
 **Zero-config smart terminal output formatter.** GLIMPS wraps your shell in a
@@ -33,9 +33,10 @@ kind of output is coming.
 > primary early-adopter path; bash integration is beta, and Linux is a supported
 > build target covered by CI. Prebuilt binaries for Apple Silicon and Intel
 > (macOS and Linux) ship with each release, alongside Homebrew and crates.io
-> packages. Broader shell support (fish) is on the roadmap. Windows (PowerShell
-> over ConPTY) builds and lints in CI but is **experimental and unverified** —
-> see [`docs/windows.md`](docs/windows.md) before trying it.
+> packages. Broader shell support (fish) is on the roadmap. **Windows** (PowerShell
+> over ConPTY, Windows 10 1809+ / Windows 11) is supported as **experimental**:
+> build it from source and enable it with `glimps init pwsh` — see
+> [Windows](#windows-experimental) below and [`docs/windows.md`](docs/windows.md).
 
 > **Want to help?** GLIMPS is beta and there's real, scoped work with clear
 > acceptance criteria waiting for you. Browse the
@@ -194,7 +195,9 @@ scripts/dogfood-macos.sh session
 That builds `target/debug/glimps`, starts a wrapped zsh using a temporary
 `ZDOTDIR`, and cleans up when you exit. It does **not** install GLIMPS globally,
 does **not** edit `~/.zshrc`, and does **not** change your login shell. This is
-the recommended first test on a Mac. Dogfood command history is kept separately
+the recommended first test on a Mac. On Windows, `.\scripts\dogfood-windows.ps1 session`
+(or `scripts\dogfood-windows.cmd session` from `cmd.exe`) does the same for a
+disposable PowerShell, without editing `$PROFILE`. Dogfood command history is kept separately
 at `${XDG_STATE_HOME:-$HOME/.local/state}/glimps/dogfood_history`, so it survives
 normal exits without modifying your regular zsh history.
 
@@ -237,6 +240,24 @@ cd Glimps
 cargo install --path .
 ```
 
+### Windows (experimental)
+
+Windows needs Windows 10 1809+ or Windows 11, and Rust with the MSVC toolchain
+(`stable-x86_64-pc-windows-msvc`, the rustup default, which needs the Visual
+Studio Build Tools "Desktop development with C++" workload). There is no
+prebuilt Windows binary yet, and the crates.io v0.1.0 release predates Windows
+support, so build from a checkout in PowerShell:
+
+```powershell
+git clone https://github.com/Krishnarajan7/Glimps
+cd Glimps
+cargo install --path .
+```
+
+This puts `glimps.exe` in `%USERPROFILE%\.cargo\bin`, which rustup already adds
+to `PATH`. Windows Terminal is the recommended host. `cmd.exe` has no shell hooks
+and only ever gets pass-through; WSL is Linux and uses the zsh/bash integration.
+
 All paths produce the same single native binary. See the
 [compatibility matrix](./docs/COMPATIBILITY.md) for what has been physically
 verified. fish shell integration is not shipped yet (zsh is primary, bash is
@@ -263,6 +284,17 @@ command -v glimps >/dev/null 2>&1 && eval "$(glimps init zsh)"
 # bash: near the top of ~/.bashrc
 command -v glimps >/dev/null 2>&1 && eval "$(glimps init bash)"
 ```
+
+```powershell
+# PowerShell (Windows, experimental): near the top of $PROFILE (notepad $PROFILE)
+if (Get-Command glimps -ErrorAction SilentlyContinue) { glimps init pwsh | Out-String | Invoke-Expression }
+```
+
+On Windows, `glimps setup` prints this line instead of editing `$PROFILE`
+(Documents may be OneDrive-redirected, and only PowerShell knows the real path).
+PowerShell has no `exec`, so the outer shell waits for the GLIMPS session; a
+Windows Terminal profile with `"commandline": "glimps.exe --shell pwsh"` avoids
+the double startup.
 
 Restart your terminal. That's it. The snippet re-execs your interactive shell
 inside GLIMPS once per session and installs the
@@ -362,6 +394,8 @@ GLIMPS=0 zsh     # start a raw, unwrapped shell
 export GLIMPS=0  # keep future shells raw from this environment
 ```
 
+On Windows, `$env:GLIMPS='0'` in PowerShell does the same as `export GLIMPS=0`.
+
 ## FAQ
 
 **Doesn't putting a formatter between me and my shell add latency?**
@@ -401,6 +435,12 @@ doctor` warns if the line sits below a plugin manager or prompt framework.
 
 - zsh and bash shell integration are supported today. fish is planned, but not a
   public-beta blocker.
+- **Windows is experimental.** PowerShell 7 and Windows PowerShell 5.1 are
+  supported through ConPTY; the formatters are identical to macOS/Linux, but the
+  ConPTY layer has far less real-world mileage. Install is build-from-source only
+  for now (no prebuilt binary, not in the crates.io v0.1.0 release). Turn it off
+  instantly with `$env:GLIMPS='0'`, and see [`docs/windows.md`](docs/windows.md)
+  for the checklist and known limits.
 - **bash integration is beta.** It uses a `DEBUG` trap (bash has no native
   `preexec`). GLIMPS chains any `DEBUG` trap that was installed *before* its line,
   and tools built on `bash-preexec` (atuin, etc.) chain GLIMPS the same way — but
@@ -446,8 +486,10 @@ doctor` warns if the line sits below a plugin manager or prompt framework.
    sed -i '' '/glimps init/d' ~/.zshrc    # zsh, macOS
    sed -i '' '/glimps init/d' ~/.bashrc   # bash, macOS
    ```
-2. Remove the binary: `cargo uninstall glimps` (or delete it from your `PATH`).
-3. Optionally delete `~/.glimpsrc`.
+   On Windows, delete the `glimps init pwsh` line from `$PROFILE`.
+2. Remove the binary: `brew uninstall glimps` if you used Homebrew, otherwise
+   `cargo uninstall glimps` (or delete it from your `PATH`).
+3. Optionally delete `~/.glimpsrc` (`%USERPROFILE%\.glimpsrc` on Windows).
 
 Restart your terminal. Fully gone.
 

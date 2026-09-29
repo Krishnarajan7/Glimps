@@ -783,12 +783,31 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
                 </code>{" "}
                 to leave.
               </p>
+              <p className="mt-4 text-sm text-muted-foreground">
+                On Windows (experimental)? Build from a checkout with{" "}
+                <code className="px-1 py-0.5 rounded bg-muted text-foreground text-xs">
+                  cargo install --path .
+                </code>{" "}
+                in PowerShell, then add the{" "}
+                <code className="px-1 py-0.5 rounded bg-muted text-foreground text-xs">
+                  glimps init pwsh
+                </code>{" "}
+                line to your{" "}
+                <code className="px-1 py-0.5 rounded bg-muted text-foreground text-xs">
+                  $PROFILE
+                </code>
+                . See{" "}
+                <Link to="/installation" hash="windows" className="underline hover:text-foreground">
+                  Windows install
+                </Link>
+                .
+              </p>
             </div>
 
             <div className="space-y-5">
               <InstallBlock
-                label="1 · build & install (requires Rust)"
-                cmd={"git clone https://github.com/Krishnarajan7/Glimps\ncd Glimps\ncargo install --path ."}
+                label="1 · install (macOS / Linux — or cargo install glimps)"
+                cmd="brew install Krishnarajan7/tap/glimps"
               />
               <InstallBlock
                 label="2 · enable in your shell (near top of ~/.zshrc)"
@@ -797,6 +816,10 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
               <InstallBlock
                 label="3 · or try without installing (macOS)"
                 cmd="scripts/dogfood-macos.sh session"
+              />
+              <InstallBlock
+                label="windows · enable in PowerShell (near top of $PROFILE)"
+                cmd="if (Get-Command glimps -ErrorAction SilentlyContinue) { glimps init pwsh | Out-String | Invoke-Expression }"
               />
             </div>
           </div>

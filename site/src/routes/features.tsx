@@ -292,7 +292,8 @@ function FeaturesPage() {
         </P>
         <UL>
           <li>
-            Raw shell: <Code>GLIMPS=0 zsh</Code> starts an unwrapped shell.
+            Raw shell: <Code>GLIMPS=0 zsh</Code> starts an unwrapped shell (PowerShell:{" "}
+            <Code>$env:GLIMPS=&apos;0&apos;</Code>).
           </li>
           <li>
             Whole environment: <Code>export GLIMPS=0</Code> keeps future shells raw.
