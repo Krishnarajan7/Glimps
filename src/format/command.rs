@@ -94,6 +94,69 @@ pub(super) fn ssh_remote_command(command: &[u8]) -> Option<Vec<u8>> {
     Some(remote.join(&b' '))
 }
 
+/// Split a command list (`a; b && c || d`, or newline-separated) into its
+/// commands, for view selection only. Returns `None` for a single command
+/// and for anything this lexer cannot follow confidently — subshells, braces,
+/// backticks, a background `&`, an unterminated quote — so the caller keeps
+/// its single-view behavior. Pipes stay inside their segment.
+pub(super) fn command_list_segments(command: &[u8]) -> Option<Vec<&[u8]>> {
+    let mut segments = Vec::new();
+    let mut quote: Option<u8> = None;
+    let mut start = 0;
+    let mut index = 0;
+    while index < command.len() {
+        let byte = command[index];
+        if let Some(open) = quote {
+            if open == b'"' && byte == b'\\' {
+                index += 2;
+                continue;
+            }
+            if byte == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        let separator_len = match byte {
+            b'\'' | b'"' => {
+                quote = Some(byte);
+                index += 1;
+                continue;
+            }
+            b'\\' => {
+                index += 2;
+                continue;
+            }
+            b'(' | b')' | b'{' | b'}' | b'`' => return None,
+            b';' | b'\n' => 1,
+            b'&' if command.get(index + 1) == Some(&b'&') => 2,
+            b'|' if command.get(index + 1) == Some(&b'|') => 2,
+            // `&>` / `>&` redirections are part of a command; a lone `&`
+            // backgrounds it, and its output then interleaves unpredictably.
+            b'&' if command.get(index + 1) == Some(&b'>')
+                || index.checked_sub(1).and_then(|i| command.get(i)) == Some(&b'>') =>
+            {
+                0
+            }
+            b'&' => return None,
+            _ => 0,
+        };
+        if separator_len > 0 {
+            segments.push(&command[start..index]);
+            index += separator_len;
+            start = index;
+            continue;
+        }
+        index += 1;
+    }
+    if quote.is_some() {
+        return None;
+    }
+    segments.push(&command[start.min(command.len())..]);
+    segments.retain(|segment| segment.iter().any(|b| !b.is_ascii_whitespace()));
+    (segments.len() >= 2).then_some(segments)
+}
+
 /// OpenSSH options that consume a value (attached or as the next word).
 const SSH_VALUE_OPTIONS: &[u8] = b"BbcDEeFIiJLlmOopQRSWw";
 

@@ -3590,6 +3590,69 @@ fn kubectl_get_pods_colors_failing_status() {
 }
 
 #[test]
+fn command_list_over_ssh_colors_each_section_with_its_own_view() {
+    // `ssh host 'ss -tlnp; ufw status; grep -rn …'` prints three tables back
+    // to back. One view per command line left all of it plain; each line must
+    // reach the view of the command that printed it.
+    let mut f = Formatter::new();
+    if !f.is_enabled() {
+        return;
+    }
+    let theme = Theme::default_colored();
+    let command: &[u8] =
+        b"ssh root@example.com 'ss -tlnp; sudo ufw status; grep -rn X /etc/nginx/; grep -E \"^(PermitRootLogin)\" /etc/ssh/sshd_config'";
+    let body: &[u8] = b"LISTEN 0      511          0.0.0.0:80         0.0.0.0:*    users:((\"nginx\",pid=1100043,fd=6))\r\nStatus: active\r\n22/tcp                     ALLOW       Anywhere\r\n/etc/nginx/proxy_params:3:proxy_set_header X;\r\nPermitRootLogin yes\r\n";
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(command)));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(body));
+    out.extend_from_slice(&f.process(D));
+    let s = String::from_utf8_lossy(&out);
+    assert!(
+        s.contains(&format!("{}LISTEN{}", theme.info, theme.reset)),
+        "{s}"
+    );
+    assert!(s.contains(&format!("{}\"nginx\"{}", theme.key, theme.reset)));
+    assert!(s.contains(&format!("{}ALLOW{}", theme.info, theme.reset)));
+    assert!(s.contains(&format!("{}active{}", theme.info, theme.reset)));
+    assert!(s.contains("proxy_params"));
+    assert!(
+        s.contains("PermitRootLogin yes\r\n"),
+        "unclaimed line stays verbatim"
+    );
+    let want = strip_sgr(body);
+    assert!(strip_sgr(&out)
+        .windows(want.len())
+        .any(|w| w == want.as_slice()));
+}
+
+#[test]
+fn command_list_views_only_engage_for_shape_validated_views() {
+    let views = |cmd: &str| command_list_views(&Some(cmd.as_bytes().to_vec()));
+    assert_eq!(
+        views("ss -tlnp; ufw status && grep -rn x /etc"),
+        Some(vec![
+            CommandView::Ss,
+            CommandView::Ufw,
+            CommandView::Grep(linefmt::GrepView::Matches)
+        ])
+    );
+    assert_eq!(
+        views("ssh h 'ss -tlnp; ufw status'"),
+        Some(vec![CommandView::Ss, CommandView::Ufw])
+    );
+    // A lenient view anywhere in the list keeps the old single-view behavior.
+    assert_eq!(views("ls -la; ss -tlnp"), None);
+    // Single commands, subshells, and background jobs are not lists.
+    assert_eq!(views("ss -tlnp"), None);
+    assert_eq!(views("(ss -tlnp; ufw status)"), None);
+    assert_eq!(views("ss -tlnp & ufw status"), None);
+    // Separators inside quotes do not split.
+    assert_eq!(views("grep -rn 'a; b' /etc"), None);
+    assert_eq!(views("echo hi; date"), None);
+}
+
+#[test]
 fn brew_services_list_colors_plain_rows() {
     // The piped shape (`brew services list | grep mysql`): Homebrew emits no
     // color of its own, so every cell is GLIMPS's to paint.
@@ -5917,6 +5980,29 @@ fn strip_first(haystack: &[u8], needle: &[u8]) -> Vec<u8> {
     }
 }
 
+/// `strip_first` for the header, plus what GLIMPS writes around it when the
+/// output opens with the program's own escapes: a closed hyperlink before it
+/// and the program's color and link restored after it.
+fn strip_header_chrome(haystack: &[u8], header: &[u8]) -> Vec<u8> {
+    let Some(pos) = haystack.windows(header.len()).position(|w| w == header) else {
+        return haystack.to_vec();
+    };
+    let start = haystack
+        .windows(C.len())
+        .position(|w| w == C)
+        .map_or(0, |at| at + C.len());
+    let leading = leading_escapes(&haystack[start.min(pos)..pos]);
+    let before = pos - leading.before_header.len();
+    let after = pos + header.len();
+    let mut v = haystack[..before].to_vec();
+    let rest = &haystack[after..];
+    v.extend_from_slice(
+        rest.strip_prefix(leading.after_header.as_slice())
+            .unwrap_or(rest),
+    );
+    v
+}
+
 #[test]
 fn corpus_common_commands_preserve_every_byte() {
     // Zero interference across a corpus of real-world command output —
@@ -5937,7 +6023,7 @@ fn corpus_common_commands_preserve_every_byte() {
         let sample = std::fs::read(&path).expect("read fixture");
         let input = cat(&[C, &sample, D]);
         let out = run(&[&input]);
-        let recovered = strip_first(&out, &sep);
+        let recovered = strip_header_chrome(&out, &sep);
         assert_eq!(
             recovered,
             cat(&[C, &sample, D]),
@@ -6041,6 +6127,49 @@ fn latency_budget_holds_for_a_colored_command_table() {
     );
 }
 
+const NOTIFY_METHODS: [crate::config::NotifyMethod; 5] = [
+    crate::config::NotifyMethod::Auto,
+    crate::config::NotifyMethod::Osc9,
+    crate::config::NotifyMethod::Osc777,
+    crate::config::NotifyMethod::Osc99,
+    crate::config::NotifyMethod::Bell,
+];
+
+proptest::proptest! {
+    /// Whatever bytes the command line holds and however it ends, a notice
+    /// is one well-formed sequence: its body carries no control character,
+    /// so it cannot end early and smuggle the rest to the terminal.
+    #[test]
+    fn prop_notice_body_cannot_break_out(
+        cmd in proptest::collection::vec(0u8..=255, 0..64),
+        exit_code in -300i32..400,
+        pipeline in proptest::collection::vec(0i32..3, 0..4),
+    ) {
+        let mut cfg = Config::default();
+        cfg.notify.enabled = true;
+        cfg.notify.after_seconds = 0;
+        cfg.notify.method = crate::config::NotifyMethod::Osc9;
+        let mut f = fmt_with(cfg);
+        let mut out = Vec::new();
+        out.extend_from_slice(&f.process(&cmd_marker(&cmd)));
+        out.extend_from_slice(&f.process(C));
+        if !pipeline.is_empty() {
+            out.extend_from_slice(&f.process(&pipeline_marker(&pipeline)));
+        }
+        out.extend_from_slice(&f.process(&d_exit(exit_code)));
+        let Some(start) = out.windows(4).position(|w| w == b"\x1b]9;") else {
+            return Ok(());
+        };
+        let rest = &out[start + 4..];
+        let end = rest.windows(2).position(|w| w == b"\x1b\\");
+        proptest::prop_assert!(end.is_some(), "unterminated notice: {:?}", out);
+        let body = &rest[..end.unwrap_or(0)];
+        let body = std::str::from_utf8(body);
+        proptest::prop_assert!(body.is_ok());
+        proptest::prop_assert!(!body.unwrap_or("").chars().any(char::is_control));
+    }
+}
+
 proptest::proptest! {
     /// Arbitrary config (random toggles + small/zero caps) over arbitrary
     /// command output never panics, and when the master switch is off the
@@ -6067,6 +6196,10 @@ proptest::proptest! {
         success_off: bool,
         explain: bool,
         pin_errors: bool,
+        notify_enabled: bool,
+        notify_method in 0usize..5,
+        links_on: bool,
+        redact_on: bool,
         exit_code in proptest::option::of(-300i32..400),
         cmd in proptest::option::of(proptest::collection::vec(0u8..=255, 0..64)),
         body in proptest::collection::vec(0u8..=255, 0..256),
@@ -6103,6 +6236,22 @@ proptest::proptest! {
                 explain,
                 pin_errors,
             },
+            // A zero threshold (below the load-time clamp) makes every
+            // command cycle reach the notice path.
+            notify: crate::config::Notify {
+                enabled: notify_enabled,
+                after_seconds: 0,
+                method: NOTIFY_METHODS[notify_method],
+            },
+            links: crate::config::Links {
+                mode: if links_on {
+                    crate::config::LinksMode::On
+                } else {
+                    crate::config::LinksMode::Off
+                },
+                ..crate::config::Links::default()
+            },
+            redact: crate::config::Redact { enabled: redact_on },
             limits: crate::config::Limits { buffer_cap, line_cap, sniff_cap, pretty_max_lines },
         };
         let mut f = Formatter::build(Clock::Off, true, cfg);
@@ -6459,7 +6608,20 @@ fn cmd_view_line() -> impl Strategy<Value = Vec<u8>> {
         b"COMMAND     PID   USER   FD      TYPE             DEVICE   SIZE/OFF                NODE NAME"
             .to_vec(),
     );
-    proptest::prop_oneof![text, branch, lsof_heading, unicode]
+    // Socket and firewall rows, so the `ss`/`ufw` views paint fuzzed tails.
+    let socket_row = (
+        proptest::prop_oneof![
+            Just(&b"LISTEN 0      511     0.0.0.0:80   0.0.0.0:*  "[..]),
+            Just(&b"22/tcp (v6)                ALLOW IN    "[..]),
+            Just(&b"Status: "[..]),
+        ],
+        proptest::collection::vec(
+            proptest::prop_oneof![Just(b'"'), Just(b' '), 0x21u8..=0x7e],
+            0..24,
+        ),
+    )
+        .prop_map(|(head, tail)| [head, &tail[..]].concat());
+    proptest::prop_oneof![text, branch, lsof_heading, unicode, socket_row]
 }
 
 proptest::proptest! {
@@ -6505,6 +6667,8 @@ proptest::proptest! {
             b"kubectl get pods",
             b"brew services list",
             b"brew outdated",
+            b"ss -tlnp",
+            b"ssh root@example.com 'ss -tlnp; ufw status; grep -rn x /etc'",
             b"GetFileInfo /tmp/example",
             b"xattr -l /tmp/example",
             b"diskutil info /dev/disk1",
@@ -6624,6 +6788,11 @@ const CORPUS_COMMANDS: &[(&str, &str, &str)] = &[
     ("mysql_status.txt", "mysql", "SqlResult"),
     ("source_code.txt", "cat src/terminal.rs", "File"),
     ("sqlite_table.txt", "sqlite3 app.db", "SqlResult"),
+    (
+        "ss_ufw_grep_list.txt",
+        "ssh root@example.com 'ss -tlnp; ufw status; grep -rn X /etc/nginx/; grep -E \"^(PermitRootLogin)\" /etc/ssh/sshd_config'",
+        "Ss",
+    ),
     ("stacktrace_python.txt", "python3 -m pytest", ""),
     ("stacktrace_rust.txt", "cargo run", ""),
     ("systemctl.txt", "systemctl status glimps", ""),
@@ -6726,7 +6895,7 @@ fn corpus_fixtures_keep_their_content_through_the_colored_command_views() {
     // view" until the slack runs out. Changing this number should be a visible
     // line in the diff, in either direction.
     assert_eq!(
-        views_exercised, 30,
+        views_exercised, 31,
         "the number of corpus fixtures exercising a command view changed"
     );
 }
@@ -7935,4 +8104,1056 @@ fn zz_verifier_tmp_command_view_cost() {
         let per = t.elapsed().as_nanos() as f64 / n as f64;
         eprintln!("VERIFIER {cmd:?}: {per:.0} ns/call (hits {hits})");
     }
+}
+
+// ---- completion notices ([notify]) ----
+
+fn notify_formatter(method: crate::config::NotifyMethod) -> Formatter {
+    let mut cfg = Config::default();
+    cfg.notify.enabled = true;
+    cfg.notify.method = method;
+    let mut f = fmt_with(cfg);
+    f.theme = Theme::plain();
+    f
+}
+
+/// One command cycle whose output started `ran_for` ago, ended by `end`.
+fn notify_cycle(
+    f: &mut Formatter,
+    cmd: &[u8],
+    output: &[&[u8]],
+    ran_for: Duration,
+    end: &[&[u8]],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(cmd)));
+    out.extend_from_slice(&f.process(C));
+    for chunk in output {
+        out.extend_from_slice(&f.process(chunk));
+    }
+    f.command_started_at = Some(Instant::now().checked_sub(ran_for).unwrap());
+    for chunk in end {
+        out.extend_from_slice(&f.process(chunk));
+    }
+    out
+}
+
+/// The bodies of every `OSC 9` notice in `out`.
+fn osc9_notices(out: &[u8]) -> Vec<String> {
+    let text = String::from_utf8(out.to_vec()).unwrap();
+    text.split("\x1b]9;")
+        .skip(1)
+        .map(|rest| rest.split("\x1b\\").next().unwrap().to_string())
+        .collect()
+}
+
+const LONG: Duration = Duration::from_secs(45);
+
+#[test]
+fn notify_long_success_sends_one_notice_after_the_footer() {
+    let mut f = notify_formatter(crate::config::NotifyMethod::Osc9);
+    let out = notify_cycle(&mut f, b"cargo build --release", &[b"ok\n"], LONG, &[D0]);
+    let notices = osc9_notices(&out);
+    assert_eq!(notices.len(), 1, "{:?}", String::from_utf8_lossy(&out));
+    assert!(
+        notices[0].starts_with("\u{2713} cargo build finished in 45."),
+        "{notices:?}"
+    );
+    // Arguments never leave the terminal.
+    assert!(!notices[0].contains("release"));
+    // Drawn chrome first, then the invisible notice.
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.find("done exit 0").unwrap() < text.find("\x1b]9;").unwrap());
+}
+
+#[test]
+fn notify_reports_failures_and_failed_pipeline_stages() {
+    let mut f = notify_formatter(crate::config::NotifyMethod::Osc9);
+    let out = notify_cycle(&mut f, b"make test", &[b"boom\n"], LONG, &[&d_exit(2)]);
+    let notices = osc9_notices(&out);
+    assert_eq!(notices.len(), 1);
+    assert!(
+        notices[0].starts_with("\u{2717} make test failed (exit 2) after 45."),
+        "{notices:?}"
+    );
+
+    let out = notify_cycle(
+        &mut f,
+        b"make | tee log",
+        &[b"x\n"],
+        LONG,
+        &[&pipeline_marker(&[2, 0]), D0],
+    );
+    let notices = osc9_notices(&out);
+    assert_eq!(notices.len(), 1);
+    assert!(
+        notices[0].ends_with(", but a pipeline stage failed"),
+        "{notices:?}"
+    );
+
+    // `! cmd` whose command succeeded is a success, as in the footer.
+    let out = notify_cycle(
+        &mut f,
+        b"! grep -q x file",
+        &[],
+        LONG,
+        &[&pipeline_marker(&[0]), D1],
+    );
+    let notices = osc9_notices(&out);
+    assert_eq!(notices.len(), 1, "{:?}", String::from_utf8_lossy(&out));
+    assert!(
+        notices[0].starts_with("\u{2713} grep finished"),
+        "{notices:?}"
+    );
+}
+
+#[test]
+fn notify_stays_quiet_below_the_threshold_and_when_off() {
+    let mut f = notify_formatter(crate::config::NotifyMethod::Osc9);
+    let out = notify_cycle(&mut f, b"sleep 29", &[], Duration::from_secs(29), &[D0]);
+    assert!(osc9_notices(&out).is_empty());
+
+    let mut cfg = Config::default();
+    cfg.notify.after_seconds = 120;
+    cfg.notify.enabled = true;
+    cfg.notify.method = crate::config::NotifyMethod::Osc9;
+    let mut f = fmt_with(cfg);
+    let out = notify_cycle(&mut f, b"sleep 100", &[], Duration::from_secs(100), &[D0]);
+    assert!(osc9_notices(&out).is_empty());
+    let out = notify_cycle(&mut f, b"sleep 130", &[], Duration::from_secs(130), &[D0]);
+    assert_eq!(osc9_notices(&out).len(), 1);
+
+    // Off by default: no sequence, no bell.
+    let mut f = fmt_with(Config::default());
+    let out = notify_cycle(&mut f, b"sleep 999", &[b"x\n"], LONG, &[D0]);
+    assert!(osc9_notices(&out).is_empty());
+    // The only BELs are the four marker terminators that passed through
+    // (prompt, command, output start, output end): no bell was rung.
+    assert_eq!(out.iter().filter(|&&b| b == 0x07).count(), 4);
+}
+
+#[test]
+fn notify_skips_interrupts_bypassed_and_sensitive_commands() {
+    let mut cfg = Config::default();
+    cfg.notify.enabled = true;
+    cfg.notify.method = crate::config::NotifyMethod::Osc9;
+    cfg.sensitive_commands = vec!["vault kv get".to_string()];
+    let mut f = fmt_with(cfg);
+    // Ctrl-C and SIGTERM: the user acted on purpose.
+    for code in [130, 143] {
+        let out = notify_cycle(&mut f, b"cargo test", &[b"x\n"], LONG, &[&d_exit(code)]);
+        assert!(osc9_notices(&out).is_empty(), "exit {code}");
+    }
+    // Interactive sessions on the bypass list.
+    for cmd in [&b"ssh prod"[..], b"vim notes.md", b"less log", b"watch df"] {
+        let out = notify_cycle(&mut f, cmd, &[b"x\n"], LONG, &[D0]);
+        assert!(osc9_notices(&out).is_empty(), "{cmd:?}");
+    }
+    // Sensitive commands, built in and configured.
+    for cmd in [&b"cat .env"[..], b"vault kv get secret/db"] {
+        let out = notify_cycle(&mut f, cmd, &[b"x\n"], LONG, &[D0]);
+        assert!(osc9_notices(&out).is_empty(), "{cmd:?}");
+    }
+    // The next ordinary command still notifies: nothing latched.
+    let out = notify_cycle(&mut f, b"make", &[], LONG, &[D0]);
+    assert_eq!(osc9_notices(&out).len(), 1);
+}
+
+#[test]
+fn notify_skips_a_command_that_took_over_the_screen() {
+    let mut f = notify_formatter(crate::config::NotifyMethod::Osc9);
+    let out = notify_cycle(
+        &mut f,
+        b"k9s",
+        &[b"\x1b[?1049hdraw", b"more draw", b"\x1b[?1049l"],
+        LONG,
+        &[D0],
+    );
+    assert!(osc9_notices(&out).is_empty());
+    let out = notify_cycle(&mut f, b"make", &[b"x\n"], LONG, &[D0]);
+    assert_eq!(osc9_notices(&out).len(), 1);
+}
+
+#[test]
+fn notify_skips_a_command_the_user_was_typing_into() {
+    let mut f = notify_formatter(crate::config::NotifyMethod::Osc9);
+    let activity = Arc::new(InputActivity::new());
+    f.set_input_activity(Arc::clone(&activity));
+
+    // No typing at all: the user walked away.
+    let out = notify_cycle(&mut f, b"cargo build", &[b"x\n"], LONG, &[D0]);
+    assert_eq!(osc9_notices(&out).len(), 1);
+
+    // Typed during the last seconds (a REPL's `exit`, an answered prompt).
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"python")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b">>> "));
+    f.command_started_at = Some(Instant::now().checked_sub(LONG).unwrap());
+    activity.touch();
+    out.extend_from_slice(&f.process(D0));
+    assert!(osc9_notices(&out).is_empty());
+    // Which input counts (after the start, inside the window) is pinned by
+    // `notify::tests::presence_counts_only_recent_input_after_the_start`.
+}
+
+#[test]
+fn notify_backends_emit_their_own_sequence() {
+    use crate::config::NotifyMethod;
+    for (method, expect) in [
+        (
+            NotifyMethod::Osc777,
+            &b"\x1b]777;notify;GLIMPS;\xe2\x9c\x93 make finished in "[..],
+        ),
+        (
+            NotifyMethod::Osc99,
+            b"\x1b]99;;\xe2\x9c\x93 make finished in ",
+        ),
+        (NotifyMethod::Bell, b"\x07"),
+    ] {
+        let mut f = notify_formatter(method);
+        let before = notify_cycle(&mut f, b"make", &[b"x\n"], Duration::ZERO, &[D0]);
+        let out = notify_cycle(&mut f, b"make", &[b"x\n"], LONG, &[D0]);
+        let found = out.windows(expect.len()).filter(|w| *w == expect).count();
+        let baseline = before
+            .windows(expect.len())
+            .filter(|w| *w == expect)
+            .count();
+        assert_eq!(
+            found,
+            baseline + 1,
+            "{method:?}: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+}
+
+#[test]
+fn notify_is_independent_of_the_footer_switch() {
+    let mut cfg = Config::default();
+    cfg.failures.enabled = false;
+    cfg.notify.enabled = true;
+    cfg.notify.method = crate::config::NotifyMethod::Osc9;
+    let mut f = fmt_with(cfg);
+    let out = notify_cycle(&mut f, b"make", &[b"x\n"], LONG, &[&d_exit(1)]);
+    assert!(!String::from_utf8_lossy(&out).contains("failed exit"));
+    assert_eq!(osc9_notices(&out).len(), 1);
+}
+
+#[test]
+fn notify_never_fires_when_formatting_is_off() {
+    let mut cfg = Config::default();
+    cfg.notify.enabled = true;
+    cfg.notify.method = crate::config::NotifyMethod::Osc9;
+    // Not a TTY (and the same path as GLIMPS=0 / enabled = false).
+    let mut f = Formatter::build(Clock::Off, false, cfg);
+    let out = notify_cycle(&mut f, b"make", &[b"x\n"], LONG, &[D0]);
+    assert!(osc9_notices(&out).is_empty());
+}
+
+// ---- clickable links ([links]) ----
+
+/// A formatter with links forced on and a trusted metadata channel whose
+/// startup record puts the shell in `/w`. Returns the writer so a test can
+/// append the command record.
+fn links_formatter(config: Config) -> (Formatter, crate::metadata::MetadataChannel, std::fs::File) {
+    let mut channel = crate::metadata::MetadataChannel::create().unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(channel.path())
+        .unwrap();
+    writer.write_all(b"R\0\x30\0/w\0\x30\0").unwrap();
+    writer.flush().unwrap();
+    let mut f = fmt_with(config);
+    f.theme = Theme::plain();
+    f.metadata = channel.take_reader();
+    (f, channel, writer)
+}
+
+fn links_on() -> Config {
+    let mut cfg = Config::default();
+    cfg.links.mode = crate::config::LinksMode::On;
+    cfg
+}
+
+fn run_with_metadata(
+    f: &mut Formatter,
+    writer: &mut std::fs::File,
+    cmd: &[u8],
+    output: &[u8],
+    exit: i32,
+) -> Vec<u8> {
+    writer.write_all(b"C\0").unwrap();
+    writer.write_all(cmd).unwrap();
+    writer.write_all(b"\0").unwrap();
+    writer.flush().unwrap();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(cmd)));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(output));
+    writer
+        .write_all(format!("R\0{exit}\0/w\0{exit}\0").as_bytes())
+        .unwrap();
+    writer.flush().unwrap();
+    out.extend_from_slice(&f.process(&d_exit(exit)));
+    out
+}
+
+fn osc8_targets(out: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(out)
+        .split("\x1b]8;;")
+        .skip(1)
+        .filter_map(|rest| rest.split("\x1b\\").next())
+        .filter(|target| !target.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn links_plain_output_lines_against_the_trusted_directory() {
+    let (mut f, _channel, mut writer) = links_formatter(links_on());
+    let out = run_with_metadata(
+        &mut f,
+        &mut writer,
+        b"grep -rn todo src",
+        b"src/a.rs:3:// todo see https://x.test/issue/7.\r\nplain line\r\n",
+        0,
+    );
+    let targets = osc8_targets(&out);
+    assert_eq!(targets.len(), 2, "{:?}", String::from_utf8_lossy(&out));
+    assert!(targets[0].starts_with("file://") && targets[0].ends_with("/w/src/a.rs"));
+    assert_eq!(targets[1], "https://x.test/issue/7");
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("\x1b\\src/a.rs:3\x1b]8;;\x1b\\"), "{text:?}");
+    assert!(
+        text.contains("\x1b\\https://x.test/issue/7\x1b]8;;\x1b\\."),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn links_never_touch_self_colored_output() {
+    let (mut f, _channel, mut writer) = links_formatter(links_on());
+    let colored = b"\x1b[35msrc/a.rs\x1b[0m:3:x https://x.test\r\n";
+    let out = run_with_metadata(
+        &mut f,
+        &mut writer,
+        b"grep --color=always x src",
+        colored,
+        0,
+    );
+    assert!(
+        osc8_targets(&out).is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&out)
+    );
+    // Byte-identical to the same run with links off.
+    let mut off = Config::default();
+    off.links.mode = crate::config::LinksMode::Off;
+    let (mut plain, _channel, mut writer) = links_formatter(off);
+    let unlinked = run_with_metadata(
+        &mut plain,
+        &mut writer,
+        b"grep --color=always x src",
+        colored,
+        0,
+    );
+    assert_eq!(out, unlinked);
+}
+
+#[test]
+fn links_skip_sensitive_and_bypassed_commands() {
+    let (mut f, _channel, mut writer) = links_formatter(links_on());
+    for (cmd, output) in [
+        (
+            &b"cat .env"[..],
+            &b"API_URL=https://user:pw@x.test/\r\n"[..],
+        ),
+        (b"gh auth token", b"https://x.test/token\r\n"),
+        (b"ssh prod", b"see https://x.test\r\n"),
+    ] {
+        let out = run_with_metadata(&mut f, &mut writer, cmd, output, 0);
+        assert!(
+            osc8_targets(&out).is_empty(),
+            "{cmd:?}: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+}
+
+#[test]
+fn links_are_off_by_config_and_in_unknown_terminals() {
+    let mut off = Config::default();
+    off.links.mode = crate::config::LinksMode::Off;
+    // `auto` sees no terminal in unit tests: the unknown-terminal case.
+    for cfg in [off, Config::default()] {
+        let (mut f, _channel, mut writer) = links_formatter(cfg);
+        let out = run_with_metadata(
+            &mut f,
+            &mut writer,
+            b"echo",
+            b"src/a.rs:3 https://x.test\r\n",
+            0,
+        );
+        assert!(osc8_targets(&out).is_empty());
+    }
+}
+
+#[test]
+fn relative_paths_need_the_trusted_directory() {
+    // Without the private channel the only directory is the forgeable OSC
+    // 7338: relative paths stay plain, absolute ones and URLs still link.
+    let mut f = fmt_with(links_on());
+    f.theme = Theme::plain();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cwd_marker(b"/evil")));
+    out.extend_from_slice(&f.process(&cmd_marker(b"make")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"src/a.rs:3 /abs/b.rs:4 https://x.test\r\n"));
+    out.extend_from_slice(&f.process(D0));
+    let targets = osc8_targets(&out);
+    assert_eq!(targets.len(), 2, "{targets:?}");
+    assert!(targets[0].ends_with("/abs/b.rs"));
+    assert!(!targets.iter().any(|target| target.contains("evil")));
+}
+
+#[test]
+fn pinned_error_location_is_clickable_even_for_colored_compiler_output() {
+    let (mut f, _channel, mut writer) = links_formatter(links_on());
+    let mut output = Vec::new();
+    output.extend_from_slice(
+        b"\x1b[1m\x1b[31merror[E0308]\x1b[0m\x1b[1m: mismatched types\x1b[0m\r\n",
+    );
+    output.extend_from_slice(b"\x1b[1m\x1b[34m  --> \x1b[0msrc/pty.rs:214:18\r\n");
+    for _ in 0..12 {
+        output.extend_from_slice(b"\x1b[1m\x1b[34m   |\x1b[0m\r\n");
+    }
+    let out = run_with_metadata(&mut f, &mut writer, b"cargo build", &output, 101);
+    // rustc's own lines carry no link and keep their bytes; the pin,
+    // GLIMPS's own chrome after the end marker, is what links.
+    let end = out
+        .windows(b"\x1b]133;D".len())
+        .position(|w| w == b"\x1b]133;D")
+        .unwrap();
+    assert!(!contains(&out[..end], b"\x1b]8;"));
+    assert!(contains(
+        &out[..end],
+        b"\x1b[1m\x1b[34m  --> \x1b[0msrc/pty.rs:214:18\r\n"
+    ));
+    let targets = osc8_targets(&out);
+    assert_eq!(targets.len(), 1, "{:?}", String::from_utf8_lossy(&out));
+    assert!(targets[0].ends_with("/w/src/pty.rs"));
+    let text = String::from_utf8_lossy(&out);
+    let pin = text.find("\u{21b3}").unwrap();
+    assert!(text[pin..].contains("\x1b\\src/pty.rs:214:18\x1b]8;;\x1b\\"));
+}
+
+#[test]
+fn links_follow_the_directory_the_command_started_in() {
+    let (mut f, _channel, mut writer) = links_formatter(links_on());
+    writer.write_all(b"R\0\x30\0/other\0\x30\0").unwrap();
+    writer.flush().unwrap();
+    // The record above lands before this command's: the command ran in /other.
+    let out = run_with_metadata(&mut f, &mut writer, b"make", b"x.rs:1\r\n", 0);
+    let targets = osc8_targets(&out);
+    assert_eq!(targets.len(), 1);
+    assert!(targets[0].ends_with("/other/x.rs"), "{targets:?}");
+}
+
+// ---- fish ----
+
+/// One fish 4 command cycle as fish and GLIMPS's hooks actually write it:
+/// fish's own `C;cmdline_url`, GLIMPS's `7337` + `C`, fish's title and color
+/// reset with its `\r`, the output, fish's own `D`, then GLIMPS's end markers
+/// (from `fish_postexec`), fish's `⏎` partial-line mark, and the next prompt.
+fn fish4_cycle(cmd: &str, output: &[u8], exit: i32) -> Vec<u8> {
+    [
+        format!("\x1b]133;C;cmdline_url={}\x07", cmd.replace(' ', "%20")).as_bytes(),
+        format!("\x1b[?2004l\x1b]7337;{cmd}\x07\x1b]133;C\x07").as_bytes(),
+        format!("\x1b]0;{cmd}   /w\x07\x1b[30m\x1b(B\x1b[m\r").as_bytes(),
+        output,
+        format!("\x1b]133;D;{exit}\x07\x1b[?25h").as_bytes(),
+        format!("\x1b]7339;{exit}\x07\x1b]7338;/w\x07\x1b]133;D;{exit}\x07").as_bytes(),
+        "\x1b[2m\u{23ce}\x1b(B\x1b[m          \r\u{23ce} \r\x1b[K".as_bytes(),
+        b"\x1b]133;A\x07\x1b]133;A;special_key=1\x07w> ",
+    ]
+    .concat()
+}
+
+#[test]
+fn fish4_stream_frames_output_by_glimps_markers_only() {
+    let mut channel = crate::metadata::MetadataChannel::create().unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(channel.path())
+        .unwrap();
+    let mut f = Formatter::build(Clock::Off, true, Config::default());
+    f.theme = Theme::plain();
+    f.metadata = channel.take_reader();
+    // Startup: GLIMPS's prompt hook, then fish's own prompt start.
+    writer.write_all(b"R\x000\0/w\x000\0").unwrap();
+    writer.flush().unwrap();
+    let mut out = f
+        .process(b"\x1b]7339;0\x07\x1b]7338;/w\x07\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;A;special_key=1\x07w> ")
+        .into_owned();
+
+    // A failing command with output: header, output, footer.
+    let start = out.len();
+    writer.write_all(b"C\0ls nope\0").unwrap();
+    writer.flush().unwrap();
+    let cycle = fish4_cycle("ls nope", b"ls: nope: No such file or directory\r\n", 1);
+    // The result record lands when fish_postexec runs: after fish's own D.
+    let split = cycle
+        .windows(b"\x1b]7339;".len())
+        .position(|w| w == b"\x1b]7339;")
+        .unwrap();
+    out.extend_from_slice(&f.process(&cycle[..split]));
+    writer.write_all(b"R\x001\0/w\x001\0").unwrap();
+    writer.flush().unwrap();
+    out.extend_from_slice(&f.process(&cycle[split..]));
+    let text = String::from_utf8_lossy(&out[start..]).into_owned();
+    // The header follows fish's escapes and `\r` whole (`ESC ( B` included),
+    // and comes right before the first output line.
+    let header = text.find('\u{258c}').unwrap();
+    assert!(
+        text[..header].ends_with("\x1b[30m\x1b(B\x1b[m\r\x1b[2m"),
+        "{text:?}"
+    );
+    assert!(
+        text.contains("ls nope\r\nls: nope: No such file"),
+        "{text:?}"
+    );
+    assert!(text.contains("failed exit 1"), "{text:?}");
+    assert!(text.contains("command failed: ls nope"), "{text:?}");
+    // The first output line reaches the formatters without fish's `\r`
+    // (the CLI-diagnostic view colors it), and the `⏎` mark sits after the
+    // footer, between commands.
+    let footer = text.find("failed exit 1").unwrap();
+    assert!(text.find('\u{23ce}').unwrap() > footer);
+
+    // A silent command: no header, no footer, nothing but fish's own bytes.
+    let start = out.len();
+    writer.write_all(b"C\0true\0").unwrap();
+    writer.flush().unwrap();
+    let cycle = fish4_cycle("true", b"", 0);
+    let split = cycle
+        .windows(b"\x1b]7339;".len())
+        .position(|w| w == b"\x1b]7339;")
+        .unwrap();
+    out.extend_from_slice(&f.process(&cycle[..split]));
+    writer.write_all(b"R\x000\0/w\x000\0").unwrap();
+    writer.flush().unwrap();
+    out.extend_from_slice(&f.process(&cycle[split..]));
+    assert_eq!(&out[start..], cycle.as_slice());
+}
+
+#[test]
+fn leading_carriage_returns_are_not_output() {
+    let mut f = fmt_with(Config::default());
+    f.theme = Theme::plain();
+    // Silent: the `\r` alone draws no header.
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"true")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"\r"));
+    out.extend_from_slice(&f.process(D0));
+    assert!(!String::from_utf8_lossy(&out).contains('\u{258c}'));
+    assert!(contains(&out, b"\x1b]133;C\x07\r\x1b]133;D;0\x07"));
+    // With output: the `\r` goes out ahead of the header, the line after it.
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"echo hi")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"\rhi\r\n"));
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8_lossy(&out);
+    let cr = text.find("\x1b]133;C\x07\r").unwrap();
+    let header = text.find('\u{258c}').unwrap();
+    assert!(cr < header, "{text:?}");
+    assert!(text[header..].contains("\r\nhi\r\n"), "{text:?}");
+    // `\r\n` first is an empty first line, which is output.
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"printf")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"\r\nx\r\n"));
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.find('\u{258c}').unwrap() < text.find("\r\nx").unwrap());
+}
+
+#[test]
+fn header_never_lands_inside_a_charset_escape() {
+    // A script starting with `tput sgr0` (`ESC ( B ESC [ m` on xterm).
+    let mut f = fmt_with(Config::default());
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"./build.sh")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"\x1b(B\x1b[mBuilding\r\n"));
+    out.extend_from_slice(&f.process(D0));
+    assert!(
+        contains(&out, b"\x1b(B\x1b[m"),
+        "{:?}",
+        String::from_utf8_lossy(&out)
+    );
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.find("\x1b(B").unwrap() < text.find('\u{258c}').unwrap());
+}
+
+#[test]
+fn links_never_touch_lines_that_start_with_their_own_escape() {
+    // The audit's three cases: an erase-line, a progress redraw, and a
+    // program's own hyperlink spanning a line.
+    for output in [
+        &b"x\r\n\x1b[2Ksrc/a.rs:3 boom\r\n"[..],
+        b"x\r\n\r\x1b[Kdownloading https://x.test/file 10%\r\n",
+        b"x\r\n\x1b]8;;https://docs.test/E0308\x1b\\error E0308 in src/a.rs:3\r\nmore\x1b]8;;\x1b\\\r\n",
+    ] {
+        let (mut f, _channel, mut writer) = links_formatter(links_on());
+        let out = run_with_metadata(&mut f, &mut writer, b"make", output, 0);
+        let targets = osc8_targets(&out);
+        assert!(
+            targets.iter().all(|target| target == "https://docs.test/E0308"),
+            "{:?}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+    // The line after a self-styled one is plain again and still links.
+    let (mut f, _channel, mut writer) = links_formatter(links_on());
+    let out = run_with_metadata(
+        &mut f,
+        &mut writer,
+        b"make",
+        b"\x1b[2Kfirst src/a.rs:1\r\nsecond src/b.rs:2\r\n",
+        0,
+    );
+    let targets = osc8_targets(&out);
+    assert_eq!(targets.len(), 1, "{:?}", String::from_utf8_lossy(&out));
+    assert!(targets[0].ends_with("/w/src/b.rs"));
+}
+
+#[test]
+fn a_programs_opening_style_survives_the_header() {
+    let mut f = fmt_with(Config::default());
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"./check")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"\x1b[1;31merror: broken\x1b[0m\r\n"));
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8_lossy(&out);
+    let header = text.find('\u{258c}').unwrap();
+    // After the header (which ends with a reset) the program's red is back
+    // before its first byte.
+    let after = &text[header..];
+    let line = after.find("error: broken").unwrap();
+    assert!(after[..line].ends_with("\x1b[0m\r\n\x1b[1;31m"), "{text:?}");
+
+    // A program's open hyperlink is closed around the header and reopened.
+    let mut f = fmt_with(Config::default());
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"ls --hyperlink")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"\x1b]8;;file:///x\x1b\\x\x1b]8;;\x1b\\\r\n"));
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8_lossy(&out);
+    let header = text.find('\u{258c}').unwrap();
+    assert!(
+        text[..header].ends_with("\x1b]8;;file:///x\x1b\\\x1b]8;;\x1b\\\x1b[2m"),
+        "{text:?}"
+    );
+    assert!(
+        text[header..].contains("\r\n\x1b]8;;file:///x\x1b\\x"),
+        "{text:?}"
+    );
+
+    // fish's leading title + reset is not a style: nothing is restored.
+    assert_eq!(
+        leading_escapes(b"\x1b]0;ls\x07\x1b[30m\x1b(B\x1b[m"),
+        LeadingEscapes::default()
+    );
+}
+
+// ---- screen-share redaction ([redact] / `glimps redact on`) ----
+
+const GHP: &str = "ghp_aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6";
+
+fn redacting() -> Formatter {
+    let mut cfg = Config::default();
+    cfg.redact.enabled = true;
+    let mut f = fmt_with(cfg);
+    f.theme = Theme::plain();
+    f
+}
+
+fn cycle(f: &mut Formatter, cmd: &[u8], output: &[&[u8]], end: &[u8]) -> String {
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(cmd)));
+    out.extend_from_slice(&f.process(C));
+    for chunk in output {
+        out.extend_from_slice(&f.process(chunk));
+    }
+    out.extend_from_slice(&f.process(end));
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn redaction_masks_output_lines_and_the_header() {
+    let mut f = redacting();
+    let line = format!("token {GHP} issued\r\n");
+    let cmd = format!("echo {GHP}");
+    let text = cycle(&mut f, cmd.as_bytes(), &[line.as_bytes()], D0);
+    assert!(
+        !text[text.find("\x1b]133;C").unwrap()..].contains(&GHP[4..]),
+        "{text:?}"
+    );
+    assert!(
+        text.contains(&format!("token ghp_{} issued", "*".repeat(36))),
+        "{text:?}"
+    );
+    // The header repeats the command: masked too.
+    assert!(
+        text.contains(&format!("echo ghp_{}", "*".repeat(36))),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn redaction_off_changes_nothing() {
+    let mut f = fmt_with(Config::default());
+    f.theme = Theme::plain();
+    let line = format!("token {GHP} issued\r\n");
+    let text = cycle(&mut f, b"echo", &[line.as_bytes()], D0);
+    assert!(text.contains(&line), "{text:?}");
+}
+
+#[test]
+fn redaction_covers_sensitive_commands_dotenv_and_documents() {
+    let mut f = redacting();
+    // A secret-printing command, raw pass-through without redaction, is
+    // masked line by line with it on (and still never formatted).
+    let token = format!("gho_{}", "Q".repeat(36));
+    let text = cycle(
+        &mut f,
+        b"gh auth token",
+        &[format!("{token}\r\n").as_bytes()],
+        D0,
+    );
+    assert!(!text.contains(&token), "{text:?}");
+    // Every complete line is masked: such a command's secret may have no
+    // shape to detect.
+    assert!(
+        text.contains(&format!("{}\r\n", "*".repeat(40))),
+        "{text:?}"
+    );
+    let text = cycle(
+        &mut f,
+        b"security find-generic-password -w -s x",
+        &[b"hunter2\r\n"],
+        D0,
+    );
+    assert!(
+        !text.contains("hunter2") && text.contains("*******\r\n"),
+        "{text:?}"
+    );
+    // Its last line, ended without a newline, is masked too...
+    let text = cycle(&mut f, b"gh auth token", &[b"bare-secret"], D0);
+    assert!(!text.contains("bare-secret"), "{text:?}");
+    // ...but a prompt waiting for input stays readable.
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"gh auth token")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"Passphrase: "));
+    out.extend_from_slice(&f.flush_stalled_output());
+    assert!(String::from_utf8_lossy(&out).contains("Passphrase: "));
+    out.extend_from_slice(&f.process(D0));
+    // A dotenv file.
+    let text = cycle(
+        &mut f,
+        b"cat .env",
+        &[b"DATABASE_PASSWORD=hunter2\r\nPORT=8080\r\n"],
+        D0,
+    );
+    assert!(!text.contains("hunter2"), "{text:?}");
+    assert!(text.contains("8080"), "{text:?}");
+    // A pretty-printed JSON document.
+    let text = cycle(
+        &mut f,
+        b"curl -s api",
+        &[b"{\"user\":\"me\",\"apiKey\":\"sk_live_0123456789abcdefXYZ\"}\r\n"],
+        D0,
+    );
+    assert!(text.contains("JSON"), "{text:?}");
+    assert!(!text.contains("0123456789abcdefXYZ"), "{text:?}");
+    assert!(text.contains("\"me\""), "{text:?}");
+}
+
+#[test]
+fn redaction_covers_partial_lines_and_key_blocks() {
+    let mut f = redacting();
+    // A line without its newline, released at the end of the command.
+    let text = cycle(&mut f, b"printf", &[format!("key {GHP}").as_bytes()], D0);
+    assert!(!text.contains(&GHP[4..]), "{text:?}");
+    // A line released by a quiet interval.
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"read")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(format!("x\r\nsecret {GHP}? ").as_bytes()));
+    out.extend_from_slice(&f.flush_stalled_output());
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8(out).unwrap();
+    assert!(!text.contains(&GHP[4..]), "{text:?}");
+    // A private key printed across chunks by an ordinary command (reading
+    // the key file itself is a secret-printing command, masked whole).
+    let text = cycle(
+        &mut f,
+        b"terraform output -raw deploy_key",
+        &[
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\r\nb3BlbnNz",
+            b"aC1rZXktdjE\r\nAAAA\r\n-----END OPENSSH PRIVATE KEY-----\r\n",
+        ],
+        D0,
+    );
+    assert!(
+        !text.contains("b3BlbnNz") && !text.contains("AAAA"),
+        "{text:?}"
+    );
+    assert!(
+        text.contains("-----END OPENSSH PRIVATE KEY-----"),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn redaction_reaches_the_pin_and_the_failure_recap() {
+    let mut f = redacting();
+    let mut output = format!("error: bad credentials for {GHP}\r\n").into_bytes();
+    for _ in 0..12 {
+        output.extend_from_slice(b"  at frame\r\n");
+    }
+    let cmd = format!("deploy --token={GHP}");
+    let text = cycle(&mut f, cmd.as_bytes(), &[&output], &d_exit(1));
+    assert!(text.contains("command failed: deploy --token="), "{text:?}");
+    // Everything shown (after the shell's own invisible command marker).
+    let shown = &text[text.find("\x1b]133;C").unwrap()..];
+    assert!(!shown.contains(&GHP[4..]), "{text:?}");
+    assert!(text.contains('\u{21b3}'), "the pin is shown: {text:?}");
+}
+
+#[test]
+fn masked_lines_are_never_linked() {
+    let mut cfg = links_on();
+    cfg.redact.enabled = true;
+    let (mut f, _channel, mut writer) = links_formatter(cfg);
+    let out = run_with_metadata(
+        &mut f,
+        &mut writer,
+        b"env",
+        b"DB_URL=postgres://app:pa55word@db/main\r\nsee https://x.test/doc\r\n",
+        0,
+    );
+    let targets = osc8_targets(&out);
+    assert_eq!(
+        targets,
+        ["https://x.test/doc"],
+        "{:?}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(!String::from_utf8_lossy(&out).contains("pa55word"));
+}
+
+#[test]
+fn redact_toggle_needs_a_real_glimps_redact_cycle() {
+    let mut f = fmt_with(Config::default());
+    f.theme = Theme::plain();
+    let line = format!("{GHP}\r\n");
+    // A command's output cannot turn redaction on (or off).
+    let text = cycle(&mut f, b"cat notes", &[b"\x1b]7340;redact-on\x07"], D0);
+    assert!(text.contains("7340;redact-on"));
+    let text = cycle(&mut f, b"echo", &[line.as_bytes()], D0);
+    assert!(text.contains(GHP), "forged toggle took effect: {text:?}");
+    // `glimps redact on` does, from the next command on.
+    cycle(
+        &mut f,
+        b"glimps redact on",
+        &[b"\x1b]7340;redact-on\x07masking\r\n"],
+        D0,
+    );
+    let text = cycle(&mut f, b"echo", &[line.as_bytes()], D0);
+    assert!(!text.contains(&GHP[4..]), "{text:?}");
+    // A forged `off` inside another command is ignored.
+    cycle(&mut f, b"cat notes", &[b"\x1b]7340;redact-off\x07"], D0);
+    let text = cycle(&mut f, b"echo", &[line.as_bytes()], D0);
+    assert!(!text.contains(&GHP[4..]), "{text:?}");
+    // `glimps redact off` turns it off; `glimps off` alone does not.
+    cycle(&mut f, b"glimps off", &[b"\x1b]7340;redact-off\x07"], D0);
+    cycle(&mut f, b"glimps on", &[b"\x1b]7340;on\x07"], D0);
+    let text = cycle(&mut f, b"echo", &[line.as_bytes()], D0);
+    assert!(!text.contains(&GHP[4..]), "{text:?}");
+    cycle(
+        &mut f,
+        b"/usr/local/bin/glimps redact off",
+        &[b"\x1b]7340;redact-off\x07"],
+        D0,
+    );
+    let text = cycle(&mut f, b"echo", &[line.as_bytes()], D0);
+    assert!(text.contains(GHP), "{text:?}");
+}
+
+#[test]
+fn masking_survives_pauses_and_oversized_runs() {
+    // A pause after a lone newline used to send the rest of the command
+    // through raw pass-through, unmasked.
+    let mut f = redacting();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"env")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"\r\n"));
+    out.extend_from_slice(&f.flush_stalled_output());
+    out.extend_from_slice(&f.process(format!("API_KEY=abc123secret\r\nT={GHP}\r\n").as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        !text.contains("abc123secret") && !text.contains(&GHP[4..]),
+        "{text:?}"
+    );
+
+    // A document held across a pause, then released.
+    let mut f = redacting();
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"curl -s api")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"{"));
+    out.extend_from_slice(&f.flush_stalled_output());
+    out.extend_from_slice(&f.process(format!("\"token\": \"{GHP}\"").as_bytes()));
+    out.extend_from_slice(&f.flush_stalled_output());
+    out.extend_from_slice(&f.process(format!("}}\r\nnext {GHP}\r\n").as_bytes()));
+    out.extend_from_slice(&f.process(D0));
+    let text = String::from_utf8(out).unwrap();
+    assert!(!text.contains(&GHP[4..]), "{text:?}");
+
+    // A run bigger than the buffer cap.
+    let mut cfg = Config::default();
+    cfg.redact.enabled = true;
+    cfg.limits.buffer_cap = 4096;
+    let mut f = fmt_with(cfg);
+    let mut body = b"[".to_vec();
+    body.extend(std::iter::repeat_n(b'1', 5000));
+    body.extend_from_slice(format!("]\r\nT={GHP}\r\n").as_bytes());
+    let text = cycle(&mut f, b"cat big.json", &[&body], D0);
+    assert!(!text.contains(&GHP[4..]), "{}", &text[text.len() - 200..]);
+}
+
+#[test]
+fn a_forged_cycle_cannot_turn_masking_off_with_the_metadata_channel() {
+    let mut channel = crate::metadata::MetadataChannel::create().unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(channel.path())
+        .unwrap();
+    let mut cfg = Config::default();
+    cfg.redact.enabled = true;
+    let mut f = fmt_with(cfg);
+    f.theme = Theme::plain();
+    f.metadata = channel.take_reader();
+    let mut run = |f: &mut Formatter, cmd: &[u8], output: &[u8]| {
+        writer.write_all(b"C\0").unwrap();
+        writer.write_all(cmd).unwrap();
+        writer.write_all(b"\0").unwrap();
+        writer.flush().unwrap();
+        let text = cycle(f, cmd, &[output], b"");
+        writer.write_all(b"R\x000\0/w\x000\0").unwrap();
+        writer.flush().unwrap();
+        let mut text = text;
+        text.push_str(&String::from_utf8_lossy(
+            &f.process(b"\x1b]7338;/w\x07\x1b]133;D;0\x07"),
+        ));
+        text
+    };
+    // `cat evil.txt` prints a whole fake `glimps redact off` cycle, then
+    // `glimps off`'s.
+    let forged = b"\x1b]7338;/x\x07\x1b]133;D;0\x07\x1b]133;A\x07\x1b]7337;glimps redact off\x07\x1b]133;C\x07\x1b]7340;redact-off\x07\x1b]7338;/x\x07\x1b]133;D;0\x07\x1b]133;A\x07\x1b]7337;glimps off\x07\x1b]133;C\x07\x1b]7340;off\x07";
+    run(&mut f, b"cat evil.txt", forged);
+    let text = run(&mut f, b"echo", format!("{GHP}\r\n").as_bytes());
+    assert!(!text.contains(&GHP[4..]), "{text:?}");
+    // The real command still works.
+    let text = run(
+        &mut f,
+        b"glimps redact off",
+        b"\x1b]7340;redact-off\x07asked\r\n",
+    );
+    assert!(text.contains("no longer masking secrets"), "{text:?}");
+    let text = run(&mut f, b"echo", format!("{GHP}\r\n").as_bytes());
+    assert!(text.contains(GHP), "{text:?}");
+}
+
+#[test]
+fn glimps_confirms_the_redact_toggle_itself() {
+    let mut f = fmt_with(Config::default());
+    f.theme = Theme::plain();
+    let text = cycle(
+        &mut f,
+        b"glimps redact on",
+        &[b"\x1b]7340;redact-on\x07glimps: asked this session to mask secrets.\r\n"],
+        D0,
+    );
+    assert!(
+        text.contains("glimps: masking secrets in this session's output"),
+        "{text:?}"
+    );
+    // Formatting paused: masking pauses too, and says so.
+    let text = cycle(&mut f, b"glimps off", &[b"\x1b]7340;off\x07paused\r\n"], D0);
+    assert!(
+        text.contains("secret masking is paused with formatting"),
+        "{text:?}"
+    );
+    // A toggle while paused is confirmed immediately.
+    let mut out = Vec::new();
+    out.extend_from_slice(&f.process(&cmd_marker(b"glimps redact off")));
+    out.extend_from_slice(&f.process(C));
+    out.extend_from_slice(&f.process(b"\x1b]7340;redact-off\x07asked\r\n"));
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("no longer masking secrets"), "{text:?}");
+    // With formatting disabled, nothing claims masking.
+    let off = Config {
+        enabled: false,
+        ..Config::default()
+    };
+    let mut f = fmt_with(off);
+    let text = cycle(
+        &mut f,
+        b"glimps redact on",
+        &[b"\x1b]7340;redact-on\x07"],
+        D0,
+    );
+    assert!(
+        !text.contains("masking secrets in this session"),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn the_pin_never_shows_a_cut_token() {
+    let mut f = redacting();
+    // The token straddles the pin's display cap.
+    let mut output = format!("error: {} {GHP}\r\n", "x".repeat(140)).into_bytes();
+    for _ in 0..12 {
+        output.extend_from_slice(b"  at frame\r\n");
+    }
+    let text = cycle(&mut f, b"deploy", &[&output], &d_exit(1));
+    let pin = &text[text.find('\u{21b3}').unwrap()..];
+    assert!(!pin.contains("aB3dE6"), "{pin:?}");
+}
+
+#[test]
+fn a_programs_hyperlink_spanning_lines_is_never_split() {
+    let (mut f, _channel, mut writer) = links_formatter(links_on());
+    let out = run_with_metadata(
+        &mut f,
+        &mut writer,
+        b"tool",
+        b"x\r\n\x1b]8;;https://docs.test/a\x1b\\first\r\nsee src/a.rs:3\r\nend\x1b]8;;\x1b\\\r\nafter src/b.rs:4\r\n",
+        0,
+    );
+    let targets = osc8_targets(&out);
+    assert_eq!(targets.len(), 2, "{:?}", String::from_utf8_lossy(&out));
+    assert_eq!(targets[0], "https://docs.test/a");
+    assert!(targets[1].ends_with("/w/src/b.rs"));
 }

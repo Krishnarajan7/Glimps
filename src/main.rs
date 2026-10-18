@@ -54,6 +54,19 @@ fn main() -> Result<()> {
             let exit_code = session::toggle(cmd == "on")?;
             std::process::exit(exit_code);
         }
+        Some("redact") => {
+            let on = match args.get(1).map(String::as_str) {
+                Some("on") if args.len() == 2 => true,
+                Some("off") if args.len() == 2 => false,
+                _ => {
+                    eprintln!("glimps: usage: glimps redact <on|off>");
+                    std::process::exit(2);
+                }
+            };
+            // Mask secrets in this session's output (in-band OSC).
+            let exit_code = session::redact(on)?;
+            std::process::exit(exit_code);
+        }
         Some("setup") => {
             if args.len() > 2 {
                 eprintln!("glimps: setup accepts at most one shell name (zsh or bash).");
@@ -118,13 +131,24 @@ fn main() -> Result<()> {
     };
     if !is_supported_shell(&shell) {
         eprintln!(
-            "GLIMPS warning: shell '{}' has no GLIMPS integration; running transparent pass-through. Supported: zsh, bash, pwsh.",
+            "GLIMPS warning: shell '{}' has no GLIMPS integration; running transparent pass-through. Supported: zsh, bash, fish, pwsh.",
             shell
         );
     }
 
     let farewell = config.farewell;
-    let outcome = pty::run_shell(&shell, clock, config)?;
+    let outcome = match pty::run_shell(&shell, clock, config) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            // The terminal is already restored (`run_shell` owns the raw-mode
+            // guard). An rc file usually `exec`ed us in place of its own
+            // shell, so exiting here would close the user's terminal tab:
+            // hand over to a plain shell instead.
+            eprintln!("glimps: could not start {shell} inside GLIMPS: {err:#}");
+            fall_back_to_plain_shell(&shell);
+            return Err(err);
+        }
+    };
     print_farewell(outcome.signaled, farewell);
 
     // Exit via `_exit`, not `std::process::exit`: the latter runs libc atexit /
@@ -134,6 +158,35 @@ fn main() -> Result<()> {
     // and all output is flushed, so an immediate exit is safe.
     // SAFETY: `_exit` simply terminates the process; it touches no Rust state.
     unsafe { libc::_exit(outcome.code) }
+}
+
+/// Replace this process with an interactive shell running without GLIMPS
+/// (`GLIMPS=0`, so its integration does not `exec` us again): the requested
+/// shell, else `$SHELL`, else `/bin/sh`. Returns only if none could start, or
+/// when there is no terminal to keep (nothing interactive to save).
+fn fall_back_to_plain_shell(shell: &str) {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let mut candidates = vec![shell.to_string()];
+        candidates.extend(glimps::config::default_shell());
+        candidates.push("/bin/sh".to_string());
+        candidates.dedup();
+        for candidate in candidates {
+            eprintln!("glimps: starting {candidate} without GLIMPS (GLIMPS=0).");
+            let err = std::process::Command::new(&candidate)
+                .args(pty::interactive_shell_args(&candidate))
+                .env("GLIMPS", "0")
+                .env_remove("GLIMPS_ACTIVE")
+                .exec();
+            eprintln!("glimps: could not start {candidate}: {err}");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = shell;
 }
 
 fn print_farewell(signaled: bool, enabled: bool) {
@@ -175,8 +228,10 @@ fn print_help() {
          \x20   glimps doctor       Diagnose your GLIMPS setup (read-only).\n\
          \x20   glimps off          Pause formatting for this session.\n\
          \x20   glimps on           Resume formatting for this session.\n\
+         \x20   glimps redact on    Mask secrets in this session's output (glimps redact off stops).\n\
          \x20   glimps init zsh     Print zsh shell integration (for ~/.zshrc).\n\
          \x20   glimps init bash    Print bash shell integration (for ~/.bashrc).\n\
+         \x20   glimps init fish    Print fish shell integration (for conf.d/00-glimps.fish).\n\
          \x20   glimps init pwsh    Print PowerShell integration (for $PROFILE; experimental).\n\
          \x20   glimps --help       Show this help.\n\
          \x20   glimps --version    Show the version.\n\
@@ -185,8 +240,10 @@ fn print_help() {
          \x20   GLIMPS=0            Disable all formatting (pure pass-through).\n\
          \x20   NO_COLOR=1          Keep structure but emit no color escapes.\n\
          \n\
-         Enable it: add near the TOP of your ~/.zshrc (or ~/.bashrc):\n\
-         \x20   command -v glimps >/dev/null 2>&1 && eval \"$(glimps init zsh)\"",
+         Enable it: run `glimps setup`, or add near the TOP of your ~/.zshrc (or ~/.bashrc):\n\
+         \x20   command -v glimps >/dev/null 2>&1 && eval \"$(glimps init zsh)\"\n\
+         fish: put this line in ~/.config/fish/conf.d/00-glimps.fish:\n\
+         \x20   command -q glimps; and glimps init fish | source",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -216,7 +273,8 @@ mod tests {
         assert!(is_supported_shell("/bin/zsh"));
         assert!(is_supported_shell("bash"));
         assert!(is_supported_shell("pwsh.exe"));
-        assert!(!is_supported_shell("/usr/local/bin/fish"));
+        assert!(is_supported_shell("/usr/local/bin/fish"));
+        assert!(!is_supported_shell("/bin/tcsh"));
         assert!(!is_supported_shell("cmd.exe"));
         assert!(!is_supported_shell(""));
     }

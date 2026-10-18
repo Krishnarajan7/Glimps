@@ -106,9 +106,9 @@ works."
 
 ## v1.x - Scale And Reach (post-launch, demand-driven)
 - ☐ Mixed-content segmentation (the multi-format screenshot case)
-- ☐ URL highlighting / clickable hyperlinks (OSC 8)
+- ☑ Clickable hyperlinks (OSC 8): URLs and `file:line` locations, `[links]`
 - ☑ Error-line pinning and deterministic failure summaries for long output
-- ◐ Shell breadth: bash is beta; fish remains TODO
+- ☑ Shell breadth: bash and fish (3.3+, fish 4) integrations, both beta
 - ◐ Windows support: experimental ConPTY spike landed (raw-mode + VT console
       flags, size polling for resize, `pwsh`/`powershell` defaults, `glimps init
       pwsh`, `.exe` command names, `scripts/dogfood-windows.ps1`). Untested on real

@@ -30,6 +30,7 @@ mod git;
 mod json_lines;
 mod network;
 mod report;
+mod sockets;
 mod streaming;
 mod tables;
 
@@ -64,6 +65,7 @@ pub use network::{
     colorize_route_line, colorize_scutil_dns_line,
 };
 pub use report::colorize_report_line;
+pub use sockets::{colorize_ss_line, colorize_ufw_line};
 pub use streaming::{colorize_line, Http, Logs, StackTrace};
 pub(crate) use streaming::{is_error_log_line, is_exception_line, ltrim};
 pub(crate) use tables::AUTO_DELIMITER;

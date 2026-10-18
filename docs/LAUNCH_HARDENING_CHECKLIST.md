@@ -177,7 +177,7 @@ Legend: todo / in progress / done
 
 - done: bash support (beta; raw `DEBUG` trap replacement remains a documented
   compatibility caveat).
-- todo: fish support.
+- done: fish support (beta; `conf.d/00-glimps.fish`, fish 3.3+ and fish 4).
 - todo: mixed-content segmentation, such as log lines containing JSON.
-- todo: OSC 8 URL hyperlinking.
+- done: OSC 8 hyperlinks for URLs and `file:line` locations (`[links]`).
 - todo: Windows support, only after Unix behavior is boringly stable.

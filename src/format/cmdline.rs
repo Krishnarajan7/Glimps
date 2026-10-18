@@ -115,7 +115,40 @@ fn render_env_assignment(out: &mut Vec<u8>, word: &[u8], theme: &Theme) -> bool 
 /// UTF-8.
 pub fn first_word(cmd: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(cmd).ok()?;
-    for word in text.split_whitespace() {
+    command_name(&mut text.split_whitespace())
+}
+
+/// The command's name (as [`first_word`]) and, when the word right after it
+/// is a plain subcommand (`build`, `test`, `compose`), that too. Anything else
+/// in that position (a path, a number, a flag, a URL) is an argument and is
+/// left out, as are all later words. Used for text that leaves the terminal,
+/// so it says what ran without repeating arguments that might be private.
+pub(crate) fn name_and_subcommand(cmd: &[u8]) -> Option<(String, Option<String>)> {
+    let text = std::str::from_utf8(cmd).ok()?;
+    let mut words = text.split_whitespace();
+    let name = command_name(&mut words)?;
+    let subcommand = words
+        .next()
+        .filter(|word| is_plain_subcommand(word))
+        .map(str::to_string);
+    Some((name, subcommand))
+}
+
+/// `[a-z][a-z0-9-]{0,23}`: the shape of `cargo build` / `docker compose`.
+fn is_plain_subcommand(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    (1..=24).contains(&bytes.len())
+        && bytes.first().is_some_and(u8::is_ascii_lowercase)
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+/// Consume `words` up to and including the command name, returning its
+/// basename. Shared by [`first_word`] and [`name_and_subcommand`] so the two
+/// always agree on which word is the command.
+fn command_name<'a>(words: &mut impl Iterator<Item = &'a str>) -> Option<String> {
+    for word in words {
         // Skip wrappers, flags, and `VAR=value` env assignments to reach the real
         // command being run.
         if WRAPPERS.contains(&word) || word.starts_with('-') || is_env_assignment(word) {
@@ -356,6 +389,37 @@ mod tests {
         assert_eq!(first_word(b"  git   status ").as_deref(), Some("git"));
         assert_eq!(first_word(b"").as_deref(), None);
         assert_eq!(first_word(b"sudo").as_deref(), None); // only a wrapper
+    }
+
+    #[test]
+    fn name_and_subcommand_keeps_only_a_plain_subcommand() {
+        let pair = |cmd: &[u8]| name_and_subcommand(cmd);
+        let owned =
+            |name: &str, sub: Option<&str>| Some((name.to_string(), sub.map(str::to_string)));
+        assert_eq!(
+            pair(b"cargo build --release"),
+            owned("cargo", Some("build"))
+        );
+        assert_eq!(
+            pair(b"sudo docker compose up"),
+            owned("docker", Some("compose"))
+        );
+        assert_eq!(pair(b"FOO=1 npm run build"), owned("npm", Some("run")));
+        assert_eq!(pair(b"make"), owned("make", None));
+        // Arguments in the subcommand position are never repeated.
+        assert_eq!(pair(b"sleep 40"), owned("sleep", None));
+        assert_eq!(pair(b"python train.py"), owned("python", None));
+        assert_eq!(pair(b"curl https://x.test/?token=abc"), owned("curl", None));
+        assert_eq!(pair(b"mysql -pSecret db"), owned("mysql", None));
+        assert_eq!(pair(b"deploy Prod"), owned("deploy", None));
+        assert_eq!(pair(b"make build;"), owned("make", None));
+        assert_eq!(pair(b"x abcdefghijklmnopqrstuvwxy"), owned("x", None));
+        assert_eq!(
+            pair(b"x abcdefghijklmnopqrstuvwx"),
+            owned("x", Some("abcdefghijklmnopqrstuvwx"))
+        );
+        assert_eq!(pair(b""), None);
+        assert_eq!(pair(b"\xff\xfe"), None);
     }
 
     #[test]

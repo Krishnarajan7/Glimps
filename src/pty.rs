@@ -24,7 +24,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::config::{shell_name, Config};
-use crate::format::{Clock, Formatter};
+use crate::format::{Clock, Formatter, InputActivity};
 use crate::metadata::MetadataChannel;
 #[cfg(not(unix))]
 use crate::terminal::try_term_size;
@@ -85,7 +85,7 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit>
     //     makes the inner bash actually load the hooks.
     // The shell is interactive anyway (its stdio is this PTY); `-i` just makes it
     // explicit and picks the right rc file. PowerShell and cmd.exe have no `-i`
-    // (see `interactive_shell_args`).
+    // (see `interactive_shell_args`). fish takes `-i` too.
     let mut cmd = CommandBuilder::new(shell);
     cmd.args(interactive_shell_args(shell));
     cmd.env("GLIMPS_ACTIVE", "1");
@@ -120,6 +120,10 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit>
     // master read does not always return EOF promptly on shell exit).
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let mut reader = pair.master.try_clone_reader()?;
+    // When the user last typed: a time, never the bytes. Lets a completion
+    // notice skip a command the user was typing into.
+    let input_activity = Arc::new(InputActivity::new());
+    let reader_activity = Arc::clone(&input_activity);
     let metadata_reader = metadata_channel
         .as_mut()
         .and_then(MetadataChannel::take_reader);
@@ -146,6 +150,7 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit>
         });
 
         let mut formatter = Formatter::for_supervisor_with_metadata(clock, config, metadata_reader);
+        formatter.set_input_activity(reader_activity);
         let mut stdout = std::io::stdout();
         loop {
             match pty_rx.recv_timeout(INTERACTIVE_FLUSH_DELAY) {
@@ -188,6 +193,7 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit>
             match stdin.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    input_activity.touch();
                     if writer.write_all(&buf[..n]).is_err() || writer.flush().is_err() {
                         break;
                     }
@@ -272,7 +278,7 @@ pub fn run_shell(shell: &str, clock: Clock, config: Config) -> Result<ShellExit>
 /// shell already printed. `cmd.exe` takes no such flag at all. Chosen by shell
 /// name on every platform: a `pwsh` on macOS/Linux gets `-NoLogo` too (it
 /// was never a supported shell before, so nothing that worked changes).
-fn interactive_shell_args(shell: &str) -> &'static [&'static str] {
+pub fn interactive_shell_args(shell: &str) -> &'static [&'static str] {
     match shell_name(std::path::Path::new(shell)) {
         Some("pwsh" | "powershell") => &["-NoLogo"],
         Some("cmd") => &[],

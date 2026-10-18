@@ -37,9 +37,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-      - name: Install zsh (for PTY integration tests)
+      - name: Install zsh and fish (for PTY integration tests)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
+      # Ubuntu ships fish 3; Homebrew's fish 4 writes its own OSC 133 markers,
+      # which the scanner must ignore. Cover both.
+      - name: Install fish (for PTY integration tests)
+        if: runner.os == 'macOS'
+        run: brew install fish
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

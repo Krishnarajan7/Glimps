@@ -14,7 +14,8 @@ still need clean-machine confirmation. “Build/test verified” is not the same
 | Linux x86_64, bash | Supported beta | PTY integration suite runs on pinned Ubuntu CI. |
 | macOS Intel | Build target; physical verification pending | Release configuration includes `x86_64-apple-darwin`. |
 | Linux arm64 | Build target; physical verification pending | Release configuration includes `aarch64-unknown-linux-gnu`. |
-| fish and other shells | Unsupported | They receive transparent pass-through when launched explicitly; shell integration is not provided. |
+| macOS/Linux, fish 3.3+ and fish 4 | Supported beta | Shell hooks are tested byte-for-byte against fish 3.7 and 4.0, and the PTY suite runs a fish session end to end (Ubuntu CI: fish 3; macOS CI: fish 4). |
+| other shells | Unsupported | They receive transparent pass-through when launched explicitly; shell integration is not provided. |
 | Windows | Unsupported | GLIMPS currently depends on Unix PTY and signal behavior. |
 
 Run `glimps doctor` after installation to inspect the binary, shell integration,

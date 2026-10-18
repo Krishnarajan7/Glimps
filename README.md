@@ -30,10 +30,10 @@ tables, and common project files. No manual piping, no flags, no guessing what
 kind of output is coming.
 
 > Status: **public beta** — functional and heavily tested. macOS + zsh is the
-> primary early-adopter path; bash integration is beta, and Linux is a supported
+> primary early-adopter path; bash and fish integration are beta, and Linux is a supported
 > build target covered by CI. Prebuilt binaries for Apple Silicon and Intel
 > (macOS and Linux) ship with each release, alongside Homebrew and crates.io
-> packages. Broader shell support (fish) is on the roadmap. **Windows** (PowerShell
+> packages. **Windows** (PowerShell
 > over ConPTY, Windows 10 1809+ / Windows 11) is supported as **experimental**:
 > build it from source and enable it with `glimps init pwsh` — see
 > [Windows](#windows-experimental) below and [`docs/windows.md`](docs/windows.md).
@@ -152,6 +152,95 @@ purely additive — it never rewrites command output, which is what keeps the
 byte-safety promise in [`docs/SAFETY_INVARIANTS.md`](./docs/SAFETY_INVARIANTS.md)
 intact. Turn any of it off in `.glimpsrc` under `[failures]`.
 
+### Know when a long build finishes
+
+Start a 4-minute build, switch to the browser, and GLIMPS can tell you when it
+is done: `✓ cargo build finished in 4m12s`, or `✗ npm test failed (exit 1)
+after 3m02s`. It is off until you turn it on:
+
+```toml
+[notify]
+enabled = true
+after_seconds = 30   # only commands that ran at least this long
+method = "auto"      # or "osc9", "osc777", "osc99", "bell"
+```
+
+`auto` sends a desktop notification in iTerm2, WezTerm, Ghostty (`OSC 9`),
+kitty (`OSC 99`) and foot (`OSC 777`), and rings the terminal bell everywhere
+else, including inside tmux and screen. `glimps doctor` shows which one your
+terminal gets. It stays quiet for Ctrl-C, for full-screen and interactive
+programs (vim, ssh, less), for secret-reading commands, and when you typed
+into the terminal in the command's last 10 seconds. That last check stands in
+for window focus: GLIMPS doesn't turn on focus reporting, because focus events
+reach the shell and vim as stray input. Your terminal decides whether a
+notification shows while its window is focused.
+
+The notification names the program, plus its subcommand for well-known tools
+(`cargo build`, `docker compose`, `git push`); any other command shows its
+name only, since its second word could be private (`unlock hunter2` shows as
+`unlock`). No other argument and no output is ever included. The text leaves
+the terminal, and your desktop may keep it in its notification history.
+
+### Screen-share mode: mask secrets in output
+
+About to share your screen or record a demo? Run
+
+```bash
+glimps redact on     # glimps redact off to stop
+```
+
+GLIMPS confirms with `glimps: masking secrets in this session's output`.
+From then on it masks secrets in command output, with `*` covering the same
+columns so nothing shifts: GitHub, GitLab, Slack, Stripe, OpenAI,
+Anthropic, AWS, Google, npm, PyPI, Hugging Face and other tokens with a
+known prefix (the prefix stays: `ghp_****…`), JSON Web Tokens, the password
+in a URL (`postgres://app:****@db`), `Authorization: Bearer …` values,
+values of secret-named fields (`API_KEY=…`, `password: …`,
+`"clientSecret": "…"`, `?access_token=…`), and the body of a private key.
+Commands that exist to print a secret (`gh auth token`, `pass show`,
+`security find-generic-password -w`) have every line masked, since their
+secret may have no recognizable shape; a prompt they show while waiting for
+input stays readable. To start every session this way, set
+`enabled = true` under `[redact]` in `~/.glimpsrc`. `glimps off` pauses
+masking along with formatting.
+
+**This is best effort, not a guarantee.** GLIMPS can only mask what passes
+through its formatter, so it never masks what you type (or the shell's echo
+of it), anything inside a full-screen or interactive program (vim, less,
+ssh), or binary output. A secret with no recognizable shape printed by an
+ordinary command (a bare password from `echo`) is not detected, and when a
+program's own coloring or a pause splits a token, the part already on
+screen stays visible. Treat it as a seatbelt, not a reason to print secrets
+on a shared screen.
+
+### Click straight to the error
+
+In terminals that support OSC 8 hyperlinks (iTerm2, WezTerm, Ghostty, kitty,
+Alacritty, foot, the VS Code terminal, Windows Terminal and GNOME Terminal),
+GLIMPS makes URLs and `file:line` locations in plain output clickable:
+`src/main.rs:42:7`, `./main.go:12:3`, Python's `File "app.py", line 7`. The
+pinned error line in the failure footer gets the same treatment, so a rustc
+`--> src/pty.rs:214:18` becomes clickable even though rustc's own colored
+output is left exactly as it was.
+
+```toml
+[links]
+mode = "auto"      # "on" forces it, "off" disables it
+editor = "vscode"  # or "file" (default), "cursor", "zed", or a URL template
+```
+
+A `file://` link opens the file but cannot say which line; an editor setting
+such as `"vscode"` jumps to the line and column. A custom template looks like
+`"myeditor://open?path={path}&line={line}&column={column}"`.
+
+Nothing you see changes: a link is an invisible escape around text that is
+already on screen, and it always points at that text (a relative path is
+resolved against the directory the command ran in). Output that colors itself
+is never touched, and nothing is linked for secret-reading or interactive
+commands. `auto` stays off in terminals not known to support OSC 8 (Apple
+Terminal, for one) and inside tmux or screen. `glimps doctor` shows what your
+terminal gets.
+
 ## Why
 
 Most terminal helpers ask you to predict the output first. Use `jq` if it is
@@ -260,8 +349,8 @@ and only ever gets pass-through; WSL is Linux and uses the zsh/bash integration.
 
 All paths produce the same single native binary. See the
 [compatibility matrix](./docs/COMPATIBILITY.md) for what has been physically
-verified. fish shell integration is not shipped yet (zsh is primary, bash is
-beta — see [Known beta limits](#known-beta-limits)).
+verified. zsh is primary; bash and fish integration are beta (see
+[Known beta limits](#known-beta-limits)).
 
 ## Enable Shell Integration
 
@@ -273,7 +362,8 @@ glimps setup
 ```
 
 Or add the line yourself: one guarded line **near the top** of your rc
-file — `~/.zshrc` for zsh, `~/.bashrc` for bash:
+file — `~/.zshrc` for zsh, `~/.bashrc` for bash — or, for fish, in its own
+`conf.d` file:
 
 ```bash
 # zsh: near the top of ~/.zshrc
@@ -283,6 +373,11 @@ command -v glimps >/dev/null 2>&1 && eval "$(glimps init zsh)"
 ```bash
 # bash: near the top of ~/.bashrc
 command -v glimps >/dev/null 2>&1 && eval "$(glimps init bash)"
+```
+
+```fish
+# fish 3.3+: the whole of ~/.config/fish/conf.d/00-glimps.fish
+command -q glimps; and glimps init fish | source
 ```
 
 ```powershell
@@ -308,7 +403,9 @@ from command output. It never touches your prompt.
 > it runs only once. Put it high (after any critical `PATH`/env setup, before
 > plugin managers and prompt frameworks) so your rc isn't run twice per session.
 > Login files like `.zprofile`/`.bash_profile` are **not** re-run — the inner
-> shell is interactive and inherits your environment.
+> shell is interactive and inherits your environment. fish reads `conf.d`
+> before `config.fish`, which is why its line goes in `conf.d/00-glimps.fish`:
+> the outer fish hands over before anything else runs, so nothing runs twice.
 
 Prefer not to touch your rc file? Just run `glimps` to start a wrapped shell, and
 `exit` to leave.
@@ -347,6 +444,17 @@ diff = true         # unified-diff coloring (added/removed/hunk lines)
 stacktrace = true   # stack-trace / panic highlighting (Rust, Python)
 reports = true      # field names of plain `Label: value` / `KEY=value` lines
 
+[notify]
+enabled = false     # desktop notification when a long command finishes
+after_seconds = 30
+method = "auto"     # "osc9", "osc777", "osc99" or "bell"
+
+[links]
+mode = "auto"       # clickable URLs and file:line (OSC 8): "auto", "on", "off"
+urls = true
+files = true
+editor = "file"     # "vscode", "cursor", "zed", or a URL template
+
 [limits]
 buffer_cap = 1048576   # bytes buffered to detect JSON/HTML
 line_cap   = 65536     # max streamed line length
@@ -368,7 +476,9 @@ earn it. These are hard rules enforced in the code:
   crash upload, or network calls. A private temporary file carries command,
   working-directory, and exit-status metadata from the shell hooks to the local
   supervisor; it is truncated as records are consumed and removed when the
-  GLIMPS session ends. Command output is never written to it.
+  GLIMPS session ends. Command output is never written to it. The one thing
+  that can leave the terminal is the opt-in completion notification
+  (`[notify]`), which carries a program name, an exit code and a duration.
 - **Default to pass-through.** When content type is uncertain, GLIMPS does
   nothing. It only reformats output it's confident about; everything else is
   byte-for-byte unchanged.
@@ -381,7 +491,8 @@ earn it. These are hard rules enforced in the code:
   formatted, pinned, or quoted in failure summaries. Deliberately reading a
   dotenv file with `cat`, `head`, `tail`, or `sed` is the narrow exception:
   GLIMPS may add byte-preserving ANSI color to that requested text, but disables
-  error pinning so values are never duplicated into its own summaries.
+  error pinning so values are never duplicated into its own summaries. With
+  screen-share mode on (`glimps redact on`), their output is masked instead.
 - **The terminal is always restored** on exit — including on crash.
 - **Simple off switches, at every scope.** `glimps off` pauses formatting for
   the current session instantly (`glimps on` resumes) — no restart needed.
@@ -433,8 +544,10 @@ doctor` warns if the line sits below a plugin manager or prompt framework.
 
 ## Known beta limits
 
-- zsh and bash shell integration are supported today. fish is planned, but not a
-  public-beta blocker.
+- zsh, bash and fish (3.3 and later, including fish 4) shell integration are
+  supported; bash and fish are beta. fish 4 writes its own OSC 133 markers;
+  GLIMPS frames output only by its own, so they don't change what it
+  formats.
 - **Windows is experimental.** PowerShell 7 and Windows PowerShell 5.1 are
   supported through ConPTY; the formatters are identical to macOS/Linux, but the
   ConPTY layer has far less real-world mileage. Install is build-from-source only
@@ -485,6 +598,7 @@ doctor` warns if the line sits below a plugin manager or prompt framework.
    ```bash
    sed -i '' '/glimps init/d' ~/.zshrc    # zsh, macOS
    sed -i '' '/glimps init/d' ~/.bashrc   # bash, macOS
+   rm ~/.config/fish/conf.d/00-glimps.fish  # fish
    ```
    On Windows, delete the `glimps init pwsh` line from `$PROFILE`.
 2. Remove the binary: `brew uninstall glimps` if you used Homebrew, otherwise

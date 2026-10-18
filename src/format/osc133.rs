@@ -115,7 +115,7 @@ const FORMAT_TOGGLE_OSC: &[u8] = b"7340;";
 /// line, so `glimps doctor; cat evil.txt` would let the untrusted tail forge a
 /// toggle. `sudo glimps off` or an alias also fails and the toggle is simply
 /// ignored (formatting state unchanged — safe).
-fn command_is_glimps_toggle(command: &[u8]) -> bool {
+pub(super) fn command_is_glimps_toggle(command: &[u8]) -> bool {
     let mut tokens = command
         .split(|&b| b == b' ' || b == b'\t')
         .filter(|token| !token.is_empty());
@@ -124,6 +124,22 @@ fn command_is_glimps_toggle(command: &[u8]) -> bool {
     };
     let basename = first.rsplit(|&b| b == b'/').next().unwrap_or(first);
     basename == b"glimps" && matches!(second, b"off" | b"on")
+}
+
+/// Whether a captured command line is exactly `glimps redact on|off`, the
+/// only way the redaction toggle can be typed. Narrow for the same reason as
+/// [`command_is_glimps_toggle`].
+pub(super) fn command_is_glimps_redact_toggle(command: &[u8]) -> bool {
+    let mut tokens = command
+        .split(|&b| b == b' ' || b == b'\t')
+        .filter(|token| !token.is_empty());
+    let (Some(first), Some(b"redact"), Some(third), None) =
+        (tokens.next(), tokens.next(), tokens.next(), tokens.next())
+    else {
+        return false;
+    };
+    let basename = first.rsplit(|&b| b == b'/').next().unwrap_or(first);
+    basename == b"glimps" && matches!(third, b"off" | b"on")
 }
 
 /// Upper bound on a captured command. Commands are short; this just bounds memory
@@ -151,6 +167,10 @@ enum ParseState {
     Ground,
     /// Just saw `ESC`; awaiting the sequence introducer.
     Esc,
+    /// Inside an `ESC` sequence with intermediate bytes (0x20-0x2F), such as
+    /// `ESC ( B` (select the ASCII charset, part of `tput sgr0` on xterm) or
+    /// `ESC # 8`; collecting until the final byte (0x30-0x7E).
+    EscIntermediate,
     /// Inside a CSI sequence (`ESC [`); collecting params until a final byte.
     Csi,
     /// Inside a string body; collecting until a terminator.
@@ -160,6 +180,9 @@ enum ParseState {
 }
 
 const ESC: u8 = 0x1B;
+/// CAN and SUB cancel an escape sequence in progress.
+const CAN: u8 = 0x18;
+const SUB: u8 = 0x1A;
 const BEL: u8 = 0x07;
 const OSC_INTRODUCER: u8 = b']'; // 0x5D
 const CSI_INTRODUCER: u8 = b'['; // 0x5B
@@ -206,6 +229,11 @@ pub struct Osc133Scanner {
     /// Unlike `command`, this is not consumed at output start; it reflects the
     /// current command cycle until the next `7337` capture.
     toggle_provenance_ok: bool,
+    /// A pending redaction toggle (`OSC 7340 ; redact-on|redact-off`), the
+    /// same way as `format_toggle`.
+    redact_toggle: Option<bool>,
+    /// Whether the current command cycle is `glimps redact on|off`.
+    redact_provenance_ok: bool,
     /// Private command metadata is accepted only during an armed command cycle:
     /// initially, or after a prompt/input marker. Output and command-end markers
     /// close the window so output cannot forge `D -> 7337 -> C` and create a
@@ -215,6 +243,26 @@ pub struct Osc133Scanner {
     /// the same command-cycle boundary but remains true after a legitimate 7337
     /// capture so the immediately following 133;C can start output.
     output_start_allowed: bool,
+    /// GLIMPS's own hooks announce themselves: they send `7337` right before
+    /// every `C`, and `7338` right before every `D`, from the very first
+    /// prompt on. Once a session has shown either marker, a `C` that does not
+    /// follow a `7337` in the same cycle came from someone else and is
+    /// ignored; once it has shown a `7338`, so is a `D` that does not follow
+    /// one. fish 4 writes its own `133;C` before
+    /// running `fish_preexec` and its own `133;D` before `fish_postexec`, and
+    /// iTerm2/WezTerm integrations add theirs; honoring those would open the
+    /// output zone before the command is known (no header, no bypass by name)
+    /// and close it before the result record arrives (no footer). It also
+    /// makes a bare `C`/`D` inside command output inert. (Output that also
+    /// forges GLIMPS's own `7338` before a `D`, or sends `133;A`, can still
+    /// end the zone: the residual every in-band marker carries.)
+    glimps_hooks_seen: bool,
+    /// A `7337` was captured since the last output start.
+    command_this_cycle: bool,
+    /// A `7338` has been captured in this session (see `glimps_hooks_seen`).
+    cwd_marker_seen: bool,
+    /// A `7338` was captured since the last output start or end.
+    cwd_this_cycle: bool,
 }
 
 impl Osc133Scanner {
@@ -231,9 +279,25 @@ impl Osc133Scanner {
             exit_code: None,
             format_toggle: None,
             toggle_provenance_ok: false,
+            redact_toggle: None,
+            redact_provenance_ok: false,
             command_marker_allowed: true,
             output_start_allowed: true,
+            glimps_hooks_seen: false,
+            command_this_cycle: false,
+            cwd_marker_seen: false,
+            cwd_this_cycle: false,
         }
+    }
+
+    /// Whether a `C` belongs to GLIMPS's own cycle (see `glimps_hooks_seen`).
+    fn start_is_ours(&self) -> bool {
+        !self.glimps_hooks_seen || self.command_this_cycle
+    }
+
+    /// Whether a `D` belongs to GLIMPS's own cycle (see `glimps_hooks_seen`).
+    fn end_is_ours(&self) -> bool {
+        !self.cwd_marker_seen || self.cwd_this_cycle
     }
 
     /// Whether a full-screen program is currently on the alternate screen. The
@@ -268,6 +332,11 @@ impl Osc133Scanner {
     /// captured from `glimps on` / `glimps off` run inside the session.
     pub fn take_format_toggle(&mut self) -> Option<bool> {
         self.format_toggle.take()
+    }
+
+    /// A pending `glimps redact on` (`Some(true)`) / `off` (`Some(false)`).
+    pub fn take_redact_toggle(&mut self) -> Option<bool> {
+        self.redact_toggle.take()
     }
 
     /// The zone the stream is currently in, i.e. the zone the *next* byte fed
@@ -383,8 +452,28 @@ impl Osc133Scanner {
                         }
                         // ESC ESC: stay primed on the latest ESC.
                         ESC => ParseState::Esc,
+                        // An intermediate byte: the sequence goes on to a
+                        // final byte. Ending it here would make `B` of
+                        // `ESC ( B` output, and a header could land inside it.
+                        0x20..=0x2F => ParseState::EscIntermediate,
+                        // CAN and SUB abort the sequence; any other C0 control
+                        // is executed by the terminal mid-sequence, which then
+                        // still waits for the final byte (VT500 parser).
+                        CAN | SUB => ParseState::Ground,
+                        0x00..=0x1F => ParseState::Esc,
                         // Any other escape (two-char escapes, …) consumes its
                         // introducer byte and returns to ground.
+                        _ => ParseState::Ground,
+                    };
+                    break;
+                }
+                ParseState::EscIntermediate => {
+                    self.state = match b {
+                        ESC => ParseState::Esc,
+                        CAN | SUB => ParseState::Ground,
+                        0x00..=0x2F => ParseState::EscIntermediate,
+                        // The final byte, or a malformed sequence: either way
+                        // this byte ends it.
                         _ => ParseState::Ground,
                     };
                     break;
@@ -476,8 +565,11 @@ impl Osc133Scanner {
                 // a forged D does not re-arm this window.
                 if self.command_marker_allowed && self.zone != Zone::Output {
                     self.toggle_provenance_ok = command_is_glimps_toggle(cmd);
+                    self.redact_provenance_ok = command_is_glimps_redact_toggle(cmd);
                     self.command = Some(cmd.to_vec());
                     self.command_marker_allowed = false;
+                    self.glimps_hooks_seen = true;
+                    self.command_this_cycle = true;
                 }
             } else if let Some(cwd) = self.osc_buf.strip_prefix(CWD_OSC) {
                 // ACCEPTED RESIDUAL: the `7338` cwd marker legitimately arrives
@@ -485,6 +577,9 @@ impl Osc133Scanner {
                 // output), so it cannot be zone-guarded. Its injection risk is
                 // fully covered by the display sanitizer in `cmdline`/`mod`.
                 self.cwd = Some(cwd.to_vec());
+                self.glimps_hooks_seen = true;
+                self.cwd_marker_seen = true;
+                self.cwd_this_cycle = true;
             } else if let Some(raw) = self.osc_buf.strip_prefix(FORMAT_TOGGLE_OSC) {
                 // Provenance-gated (see FORMAT_TOGGLE_OSC): honored only while
                 // the current command cycle is a `glimps …` invocation.
@@ -496,19 +591,31 @@ impl Osc133Scanner {
                         _ => {}
                     }
                 }
+                if self.redact_provenance_ok {
+                    match raw {
+                        b"redact-on" => self.redact_toggle = Some(true),
+                        b"redact-off" => self.redact_toggle = Some(false),
+                        _ => {}
+                    }
+                }
             } else if let Some(raw) = self.osc_buf.strip_prefix(PIPELINE_STATUS_OSC) {
                 // Same timing as cwd: the shell emits this from precmd while the
                 // stream is still in Output. The payload is parsed as integers
                 // only; malformed or overlong data quietly produces no warning.
                 self.pipeline_statuses = parse_pipeline_statuses(raw);
+            } else if self.osc_buf.starts_with(b"133;D") && !self.end_is_ours() {
+                // Someone else's command end (fish 4's own, a terminal
+                // integration's): GLIMPS's arrives with its cwd marker.
             } else if let Some(exit) = parse_osc133_exit_code(&self.osc_buf) {
                 self.exit_code = Some(exit);
+                self.cwd_this_cycle = false;
                 self.zone = Zone::Unknown;
                 self.command_marker_allowed = false;
                 self.output_start_allowed = false;
                 // The glimps command's cycle is over; its toggle provenance
                 // must not linger into the following prompt zone.
                 self.toggle_provenance_ok = false;
+                self.redact_provenance_ok = false;
             } else if let Some(zone) = classify_osc133(&self.osc_buf) {
                 match zone {
                     Zone::Prompt | Zone::Input => {
@@ -520,19 +627,26 @@ impl Osc133Scanner {
                         // A new output zone needs an armed command cycle. This
                         // rejects both redundant C markers and D -> 7337 -> C
                         // re-entry from attacker-controlled command output.
-                        if self.output_start_allowed && self.zone != Zone::Output {
+                        if self.start_is_ours()
+                            && self.output_start_allowed
+                            && self.zone != Zone::Output
+                        {
                             self.zone = Zone::Output;
                             self.command_marker_allowed = false;
                             self.output_start_allowed = false;
+                            self.command_this_cycle = false;
+                            self.cwd_this_cycle = false;
                         }
                     }
                     Zone::Unknown => {
                         // D closes output but never arms another command. The
                         // next legitimate A/B marker does that.
+                        self.cwd_this_cycle = false;
                         self.zone = Zone::Unknown;
                         self.command_marker_allowed = false;
                         self.output_start_allowed = false;
                         self.toggle_provenance_ok = false;
+                        self.redact_provenance_ok = false;
                     }
                 }
             }
@@ -1147,6 +1261,103 @@ mod tests {
             si += 1;
         }
         s.zone()
+    }
+
+    /// fish 4's real order: its own `C;cmdline_url=…` before `fish_preexec`
+    /// (where GLIMPS's `7337` + `C` come from) and its own `D` before
+    /// `fish_postexec` (where GLIMPS's `7339`/`7338`/`D` come from).
+    #[test]
+    fn fish4_native_markers_do_not_frame_output() {
+        let mut s = Osc133Scanner::new();
+        // Startup prompt from GLIMPS's hook, then fish's own prompt start.
+        s.feed(b"\x1b]7339;0\x07\x1b]7338;/w\x07\x1b]133;D;0\x07\x1b]133;A\x07");
+        assert_eq!(s.take_exit_code(), Some(0));
+        s.feed(b"\x1b]133;A;special_key=1\x07prompt> ls\r\n");
+        // fish's own C, before the command is known: not an output start.
+        let segs = s.feed_segments(b"\x1b]133;C;cmdline_url=ls\x07");
+        assert!(!segs.contains(&Seg::OutputStart), "{segs:?}");
+        assert_eq!(s.zone(), Zone::Prompt);
+        // GLIMPS's own markers open the zone with the command captured.
+        let segs = s.feed_segments(b"\x1b]7337;ls\x07\x1b]133;C\x07");
+        assert!(segs.contains(&Seg::OutputStart));
+        assert_eq!(s.take_command().as_deref(), Some(&b"ls"[..]));
+        s.feed(b"a.txt\r\n");
+        // fish's own D, before GLIMPS has the result: output continues.
+        let segs = s.feed_segments(b"\x1b]133;D;0\x07");
+        assert!(!segs.contains(&Seg::OutputEnd), "{segs:?}");
+        assert_eq!(s.zone(), Zone::Output);
+        assert_eq!(s.take_exit_code(), None);
+        // GLIMPS's end, after its cwd marker, closes it with the real status.
+        let segs = s.feed_segments(b"\x1b]7339;2\x07\x1b]7338;/w\x07\x1b]133;D;2\x07");
+        assert!(segs.contains(&Seg::OutputEnd));
+        assert_eq!(s.take_exit_code(), Some(2));
+        // A second end marker in the same cycle is someone else's.
+        s.feed(b"\x1b]133;D;9\x07");
+        assert_eq!(s.take_exit_code(), None);
+    }
+
+    #[test]
+    fn foreign_markers_still_frame_output_without_glimps_hooks() {
+        // A shell with only a third-party integration (no 7337/7338 ever):
+        // its markers keep working exactly as before.
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b]133;A\x07$ ls\r\n");
+        let segs = s.feed_segments(b"\x1b]133;C;\x07out\r\n\x1b]133;D;0\x07");
+        assert!(segs.contains(&Seg::OutputStart));
+        assert!(segs.contains(&Seg::OutputEnd));
+        assert_eq!(s.take_exit_code(), Some(0));
+    }
+
+    #[test]
+    fn output_cannot_end_or_restart_a_glimps_cycle_with_bare_markers() {
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b]7338;/w\x07\x1b]133;D;0\x07\x1b]133;A\x07");
+        s.feed(b"\x1b]7337;cat x\x07\x1b]133;C\x07");
+        assert_eq!(s.zone(), Zone::Output);
+        // Command output carrying a bare D, then A + C: inert.
+        let segs = s.feed_segments(b"\x1b]133;D;0\x07\x1b]133;C\x07more\r\n");
+        assert!(!segs.contains(&Seg::OutputEnd), "{segs:?}");
+        assert_eq!(s.zone(), Zone::Output);
+    }
+
+    #[test]
+    fn escapes_with_intermediate_bytes_are_one_sequence() {
+        // `tput sgr0` on xterm is `ESC ( B ESC [ m`: the `B` belongs to the
+        // escape, not to the output.
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b]133;A\x07\x1b]7337;x\x07\x1b]133;C\x07");
+        let chunk = b"\x1b(B\x1b[mhi\x1b#8\x1b %Gz\x1b( \x1b(0q";
+        let segs = s.feed_segments(chunk);
+        let output: Vec<u8> = segs
+            .iter()
+            .filter_map(|seg| match *seg {
+                Seg::Output(a, b) => Some(&chunk[a..b]),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(output, b"hizq");
+    }
+
+    #[test]
+    fn controls_inside_an_escape_do_not_end_it() {
+        // A terminal executes a C0 control met mid-escape and keeps waiting
+        // for the final byte; CAN and SUB cancel the sequence instead.
+        let mut s = Osc133Scanner::new();
+        s.feed(b"\x1b]133;A\x07\x1b]7337;x\x07\x1b]133;C\x07");
+        let chunk = b"\x1b#\n8a\x1b\r7b\x1b(\x18Bc";
+        let segs = s.feed_segments(chunk);
+        let output: Vec<u8> = segs
+            .iter()
+            .filter_map(|seg| match *seg {
+                Seg::Output(a, b) => Some(&chunk[a..b]),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(output, b"abBc");
     }
 
     proptest::proptest! {

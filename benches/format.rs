@@ -68,6 +68,24 @@ fn brew_outdated_stream() -> Vec<u8> {
     [head.as_slice(), C, &row.repeat(128), D].concat()
 }
 
+/// Log-shaped lines with timestamps (every `:` is a link candidate), URLs and
+/// `file:line` locations: the per-line cost of `[links]`, run with links on
+/// and off.
+fn links_stream() -> Vec<u8> {
+    let rows = b"2026-10-18T12:30:45Z INFO fetched https://example.com/api/v1/items?page=2 in 12ms
+src/format/mod.rs:1204:17: warning: unused variable `x`
+  File \"/srv/app/main.py\", line 88, in handler
+plain line without any target at all, just words
+";
+    [C, &rows.repeat(32), D].concat()
+}
+
+fn links_config(mode: glimps::config::LinksMode) -> glimps::config::Config {
+    let mut config = glimps::config::Config::default();
+    config.links.mode = mode;
+    config
+}
+
 fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("process");
 
@@ -89,6 +107,29 @@ fn bench(c: &mut Criterion) {
             });
         });
     }
+
+    let links = links_stream();
+    group.throughput(Throughput::Bytes(links.len() as u64));
+    for (name, mode) in [
+        ("links_on", glimps::config::LinksMode::On),
+        ("links_off", glimps::config::LinksMode::Off),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let mut f = Formatter::with_config(links_config(mode));
+                black_box(f.process(black_box(&links)).len())
+            });
+        });
+    }
+    // The same stream with screen-share redaction on (links off).
+    group.bench_function("redact_on", |b| {
+        b.iter(|| {
+            let mut config = links_config(glimps::config::LinksMode::Off);
+            config.redact.enabled = true;
+            let mut f = Formatter::with_config(config);
+            black_box(f.process(black_box(&links)).len())
+        });
+    });
 
     group.finish();
 }

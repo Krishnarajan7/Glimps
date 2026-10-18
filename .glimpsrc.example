@@ -52,6 +52,43 @@ explain = true      # false = raw exit codes only, no decode text
 pin_errors = true   # quote the first error line of failed output in the
                     # footer ("↳ error[E0308]: … (↑ 47 lines up)"); false = off
 
+# Completion notices: a desktop notification when a long command finishes
+# ("✓ cargo build finished in 4m12s"). Off by default. The text names the
+# program, plus its subcommand for well-known tools (`cargo build`), never
+# other arguments or any output.
+# No notice for Ctrl-C, full-screen/interactive programs (vim, ssh, less),
+# secret-reading commands, or a command you typed into in its last 10 seconds.
+[notify]
+enabled = false     # true = notify after long commands
+after_seconds = 30  # only commands that ran at least this long (1..86400)
+method = "auto"     # "auto" = OSC 9 in iTerm2/WezTerm/Ghostty, OSC 99 in kitty,
+                    # OSC 777 in foot, the bell elsewhere (incl. tmux/screen);
+                    # or force "osc9", "osc777", "osc99" or "bell".
+                    # `glimps doctor` shows what auto picked.
+
+# Screen-share mode: mask secrets in command output (vendor tokens such as
+# ghp_…/sk_live_…/AKIA…, JWTs, URL passwords, Bearer values, secret-named
+# fields like API_KEY=…, private key bodies), one `*` per character. Best
+# effort: never what you type, never inside vim/less/ssh, never a token split
+# by the program's own coloring. `glimps redact on|off` toggles one session.
+[redact]
+enabled = false
+
+# Clickable links (OSC 8 hyperlinks) on URLs and file:line locations in plain
+# output and in the pinned error line. The visible text never changes, and a
+# link always points at the text it is on. Never added to output that colors
+# itself, or for secret-reading and interactive commands.
+[links]
+mode = "auto"    # "auto" = only in terminals known to support OSC 8 (iTerm2,
+                 # WezTerm, Ghostty, kitty, Alacritty, foot, VS Code, Windows
+                 # Terminal, GNOME Terminal), never in tmux/screen;
+                 # "on" = always; "off" = never. `glimps doctor` shows the result.
+urls = true      # link http:// and https:// URLs
+files = true     # link path:line[:column] and Python `File "…", line N`
+editor = "file"  # what a file link opens: "file" (file://, no line number),
+                 # "vscode", "cursor", "zed", or a template such as
+                 # "myeditor://open?path={path}&line={line}&column={column}"
+
 # Size limits (bytes). These bound memory and latency; they are clamped to safe
 # ranges on load, so you can't accidentally make buffering unbounded.
 [limits]

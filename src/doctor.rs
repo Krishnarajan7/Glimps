@@ -63,6 +63,7 @@ pub fn run() -> Result<i32> {
         None => (None, false),
     };
     let home = crate::config::home_dir();
+    let session_config = quiet_config(config_path().as_deref());
     let mut checks = vec![
         Check::pass(
             "binary",
@@ -79,6 +80,9 @@ pub fn run() -> Result<i32> {
         check_shell(shell.as_deref(), defaulted),
         check_integration(shell.as_deref(), home.as_deref()),
         check_config(config_path().as_deref()),
+        check_notify(&session_config, |key| env::var(key).ok()),
+        check_links(&session_config, |key| env::var(key).ok()),
+        check_redact(&session_config),
         check_path(&current_exe, env::var_os("PATH").as_deref()),
     ];
     let rc = rc_text(shell.as_deref(), home.as_deref());
@@ -184,6 +188,9 @@ pub(crate) fn integration_path(shell: &Path, home: Option<&Path>) -> Option<Path
                 .join(".zshrc"),
         ),
         "bash" => Some(home.join(".bashrc")),
+        // fish reads `conf.d` before `config.fish`, so a GLIMPS line there
+        // re-execs before any other configuration runs (nothing runs twice).
+        "fish" => Some(fish_config_dir(home).join("conf.d").join("00-glimps.fish")),
         // PowerShell's `$PROFILE` lives under Documents, which Windows may
         // redirect (OneDrive). Only the shell itself knows the real path, so
         // `glimps doctor` reports the conventional location and `glimps setup`
@@ -202,6 +209,21 @@ pub(crate) fn integration_path(shell: &Path, home: Option<&Path>) -> Option<Path
     }
 }
 
+/// `$XDG_CONFIG_HOME/fish`, else `~/.config/fish`.
+pub(crate) fn fish_config_dir(home: &Path) -> PathBuf {
+    fish_config_dir_in(home, env::var_os("XDG_CONFIG_HOME"))
+}
+
+/// [`fish_config_dir`] with the environment passed in. fish itself ignores a
+/// relative `XDG_CONFIG_HOME`, and so does this.
+fn fish_config_dir_in(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> PathBuf {
+    xdg_config_home
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home.join(".config"))
+        .join("fish")
+}
+
 fn check_integration(shell: Option<&Path>, home: Option<&Path>) -> Check {
     let Some(shell) = shell else {
         return Check::fail("integration", "cannot locate an rc file without SHELL");
@@ -213,6 +235,29 @@ fn check_integration(shell: Option<&Path>, home: Option<&Path>) -> Check {
         );
     };
     let name = shell_name(shell).unwrap_or_default();
+    // A fish line in `config.fish` works too; it just runs after `conf.d`.
+    if name == "fish" {
+        if let Some(config) = home.map(|home| fish_config_dir(home).join("config.fish")) {
+            if let Ok(Some(text)) = read_small_text(&config) {
+                if integration_line_index(&text, name).is_some()
+                    && !matches!(read_small_text(&path), Ok(Some(own)) if integration_line_index(&own, name).is_some())
+                {
+                    return Check::warning(
+                        "integration",
+                        format!(
+                            "found in {}; {} runs before it, so conf.d snippets run twice per \
+                             session — move the line to {}",
+                            config.display(),
+                            path.parent()
+                                .map(|dir| dir.display().to_string())
+                                .unwrap_or_default(),
+                            path.display()
+                        ),
+                    );
+                }
+            }
+        }
+    }
     match read_small_text(&path) {
         Ok(Some(text)) if integration_line_index(&text, name).is_some() => {
             Check::pass("integration", format!("found in {}", path.display()))
@@ -402,6 +447,91 @@ fn check_config(path: Option<&Path>) -> Check {
     }
 }
 
+/// The configuration a session would run with, without the stderr warning
+/// `Config::load` prints for a broken file (`check_config` reports that).
+fn quiet_config(path: Option<&Path>) -> Config {
+    let mut config = path
+        .and_then(|path| read_small_text(path).ok().flatten())
+        .and_then(|text| Config::parse(&text).ok())
+        .unwrap_or_default();
+    config.clamp_limits();
+    config
+}
+
+/// Whether completion notices are on and how they will be sent. `auto` is
+/// resolved against the same environment the session sees, so the report
+/// names the sequence actually used.
+fn check_notify(config: &Config, env: impl Fn(&str) -> Option<String>) -> Check {
+    let notify = &config.notify;
+    if !notify.enabled {
+        return Check::pass("notify", "off (opt in with [notify] enabled = true)");
+    }
+    let backend = crate::format::resolve_notify_backend(notify.method, env);
+    let how = if notify.method == crate::config::NotifyMethod::Auto {
+        "chosen for this terminal"
+    } else {
+        "set in config"
+    };
+    Check::pass(
+        "notify",
+        format!(
+            "commands over {}s notify via {} ({how})",
+            notify.after_seconds,
+            backend.describe()
+        ),
+    )
+}
+
+/// Whether secret masking starts on in every session.
+fn check_redact(config: &Config) -> Check {
+    Check::pass(
+        "redact",
+        if config.redact.enabled {
+            "on in every session (best effort; `glimps redact off` stops it for one)"
+        } else {
+            "off (`glimps redact on` masks secrets for one session)"
+        },
+    )
+}
+
+/// Whether output gets clickable links here, and what a file link opens. A
+/// refused `editor` template is a warning: links still work, as `file://`.
+fn check_links(config: &Config, env: impl Fn(&str) -> Option<String>) -> Check {
+    use crate::config::LinksMode;
+    let links = &config.links;
+    if !(links.urls || links.files) {
+        return Check::pass("links", "off: urls and files are both false");
+    }
+    if !crate::format::links_enabled(links.mode, env) {
+        return Check::pass(
+            "links",
+            match links.mode {
+                LinksMode::Off => "off in config",
+                _ => "off: this terminal is not known to support OSC 8 (mode = \"on\" forces it)",
+            },
+        );
+    }
+    let kinds = match (links.urls, links.files) {
+        (true, true) => "URLs and file:line",
+        (true, false) => "URLs",
+        _ => "file:line",
+    };
+    match crate::format::links_file_target(&links.editor) {
+        Ok(_) if !links.files => Check::pass("links", format!("{kinds} are clickable")),
+        Ok(_) => Check::pass(
+            "links",
+            format!("{kinds} are clickable; files open with {:?}", links.editor),
+        ),
+        Err(why) => Check::warning(
+            "links",
+            format!(
+                "{kinds} are clickable, but editor {:?} was refused ({why}); files open as file://",
+                links.editor
+            ),
+        ),
+    }
+}
+
 pub(crate) fn read_small_text(path: &Path) -> std::io::Result<Option<String>> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -513,6 +643,13 @@ mod tests {
         path
     }
 
+    fn temp_dir(name: &str) -> PathBuf {
+        let path = temp_file(name, "");
+        fs::remove_file(&path).unwrap();
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
     #[test]
     fn recognizes_supported_shells_by_basename() {
         assert_eq!(
@@ -531,7 +668,11 @@ mod tests {
             .detail
             .contains("SHELL unset"));
         assert_eq!(
-            check_shell(Some(Path::new("/bin/fish")), false).level,
+            check_shell(Some(Path::new("/opt/homebrew/bin/fish")), false).level,
+            Level::Pass
+        );
+        assert_eq!(
+            check_shell(Some(Path::new("/bin/tcsh")), false).level,
             Level::Fail
         );
         assert_eq!(
@@ -549,6 +690,143 @@ mod tests {
         assert_eq!(check_config(Some(&invalid)).level, Level::Fail);
         fs::remove_file(valid).unwrap();
         fs::remove_file(invalid).unwrap();
+    }
+
+    #[test]
+    fn reports_notify_state_and_the_resolved_sequence() {
+        let ghostty = |key: &str| (key == "TERM_PROGRAM").then(|| "ghostty".to_string());
+        let off = check_notify(&Config::default(), ghostty);
+        assert_eq!(off.level, Level::Pass);
+        assert!(off.detail.starts_with("off"), "{}", off.detail);
+
+        let mut config = Config::default();
+        config.notify.enabled = true;
+        let on = check_notify(&config, ghostty);
+        assert_eq!(
+            on.detail,
+            "commands over 30s notify via OSC 9 (chosen for this terminal)"
+        );
+        let plain = check_notify(&config, |_| None);
+        assert!(
+            plain.detail.contains("the terminal bell"),
+            "{}",
+            plain.detail
+        );
+
+        config.notify.method = crate::config::NotifyMethod::Osc777;
+        config.notify.after_seconds = 90;
+        assert_eq!(
+            check_notify(&config, ghostty).detail,
+            "commands over 90s notify via OSC 777 (set in config)"
+        );
+
+        let file = temp_file("notify", "[notify]\nenabled = true\nafter_seconds = 0\n");
+        let loaded = quiet_config(Some(&file));
+        assert!(loaded.notify.enabled);
+        assert_eq!(loaded.notify.after_seconds, 1);
+        fs::remove_file(file).unwrap();
+        let broken = temp_file("notify-broken", "[notify]\nenable = true\n");
+        assert!(!quiet_config(Some(&broken)).notify.enabled);
+        fs::remove_file(broken).unwrap();
+    }
+
+    #[test]
+    fn reports_redact_state() {
+        let mut config = Config::default();
+        assert!(check_redact(&config).detail.starts_with("off"));
+        config.redact.enabled = true;
+        assert!(check_redact(&config)
+            .detail
+            .starts_with("on in every session"));
+    }
+
+    #[test]
+    fn reports_links_state_and_refused_templates() {
+        let ghostty = |key: &str| (key == "TERM_PROGRAM").then(|| "ghostty".to_string());
+        let apple = |key: &str| (key == "TERM_PROGRAM").then(|| "Apple_Terminal".to_string());
+        let mut config = Config::default();
+        let on = check_links(&config, ghostty);
+        assert_eq!(on.level, Level::Pass);
+        assert_eq!(
+            on.detail,
+            "URLs and file:line are clickable; files open with \"file\""
+        );
+        let off = check_links(&config, apple);
+        assert!(
+            off.detail.contains("not known to support OSC 8"),
+            "{}",
+            off.detail
+        );
+
+        config.links.mode = crate::config::LinksMode::On;
+        assert_eq!(check_links(&config, apple).level, Level::Pass);
+        config.links.editor = "my editor://{path}".to_string();
+        let refused = check_links(&config, apple);
+        assert_eq!(refused.level, Level::Warning);
+        assert!(
+            refused.detail.contains("printable ASCII"),
+            "{}",
+            refused.detail
+        );
+        config.links.mode = crate::config::LinksMode::Off;
+        assert_eq!(check_links(&config, ghostty).detail, "off in config");
+    }
+
+    #[test]
+    fn fish_integration_lives_in_conf_d() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            fish_config_dir_in(home, None),
+            Path::new("/home/u/.config/fish")
+        );
+        assert_eq!(
+            fish_config_dir_in(home, Some("/xdg".into())),
+            Path::new("/xdg/fish")
+        );
+        assert_eq!(
+            fish_config_dir_in(home, Some("relative".into())),
+            Path::new("/home/u/.config/fish")
+        );
+        assert!(integration_line_index(
+            "command -q glimps; and glimps init fish | source\n",
+            "fish"
+        )
+        .is_some());
+        assert!(integration_line_index("starship init fish | source\n", "fish").is_none());
+        if env::var_os("XDG_CONFIG_HOME").is_some() {
+            return;
+        }
+        let home = temp_dir("fish-home");
+        let fish = home.join(".config").join("fish");
+        fs::create_dir_all(fish.join("conf.d")).unwrap();
+        let shell = Path::new("/usr/local/bin/fish");
+        assert_eq!(
+            integration_path(shell, Some(&home)).unwrap(),
+            fish.join("conf.d").join("00-glimps.fish")
+        );
+        assert_eq!(
+            check_integration(Some(shell), Some(&home)).level,
+            Level::Fail
+        );
+        // In config.fish it works, but conf.d snippets run twice: a warning.
+        fs::write(
+            fish.join("config.fish"),
+            "command -q glimps; and glimps init fish | source\n",
+        )
+        .unwrap();
+        let check = check_integration(Some(shell), Some(&home));
+        assert_eq!(check.level, Level::Warning, "{}", check.detail);
+        assert!(check.detail.contains("00-glimps.fish"), "{}", check.detail);
+        fs::write(
+            fish.join("conf.d").join("00-glimps.fish"),
+            "command -q glimps; and glimps init fish | source\n",
+        )
+        .unwrap();
+        assert_eq!(
+            check_integration(Some(shell), Some(&home)).level,
+            Level::Pass
+        );
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

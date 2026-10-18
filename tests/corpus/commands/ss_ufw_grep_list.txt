@@ -1,0 +1,23 @@
+State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess
+LISTEN 0      511          0.0.0.0:80         0.0.0.0:*    users:(("nginx",pid=1100043,fd=6),("nginx",pid=1100042,fd=6))
+LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=1079575,fd=3))
+LISTEN 0      200        127.0.0.1:5432       0.0.0.0:*    users:(("postgres",pid=1183343,fd=7))
+LISTEN 0      4096   127.0.0.53%lo:53         0.0.0.0:*    users:(("systemd-resolve",pid=1021,fd=14))
+LISTEN 0      511                *:3000             *:*    users:(("PM2 v7.0.1: God",pid=1601,fd=20))
+LISTEN 0      511             [::]:443           [::]:*    users:(("nginx",pid=1100043,fd=8))
+LISTEN 0      511            [::1]:6379          [::]:*    users:(("redis-server",pid=1159701,fd=7))
+Status: active
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW       Anywhere
+80/tcp                     ALLOW       Anywhere
+443/tcp                    ALLOW       Anywhere
+22/tcp (v6)                ALLOW       Anywhere (v6)
+80/tcp (v6)                ALLOW       Anywhere (v6)
+443/tcp (v6)               ALLOW       Anywhere (v6)
+
+/etc/nginx/sites-available/example:38:        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+/etc/nginx/conf.d/limits.conf:1:limit_req_zone  $binary_remote_addr zone=auth:10m rate=5r/m;
+/etc/nginx/proxy_params:3:proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+PermitRootLogin yes

@@ -38,10 +38,8 @@ pub fn run(shell_arg: Option<&str>) -> Result<i32> {
         eprintln!("  {}", integration_line(&name));
         return Ok(2);
     }
-    if !matches!(name.as_str(), "zsh" | "bash") {
-        eprintln!(
-            "glimps: {name} is not supported yet (zsh and bash are). fish is on the roadmap."
-        );
+    if !matches!(name.as_str(), "zsh" | "bash" | "fish") {
+        eprintln!("glimps: {name} is not supported yet (zsh, bash and fish are).");
         return Ok(2);
     }
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -108,6 +106,10 @@ pub fn run(shell_arg: Option<&str>) -> Result<i32> {
         return Ok(0);
     }
 
+    // fish's `conf.d` may not exist yet; the file itself is GLIMPS's own.
+    if let Some(dir) = rc.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    }
     if let Some(text) = &existing {
         let backup =
             write_backup(&rc, text).with_context(|| format!("cannot back up {}", rc.display()))?;
@@ -141,6 +143,7 @@ fn integration_line(shell: &str) -> String {
         "pwsh" | "powershell" => format!(
             "if (Get-Command glimps -ErrorAction SilentlyContinue) {{ glimps init {shell} | Out-String | Invoke-Expression }}"
         ),
+        "fish" => "command -q glimps; and glimps init fish | source".to_string(),
         _ => format!("command -v glimps >/dev/null 2>&1 && eval \"$(glimps init {shell})\""),
     }
 }
@@ -284,6 +287,19 @@ mod tests {
         assert!(!line.contains("eval"));
         assert!(!line.contains("command -v"));
         assert!(integration_line("zsh").contains("eval \"$(glimps init zsh)\""));
+    }
+
+    #[test]
+    fn fish_integration_line_is_fish_syntax() {
+        let line = integration_line("fish");
+        assert_eq!(line, "command -q glimps; and glimps init fish | source");
+        assert!(!line.contains("&&") && !line.contains("$("));
+        let updated = insert_integration("", &line);
+        assert!(updated.ends_with("glimps init fish | source\n"));
+        assert!(crate::doctor::has_active_integration(
+            &updated,
+            "glimps init fish"
+        ));
     }
 
     #[test]

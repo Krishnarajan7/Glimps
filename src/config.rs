@@ -29,6 +29,20 @@
 //! explain = true      # decode exit codes ("command not found", SIGKILL, …)
 //! pin_errors = true   # quote the first error line of failed output
 //!
+//! [notify]
+//! enabled = false     # desktop notification when a long command finishes
+//! after_seconds = 30  # only commands that ran at least this long
+//! method = "auto"     # "auto", "osc9", "osc777", "osc99" or "bell"
+//!
+//! [redact]
+//! enabled = false     # mask secrets in output (best effort; `glimps redact on`)
+//!
+//! [links]
+//! mode = "auto"       # clickable URLs and file:line (OSC 8): "auto", "on", "off"
+//! urls = true
+//! files = true
+//! editor = "file"     # "file", "vscode", "cursor", "zed" or a URL template
+//!
 //! [limits]
 //! buffer_cap = 1048576   # max bytes buffered to detect JSON/HTML (1 MiB)
 //! line_cap   = 65536     # max bytes of one un-terminated streamed line (64 KiB)
@@ -45,6 +59,7 @@ const DEFAULT_BUFFER_CAP: usize = 1024 * 1024;
 const DEFAULT_LINE_CAP: usize = 64 * 1024;
 const DEFAULT_SNIFF_CAP: usize = 64;
 const DEFAULT_PRETTY_MAX_LINES: usize = 4000;
+const DEFAULT_NOTIFY_AFTER_SECONDS: u64 = 30;
 
 /// Top-level configuration. Cloned once into the reader thread at startup.
 #[derive(Debug, Clone, Deserialize)]
@@ -70,6 +85,9 @@ pub struct Config {
     pub sensitive_commands: Vec<String>,
     pub formatters: Formatters,
     pub failures: Failures,
+    pub notify: Notify,
+    pub links: Links,
+    pub redact: Redact,
     pub limits: Limits,
 }
 
@@ -92,6 +110,86 @@ pub struct Failures {
     /// cause is visible without scrolling. Detection is deliberately
     /// conservative — no confident match, no quote.
     pub pin_errors: bool,
+}
+
+/// Completion notices for long-running commands. Opt-in: a notification
+/// leaves the terminal for the desktop, so nothing is sent until the user
+/// asks for it. The notice names the program, plus its subcommand for
+/// well-known tools (`cargo build`), never other arguments or any output.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Notify {
+    /// Master switch for completion notices. Off by default.
+    pub enabled: bool,
+    /// Commands that finish sooner than this many seconds never notify.
+    /// Clamped to `1..=86400` at load.
+    pub after_seconds: u64,
+    /// How the notice reaches the desktop.
+    pub method: NotifyMethod,
+}
+
+/// Screen-share redaction: mask secrets (vendor tokens, JWTs, URL passwords,
+/// secret-named fields, private keys) in output GLIMPS formats. Best effort,
+/// see `format::redact` for what it can never reach. Off by default;
+/// `glimps redact on|off` toggles it for one session.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Redact {
+    /// Mask secrets from the start of every session.
+    pub enabled: bool,
+}
+
+/// Clickable links (OSC 8 hyperlinks) on URLs and `file:line` locations in
+/// plain output and in the pinned error line. The visible text never
+/// changes: a link is an invisible escape around text that is already there,
+/// and its target is always that text (a path resolved against the
+/// command's working directory).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Links {
+    /// When to add links.
+    pub mode: LinksMode,
+    /// Link `http://` and `https://` URLs.
+    pub urls: bool,
+    /// Link `path:line[:column]` locations and Python `File "…", line N`
+    /// frames.
+    pub files: bool,
+    /// What a file link opens: `"file"` (a `file://` URL, line number not
+    /// carried), `"vscode"`, `"cursor"`, `"zed"`, or a template such as
+    /// `"myeditor://open?path={path}&line={line}&column={column}"`. An
+    /// invalid template falls back to `"file"` (`glimps doctor` says so).
+    pub editor: String,
+}
+
+/// When links are added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinksMode {
+    /// Only in terminals known to support OSC 8 (see `format::links`).
+    Auto,
+    /// Always. Terminals without OSC 8 support are meant to ignore it.
+    On,
+    /// Never.
+    Off,
+}
+
+/// The escape sequence a completion notice is sent as. Terminals that do not
+/// understand a sequence ignore it, so an explicit choice is safe to try;
+/// `auto` only picks a desktop-notification sequence for terminals known to
+/// support it and rings the bell everywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyMethod {
+    /// Pick from the terminal GLIMPS runs in (see `format::notify`).
+    Auto,
+    /// `OSC 9` (iTerm2, WezTerm, Ghostty).
+    Osc9,
+    /// `OSC 777;notify` (foot, WezTerm, Ghostty, some VTE builds).
+    Osc777,
+    /// `OSC 99` (kitty's desktop-notification protocol).
+    Osc99,
+    /// A plain BEL: the terminal's own bell, badge or dock bounce.
+    Bell,
 }
 
 /// Success-footer loudness. Only exit 0 is affected: failures stay loud, and
@@ -166,7 +264,31 @@ impl Default for Config {
             sensitive_commands: Vec::new(),
             formatters: Formatters::default(),
             failures: Failures::default(),
+            notify: Notify::default(),
+            links: Links::default(),
+            redact: Redact::default(),
             limits: Limits::default(),
+        }
+    }
+}
+
+impl Default for Links {
+    fn default() -> Self {
+        Links {
+            mode: LinksMode::Auto,
+            urls: true,
+            files: true,
+            editor: "file".to_string(),
+        }
+    }
+}
+
+impl Default for Notify {
+    fn default() -> Self {
+        Notify {
+            enabled: false,
+            after_seconds: DEFAULT_NOTIFY_AFTER_SECONDS,
+            method: NotifyMethod::Auto,
         }
     }
 }
@@ -258,11 +380,14 @@ impl Config {
 
     /// Clamp limits to sane bounds so a hand-edited (or huge) value can't make
     /// buffering effectively unbounded or pathologically tiny. `sniff_cap = 0`
-    /// is allowed (it just means "never wait on leading whitespace").
-    fn clamp_limits(&mut self) {
+    /// is allowed (it just means "never wait on leading whitespace"). The
+    /// notify threshold is clamped here too, for the same hand-edit reason.
+    pub(crate) fn clamp_limits(&mut self) {
         self.limits.buffer_cap = self.limits.buffer_cap.clamp(4 * 1024, 64 * 1024 * 1024);
         self.limits.line_cap = self.limits.line_cap.clamp(256, 16 * 1024 * 1024);
         self.limits.sniff_cap = self.limits.sniff_cap.min(64 * 1024);
+        // `0` would notify after every command; a day is the useful ceiling.
+        self.notify.after_seconds = self.notify.after_seconds.clamp(1, 86_400);
     }
 }
 
@@ -300,7 +425,7 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 }
 
 /// Shells GLIMPS ships an integration for (`glimps init <name>`).
-pub const SUPPORTED_SHELLS: &[&str] = &["zsh", "bash", "pwsh", "powershell"];
+pub const SUPPORTED_SHELLS: &[&str] = &["zsh", "bash", "fish", "pwsh", "powershell"];
 
 /// The shell's bare name: the executable's basename without a Windows `.exe`
 /// suffix (`/bin/zsh` -> `zsh`, `C:\\...\\pwsh.exe` -> `pwsh`). Windows paths
@@ -536,5 +661,43 @@ mod tests {
         assert_eq!(c.limits.buffer_cap, 64 * 1024 * 1024);
         assert_eq!(c.limits.line_cap, 256);
         assert_eq!(c.limits.sniff_cap, 64 * 1024);
+    }
+
+    #[test]
+    fn notify_is_opt_in_and_parses() {
+        let c = Config::default();
+        assert!(!c.notify.enabled);
+        assert_eq!(c.notify.after_seconds, 30);
+        assert_eq!(c.notify.method, NotifyMethod::Auto);
+
+        let c =
+            Config::parse("[notify]\nenabled = true\nafter_seconds = 120\nmethod = \"osc777\"\n")
+                .unwrap();
+        assert!(c.notify.enabled);
+        assert_eq!(c.notify.after_seconds, 120);
+        assert_eq!(c.notify.method, NotifyMethod::Osc777);
+        for (text, method) in [
+            ("osc9", NotifyMethod::Osc9),
+            ("osc99", NotifyMethod::Osc99),
+            ("bell", NotifyMethod::Bell),
+            ("auto", NotifyMethod::Auto),
+        ] {
+            let c = Config::parse(&format!("[notify]\nmethod = \"{text}\"\n")).unwrap();
+            assert_eq!(c.notify.method, method);
+        }
+        assert!(Config::parse("[notify]\nmethod = \"osc52\"\n").is_err());
+        assert!(Config::parse("[notify]\nafter = 30\n").is_err());
+        assert!(Config::parse("[notify]\nafter_seconds = -1\n").is_err());
+    }
+
+    #[test]
+    fn notify_threshold_is_clamped() {
+        let mut c = Config::default();
+        c.notify.after_seconds = 0;
+        c.clamp_limits();
+        assert_eq!(c.notify.after_seconds, 1);
+        c.notify.after_seconds = u64::MAX;
+        c.clamp_limits();
+        assert_eq!(c.notify.after_seconds, 86_400);
     }
 }

@@ -135,6 +135,15 @@ fn spawn(shell: &str, zdot: Option<&Path>) -> Session {
 }
 
 fn spawn_with_config(shell: &str, zdot: Option<&Path>, config: Option<&Path>) -> Session {
+    spawn_with_env(shell, zdot, config, &[])
+}
+
+fn spawn_with_env(
+    shell: &str,
+    zdot: Option<&Path>,
+    config: Option<&Path>,
+    extra_env: &[(&str, &std::ffi::OsStr)],
+) -> Session {
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 24,
@@ -157,6 +166,18 @@ fn spawn_with_config(shell: &str, zdot: Option<&Path>, config: Option<&Path>) ->
     cmd.env("SHELL", shell);
     cmd.env("GLIMPS", "1");
     cmd.env("TERM", "xterm-256color");
+    // Terminal identity drives `auto` detection ([links], [notify]); the
+    // terminal running the tests must not change what GLIMPS emits.
+    for var in [
+        "TERM_PROGRAM",
+        "KITTY_WINDOW_ID",
+        "ALACRITTY_WINDOW_ID",
+        "WT_SESSION",
+        "VTE_VERSION",
+        "TMUX",
+    ] {
+        cmd.env_remove(var);
+    }
     if let Some(path) = std::env::var_os("PATH") {
         cmd.env("PATH", path);
     }
@@ -172,6 +193,9 @@ fn spawn_with_config(shell: &str, zdot: Option<&Path>, config: Option<&Path>) ->
         }
     }
 
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
     let child = pair.slave.spawn_command(cmd).expect("spawn glimps");
     drop(pair.slave); // the child holds its own handle now
 
@@ -218,6 +242,19 @@ fn zsh_path() -> Option<String> {
 fn bash_path() -> Option<String> {
     let out = std::process::Command::new("sh")
         .args(["-c", "command -v bash"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+/// The absolute path to `fish`, or `None` if it isn't installed.
+fn fish_path() -> Option<String> {
+    let out = std::process::Command::new("sh")
+        .args(["-c", "command -v fish"])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -1127,4 +1164,622 @@ fn off_and_on_toggle_formatting_end_to_end() {
 
     s.write(b"exit\n");
     let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+/// A command line typed with literal control bytes (Ctrl-V quoted insert, or a
+/// paste) must never re-emerge as live escape sequences on the user's real
+/// terminal. The line editor itself only ever *displays* such bytes as `^G` /
+/// `^[`; the integration's preexec re-sends the command inside private OSC
+/// 7337, so a raw BEL there would end the OSC early and the ESC sequence that
+/// follows (here an OSC 52 clipboard write) would reach the terminal verbatim.
+fn assert_command_control_bytes_are_neutralized(shell: &str, home: &Path) {
+    let mut s = spawn(shell, Some(home));
+    assert_prompt_ready(&s);
+    // `:` is a no-op and the payload is one quoted word, so only the command
+    // marker can leak it. Each control byte is preceded by Ctrl-V (0x16) so
+    // both zle and readline insert it literally instead of acting on it.
+    s.write(b": 'ctl-probe \x16\x07\x16\x1b]52;c;cHduZWQ=\x16\x07 tail'\n");
+    // The arithmetic makes the sentinel appear only as real output, never in
+    // the echoed command line.
+    s.write(b"echo after-ctl-$((6*7))\n");
+    assert!(
+        s.wait_for(b"after-ctl-42", FORMAT_BUDGET),
+        "sentinel after the control-byte command did not appear. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    let out = s.snapshot();
+    assert!(
+        !contains(&out, b"\x1b]52;"),
+        "an escape sequence from the typed command reached the terminal. Captured: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+    // The marker still carries the command, with each control byte replaced
+    // by `?`, so the header and bypass-by-name keep working.
+    assert!(
+        contains(&out, b"\x1b]7337;: 'ctl-probe ??]52;c;cHduZWQ=? tail'\x07"),
+        "the command marker was not sent with its controls neutralized. Captured: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+    s.write(b"exit\n");
+    assert!(
+        s.wait_exit(EXIT_BUDGET),
+        "shell did not exit after the probe. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+}
+
+#[test]
+fn zsh_command_control_bytes_never_reach_the_terminal() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    assert_command_control_bytes_are_neutralized(&zsh, zdot.path());
+}
+
+#[test]
+fn bash_command_control_bytes_never_reach_the_terminal() {
+    let Some(bash) = bash_path() else {
+        eprintln!("skipping: bash not available");
+        return;
+    };
+    let home = BashHome::new();
+    assert_command_control_bytes_are_neutralized(&bash, home.path());
+}
+
+fn count(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
+}
+
+/// Wait until the shell has reported `n` command ends in total.
+fn wait_for_command_ends(s: &Session, n: usize) -> bool {
+    let end = Instant::now() + FORMAT_BUDGET;
+    while Instant::now() < end {
+        if count(&s.snapshot(), b"\x1b]133;D") >= n {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+#[test]
+fn long_command_sends_a_completion_notice_end_to_end() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let config_path =
+        std::env::temp_dir().join(format!("glimps-notify-{}-{n}.toml", std::process::id()));
+    std::fs::write(
+        &config_path,
+        b"[notify]\nenabled = true\nafter_seconds = 1\nmethod = \"osc9\"\n",
+    )
+    .expect("write test config");
+    let zdot = ZdotDir::new();
+    let mut s = spawn_with_config(&zsh, Some(zdot.path()), Some(&config_path));
+    assert_prompt_ready(&s);
+    let notice = "\x1b]9;\u{2713} sleep finished in 1.".as_bytes();
+    let any_notice = b"\x1b]9;";
+
+    // Past the threshold, untouched while it ran: one notice naming the
+    // program only, terminated, after the footer.
+    s.write(b"sleep 1.4 && print slow-$((6*7))\n");
+    assert!(
+        s.wait_for(notice, FORMAT_BUDGET),
+        "notice missing. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    let snapshot = s.snapshot();
+    let at = snapshot
+        .windows(notice.len())
+        .position(|w| w == notice)
+        .expect("notice present");
+    let tail = &snapshot[at..];
+    let body_end = tail
+        .windows(2)
+        .position(|w| w == b"\x1b\\")
+        .expect("notice is terminated with ST");
+    assert!(
+        !contains(&tail[..body_end], b"slow") && !contains(&tail[..body_end], b"1.4 "),
+        "notice repeated arguments: {:?}",
+        String::from_utf8_lossy(&tail[..body_end])
+    );
+    assert!(contains(&snapshot[..at], b"slow-42"));
+    assert!(contains(&snapshot[..at], b"done exit 0 in 1."));
+    let ends = count(&snapshot, b"\x1b]133;D");
+
+    // Below the threshold: nothing.
+    s.write(b"sleep 0.1; print quick-$((6*7))\n");
+    assert!(s.wait_for(b"quick-42", FORMAT_BUDGET));
+    assert!(wait_for_command_ends(&s, ends + 1));
+    assert_eq!(count(&s.snapshot(), any_notice), 1);
+
+    // Past the threshold, but the user answered a prompt at the end: they
+    // were there to see it finish (the stdin forwarder's activity record).
+    s.write(b"sleep 1.3; read -r answer; print got-$answer\n");
+    thread::sleep(Duration::from_millis(1600));
+    s.write(b"yes\n");
+    assert!(s.wait_for(b"got-yes", FORMAT_BUDGET));
+    assert!(wait_for_command_ends(&s, ends + 2));
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        count(&s.snapshot(), any_notice),
+        1,
+        "notified for a command the user typed into: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+
+    // A command line led by a bypassed program never notifies, however long
+    // it runs (`less -V` prints its version and exits, so nothing waits).
+    s.write(b"less -V >/dev/null 2>&1; sleep 1.2; true\n");
+    assert!(wait_for_command_ends(&s, ends + 3));
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(count(&s.snapshot(), any_notice), 1);
+
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+    let _ = std::fs::remove_file(config_path);
+}
+
+#[test]
+fn links_are_added_end_to_end_only_when_enabled() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let line = b"print -r -- 'at src/lib.rs:19:5 see https://example.com/x.'\n";
+    let link_open = b"\x1b]8;;";
+
+    // The harness scrubs the terminal identity, so `auto` (the default) sees
+    // an unknown terminal: the output is exactly what it was before links.
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+    s.write(line);
+    assert!(s.wait_for(b"https://example.com/x.\r\n", FORMAT_BUDGET));
+    assert!(!contains(&s.snapshot(), link_open));
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let config_path =
+        std::env::temp_dir().join(format!("glimps-links-{}-{n}.toml", std::process::id()));
+    std::fs::write(
+        &config_path,
+        b"[links]\nmode = \"on\"\neditor = \"vscode\"\n",
+    )
+    .expect("write test config");
+    let zdot = ZdotDir::new();
+    let mut s = spawn_with_config(&zsh, Some(zdot.path()), Some(&config_path));
+    assert_prompt_ready(&s);
+    s.write(line);
+    let url = b"\x1b]8;;https://example.com/x\x1b\\https://example.com/x\x1b]8;;\x1b\\.";
+    assert!(
+        s.wait_for(url, FORMAT_BUDGET),
+        "URL link missing. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    // The relative path resolves against the directory the shell runs in
+    // (reported over the private metadata channel; the test shell starts in
+    // its ZDOTDIR home), with line and column for the editor.
+    let cwd = std::fs::canonicalize(zdot.path()).expect("canonical cwd");
+    let file = format!(
+        "\x1b]8;;vscode://file{}/src/lib.rs:19:5\x1b\\src/lib.rs:19:5\x1b]8;;\x1b\\",
+        cwd.display()
+    );
+    let snapshot = s.snapshot();
+    assert!(
+        contains(&snapshot, file.as_bytes()),
+        "file link missing: want {file:?} in {:?}",
+        String::from_utf8_lossy(&snapshot)
+    );
+    // The echo of what was typed is never linked: only output is.
+    let typed = snapshot
+        .windows(b"print -r --".len())
+        .position(|w| w == b"print -r --")
+        .expect("echo present");
+    let output_starts = snapshot
+        .windows(b"\x1b]133;C".len())
+        .position(|w| w == b"\x1b]133;C")
+        .expect("output marker");
+    assert!(!contains(&snapshot[typed..output_starts], link_open));
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+    let _ = std::fs::remove_file(config_path);
+}
+
+/// A fish home with the integration installed where `glimps setup` puts it:
+/// `$XDG_CONFIG_HOME/fish/conf.d/00-glimps.fish`. Removed on drop.
+struct FishHome {
+    path: PathBuf,
+}
+
+impl FishHome {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("glimps-fish-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        let conf_d = path.join("config").join("fish").join("conf.d");
+        std::fs::create_dir_all(&conf_d).expect("create conf.d");
+        std::fs::write(
+            conf_d.join("00-glimps.fish"),
+            format!("'{GLIMPS}' init fish | source\n"),
+        )
+        .expect("write conf.d snippet");
+        FishHome { path }
+    }
+
+    fn spawn(&self, fish: &str) -> Session {
+        let config = self.path.join("config");
+        let data = self.path.join("data");
+        spawn_with_env(
+            fish,
+            Some(&self.path),
+            None,
+            &[
+                ("XDG_CONFIG_HOME", config.as_os_str()),
+                // fish keeps history here; keep it out of the real one.
+                ("XDG_DATA_HOME", data.as_os_str()),
+            ],
+        )
+    }
+}
+
+impl Drop for FishHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[test]
+fn fish_session_is_formatted_end_to_end() {
+    let Some(fish) = fish_path() else {
+        eprintln!("skipping: fish not available");
+        return;
+    };
+    let home = FishHome::new();
+    let mut s = home.spawn(&fish);
+    assert_prompt_ready(&s);
+
+    // Output is framed by GLIMPS's markers (fish 4 adds its own; they must
+    // not frame anything) and formatted.
+    s.write(b"echo '{\"alpha\":1}'\n");
+    assert!(
+        s.wait_for(b"\"alpha\"\x1b[0m: ", FORMAT_BUDGET),
+        "JSON was not formatted under fish. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+
+    // A failing pipeline stage and the exit status come from the result
+    // record written by fish_postexec.
+    s.write(b"false | true\n");
+    assert!(
+        s.wait_for(
+            b"pipeline stage failed: stage 1 exit 1; final exit 0",
+            FORMAT_BUDGET
+        ),
+        "pipeline warning missing under fish. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"sh -c 'exit 3'\n");
+    assert!(
+        s.wait_for(b"failed exit 3", FORMAT_BUDGET),
+        "failure footer missing under fish. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+
+    // A silent command draws nothing: fish's title `\r` is not output.
+    let before = s.snapshot().len();
+    s.write(b"true\n");
+    s.write(b"echo after-$(math 6 \\* 7)\n");
+    assert!(s.wait_for(b"after-42", FORMAT_BUDGET));
+    let tail = &s.snapshot()[before..];
+    let headers = tail
+        .windows("\u{258c}".len())
+        .filter(|w| *w == "\u{258c}".as_bytes())
+        .count();
+    assert_eq!(
+        headers,
+        1,
+        "only the echo gets a header: {:?}",
+        String::from_utf8_lossy(tail)
+    );
+
+    // `cd` leaves its breadcrumb (the cwd marker from fish_postexec).
+    s.write(b"cd /\n");
+    assert!(
+        s.wait_for_plain(b"moved to /", FORMAT_BUDGET),
+        "cd breadcrumb missing under fish. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+
+    // `glimps off`/`on` keep their provenance under fish.
+    s.write(format!("{GLIMPS} off\n").as_bytes());
+    assert!(s.wait_for(b"formatting paused", FORMAT_BUDGET));
+    s.write(b"echo '{\"beta\":2}'; echo done-beta\n");
+    assert!(s.wait_for(b"done-beta\r\n", FORMAT_BUDGET));
+    assert!(!contains(&s.snapshot(), b"\"beta\"\x1b[0m: "));
+    s.write(format!("{GLIMPS} on\n").as_bytes());
+    assert!(s.wait_for(b"formatting resumed", FORMAT_BUDGET));
+
+    // The metadata capability is not inherited by commands.
+    s.write(b"env | string match -q 'GLIMPS_META_PATH=*'; and echo leaked; or echo clean-$(math 6 \\* 7)\n");
+    assert!(
+        s.wait_for(b"clean-42", FORMAT_BUDGET),
+        "GLIMPS_META_PATH leaked to fish's children. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+
+    s.write(b"exit\n");
+    assert!(
+        s.wait_exit(EXIT_BUDGET),
+        "glimps did not exit after fish exited"
+    );
+}
+
+/// Run `program args` (not glimps) in a PTY with a scrubbed environment.
+fn spawn_program(program: &str, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Session {
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+    let mut cmd = CommandBuilder::new(program);
+    cmd.args(args);
+    cmd.env_clear();
+    cmd.env("TERM", "xterm-256color");
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let child = pair.slave.spawn_command(cmd).expect("spawn program");
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().expect("clone reader");
+    let writer = pair.master.take_writer().expect("take writer");
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&output);
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => sink.lock().expect("sink lock").extend_from_slice(&buf[..n]),
+            }
+        }
+    });
+    Session {
+        child,
+        writer,
+        output,
+        _master: pair.master,
+    }
+}
+
+/// The outer shell's rc hands the shell itself to `glimps --shell <this
+/// shell>`, not to whatever `$SHELL` names: a fish or zsh started from a
+/// different login shell must stay that shell inside GLIMPS. A stand-in
+/// `glimps` on PATH records its arguments; the real one prints the snippet.
+#[test]
+fn outer_shells_hand_glimps_their_own_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("glimps-outer-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    let fake = bin.join("glimps");
+    std::fs::write(&fake, "#!/bin/sh\nprintf 'FAKE-GLIMPS[%s]\\n' \"$*\"\n").expect("fake glimps");
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let snippet = |shell: &str| {
+        let out = std::process::Command::new(GLIMPS)
+            .args(["init", shell])
+            .output()
+            .expect("glimps init");
+        String::from_utf8(out.stdout).expect("utf8 snippet")
+    };
+
+    let mut checked = 0;
+    // zsh, with $SHELL naming another shell.
+    if let Some(zsh) = zsh_path() {
+        let home = dir.join("zsh");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".zshenv"), "unsetopt GLOBAL_RCS\n").unwrap();
+        std::fs::write(home.join(".zshrc"), snippet("zsh")).unwrap();
+        let s = spawn_program(
+            &zsh,
+            &["-i"],
+            &[
+                ("HOME", home.as_os_str()),
+                ("ZDOTDIR", home.as_os_str()),
+                ("PATH", path.as_ref()),
+                ("SHELL", "/bin/sh".as_ref()),
+            ],
+        );
+        assert!(
+            s.wait_for(b"FAKE-GLIMPS[--shell ", FORMAT_BUDGET),
+            "zsh did not hand itself over. Captured: {:?}",
+            String::from_utf8_lossy(&s.snapshot())
+        );
+        let text = String::from_utf8_lossy(&s.snapshot()).into_owned();
+        assert!(
+            text.contains("FAKE-GLIMPS[--shell zsh]") || text.contains(&format!("--shell {zsh}]")),
+            "{text:?}"
+        );
+        checked += 1;
+    }
+    // bash: its own binary, whatever $SHELL says.
+    if let Some(bash) = bash_path() {
+        let home = dir.join("bash");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".bashrc"), snippet("bash")).unwrap();
+        let s = spawn_program(
+            &bash,
+            &["--rcfile", home.join(".bashrc").to_str().unwrap(), "-i"],
+            &[
+                ("HOME", home.as_os_str()),
+                ("PATH", path.as_ref()),
+                ("SHELL", "/bin/zsh".as_ref()),
+            ],
+        );
+        let want = format!("FAKE-GLIMPS[--shell {bash}]");
+        assert!(
+            s.wait_for(want.as_bytes(), FORMAT_BUDGET),
+            "bash did not hand itself over. Captured: {:?}",
+            String::from_utf8_lossy(&s.snapshot())
+        );
+        checked += 1;
+    }
+    // fish: `status fish-path`, from a zsh login.
+    if let Some(fish) = fish_path() {
+        let home = dir.join("fish");
+        let conf_d = home.join("config").join("fish").join("conf.d");
+        std::fs::create_dir_all(&conf_d).unwrap();
+        std::fs::write(conf_d.join("00-glimps.fish"), snippet("fish")).unwrap();
+        let s = spawn_program(
+            &fish,
+            &["-i"],
+            &[
+                ("HOME", home.as_os_str()),
+                ("XDG_CONFIG_HOME", home.join("config").as_os_str()),
+                ("PATH", path.as_ref()),
+                ("SHELL", "/bin/zsh".as_ref()),
+                ("fish_history", "".as_ref()),
+            ],
+        );
+        let real = std::fs::canonicalize(&fish).unwrap();
+        let want = format!("FAKE-GLIMPS[--shell {}]", real.display());
+        assert!(
+            s.wait_for(want.as_bytes(), FORMAT_BUDGET),
+            "fish did not hand itself over (want {want:?}). Captured: {:?}",
+            String::from_utf8_lossy(&s.snapshot())
+        );
+        checked += 1;
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    if checked == 0 {
+        eprintln!("skipping: no zsh, bash or fish available");
+    }
+}
+
+#[test]
+fn redact_toggle_masks_secrets_end_to_end() {
+    let Some(zsh) = zsh_path() else {
+        eprintln!("skipping: zsh not available");
+        return;
+    };
+    let zdot = ZdotDir::new();
+    let mut s = spawn(&zsh, Some(zdot.path()));
+    assert_prompt_ready(&s);
+    // Built from parts so the typed command line never holds the token whole.
+    let print = b"print -r -- \"token ghp_${(l:36::a:)}\"\n";
+    let token = format!("ghp_{}", "a".repeat(36));
+    let masked = format!("token ghp_{}", "*".repeat(36));
+
+    s.write(print);
+    assert!(s.wait_for(format!("token {token}\r\n").as_bytes(), FORMAT_BUDGET));
+
+    s.write(format!("{GLIMPS} redact on\n").as_bytes());
+    // GLIMPS confirms it itself, after the command's own "asked" line.
+    assert!(s.wait_for(
+        b"glimps: asked this session to mask secrets.",
+        FORMAT_BUDGET
+    ));
+    assert!(s.wait_for(b"masking secrets in this session's output", FORMAT_BUDGET));
+    let before = s.snapshot().len();
+    s.write(print);
+    assert!(
+        s.wait_for(masked.as_bytes(), FORMAT_BUDGET),
+        "token was not masked. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot()[before..])
+    );
+    assert!(!contains(&s.snapshot()[before..], token.as_bytes()));
+
+    s.write(format!("{GLIMPS} redact off\n").as_bytes());
+    assert!(s.wait_for(b"no longer masking secrets", FORMAT_BUDGET));
+    let before = s.snapshot().len();
+    s.write(print);
+    assert!(
+        s.wait_for(format!("token {token}\r\n").as_bytes(), FORMAT_BUDGET),
+        "masking did not stop. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot()[before..])
+    );
+
+    s.write(b"exit\n");
+    let _ = s.wait_exit(EXIT_BUDGET);
+}
+
+/// A shell that cannot start inside GLIMPS must not take the terminal with
+/// it: an rc file `exec`s glimps, so exiting would close the tab. GLIMPS hands
+/// over to a plain shell (`GLIMPS=0`) instead.
+#[test]
+fn an_unstartable_shell_falls_back_to_a_plain_one() {
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+    let mut cmd = CommandBuilder::new(GLIMPS);
+    cmd.args(["--shell", "/nonexistent/glimps-test-zsh"]);
+    cmd.env_remove("GLIMPS_ACTIVE");
+    cmd.env_remove("GLIMPSRC");
+    cmd.env("GLIMPS", "1");
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("SHELL", "/bin/sh");
+    let child = pair.slave.spawn_command(cmd).expect("spawn glimps");
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().expect("clone reader");
+    let writer = pair.master.take_writer().expect("take writer");
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&output);
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => sink.lock().expect("sink lock").extend_from_slice(&buf[..n]),
+            }
+        }
+    });
+    let mut s = Session {
+        child,
+        writer,
+        output,
+        _master: pair.master,
+    };
+    assert!(
+        s.wait_for(b"starting /bin/sh without GLIMPS", FORMAT_BUDGET),
+        "no fallback. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"echo fallback-$((6*7)) GLIMPS=$GLIMPS\n");
+    assert!(
+        s.wait_for(b"fallback-42 GLIMPS=0", FORMAT_BUDGET),
+        "the plain shell did not run. Captured: {:?}",
+        String::from_utf8_lossy(&s.snapshot())
+    );
+    s.write(b"exit\n");
+    assert!(s.wait_exit(EXIT_BUDGET));
 }

@@ -73,6 +73,9 @@ enum Esc {
     Escape,
     /// Inside CSI (`ESC [ … final`), final byte is `0x40..=0x7E`.
     Csi,
+    /// After intermediate bytes (`ESC ( B`, `ESC # 8`): ends at a byte in
+    /// `0x30..=0x7E`.
+    Intermediate,
     /// Inside a string sequence — OSC (`ESC ] … BEL`/`ESC ] … ESC \`) or
     /// DCS/SOS/PM/APC (`ESC P/X/^/_ … ESC \`) — whose body is not text.
     Osc,
@@ -168,10 +171,23 @@ impl ErrorPin {
                         // early, leaving the tail as "text", which at worst
                         // costs a wrong-but-sanitized pin, never bad output.
                         b']' | b'P' | b'X' | b'^' | b'_' => Esc::Osc,
-                        // Two-byte escape (ESC c, ESC ( B, …): swallow the
+                        // `ESC ( B` and friends: intermediates, then a final.
+                        0x20..=0x2f => Esc::Intermediate,
+                        // CAN/SUB abort; other C0 controls are executed
+                        // mid-sequence and the escape goes on.
+                        0x18 | 0x1a => Esc::Plain,
+                        0x00..=0x1f => Esc::Escape,
+                        // Two-byte escape (ESC c, ESC 7, …): swallow the
                         // follow byte and return to text.
                         _ => Esc::Plain,
                     };
+                }
+                Esc::Intermediate => {
+                    if matches!(b, 0x18 | 0x1a) || !(0x00..=0x2f).contains(&b) {
+                        self.esc = Esc::Plain;
+                    } else if b == 0x1b {
+                        self.esc = Esc::Escape;
+                    }
                 }
                 Esc::Csi => {
                     if (0x40..=0x7e).contains(&b) {
@@ -330,6 +346,14 @@ mod tests {
 
     fn text(pin: &PinnedError) -> String {
         String::from_utf8_lossy(&pin.text).into_owned()
+    }
+
+    #[test]
+    fn charset_escapes_do_not_leak_into_the_pin() {
+        let mut pin = ErrorPin::new();
+        pin.feed(b"\x1b(B\x1b[mfatal: not a git repository\n");
+        let pinned = pin.take().unwrap();
+        assert_eq!(pinned.text, b"fatal: not a git repository");
     }
 
     #[test]

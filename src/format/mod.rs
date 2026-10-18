@@ -38,12 +38,16 @@ mod html;
 mod http;
 mod json;
 mod linefmt;
+mod links;
+mod notify;
 mod osc133;
 mod pin;
+mod redact;
 mod theme;
 
 use std::borrow::Cow;
 use std::io::IsTerminal;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::{Config, SuccessFooter};
@@ -56,6 +60,10 @@ use command::{
 };
 use exitcode::ExitClass;
 use osc133::{Osc133Scanner, Seg};
+
+pub(crate) use links::{enabled as links_enabled, file_target as links_file_target};
+pub(crate) use notify::resolve as resolve_notify_backend;
+pub use notify::InputActivity;
 // `Zone` is the seam's vocabulary; only tests consume it directly today.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub use osc133::Zone;
@@ -266,6 +274,41 @@ pub struct Formatter {
     trusted_exit_code: Option<i32>,
     /// Monotonic start time for the running command, captured at output start.
     command_started_at: Option<Instant>,
+    /// How completion notices are sent; `None` when `[notify]` is off.
+    notify_backend: Option<notify::Backend>,
+    /// Commands shorter than this never notify (`notify.after_seconds`).
+    notify_after: Duration,
+    /// Whether the current command may notify when it ends: an ordinary
+    /// command that never took over the screen. Bypassed, sensitive, pager
+    /// and full-screen runs are disarmed.
+    notify_armed: bool,
+    /// When the user last typed into the session (fed by the stdin
+    /// forwarder), so a command they were typing into does not notify.
+    input_activity: Option<Arc<InputActivity>>,
+    /// Adds OSC 8 links to URLs and `file:line`; `None` when `[links]` is
+    /// off for this terminal.
+    linker: Option<links::Linker>,
+    /// Whether the current command's output may get links: ordinary and
+    /// pager commands only, never sensitive or bypassed ones.
+    links_armed: bool,
+    /// The shell's working directory from the latest trusted result record.
+    /// Kept apart from `trusted_cwd`, which the `cd` breadcrumb consumes.
+    session_cwd: Option<Vec<u8>>,
+    /// Whether secrets in output are masked (`[redact]`, `glimps redact on`).
+    redact_on: bool,
+    /// Masks secrets; holds only whether a private-key block is open.
+    redactor: redact::Redactor,
+    /// A sensitive command running while redaction is on: its output streams
+    /// as plain lines (no formatting, no pin, no links) so it can be masked,
+    /// instead of raw pass-through.
+    redact_raw: bool,
+    /// GLIMPS's confirmation of a `glimps redact` toggle, written when the
+    /// toggling command's output ends.
+    toggle_note: Option<&'static str>,
+    /// The directory relative paths in this command's output resolve
+    /// against: `session_cwd` when the command started. Only the trusted
+    /// metadata channel sets it; a forgeable OSC 7338 never does.
+    link_cwd: Option<Vec<u8>>,
     /// When the current buffered run first started being *held* across a quiet
     /// interval, bounding the hold in wall-clock time (see [`MAX_STALL_HOLD`]).
     /// Set once and deliberately NOT moved by arriving bytes — a stream that
@@ -308,6 +351,19 @@ pub struct Formatter {
     /// The start of the current physical line was already emitted verbatim
     /// (an escape split it), so what follows is a fragment, not a line.
     line_open: bool,
+    /// The current output line carries escapes of its own (a color, a
+    /// cursor move, a program's own hyperlink), even where none split it into
+    /// fragments, so GLIMPS must not add links to it (invariant #3). Cleared
+    /// at each newline.
+    line_escaped: bool,
+    /// The program opened a hyperlink of its own (OSC 8) that it has not
+    /// closed yet. It can span lines; every line inside it stays unlinked,
+    /// since a link GLIMPS nested there would close the program's early.
+    program_link_open: bool,
+    /// The program's escapes written before its first output byte, while the
+    /// header is still owed. The header lands after them, so its closing
+    /// reset would undo a color the program set; see [`leading_escapes`].
+    leading_pass: Vec<u8>,
     /// Whether the previous chunk left a full-screen TUI on the alternate screen.
     /// Tracked so the chunk that *exits* alt-screen is also passed through.
     was_alt_screen: bool,
@@ -328,6 +384,13 @@ impl Formatter {
         Self::build(clock, true, Config::default())
     }
 
+    /// Construct with an explicit config, formatting on as if stdout were a
+    /// terminal. For benchmarks, which cannot reach the private builder.
+    #[doc(hidden)]
+    pub fn with_config(config: Config) -> Self {
+        Self::build(Clock::Off, true, config)
+    }
+
     /// Construct for the live supervisor. Formatting is on only when the config's
     /// master switch is set, `GLIMPS != 0`, AND stdout is a terminal — so anything
     /// capturing GLIMPS's output (piped/redirected) gets raw bytes, never injected
@@ -346,9 +409,22 @@ impl Formatter {
         formatter
     }
 
+    /// Share the stdin forwarder's record of when the user last typed, so a
+    /// completion notice is skipped for a command they were typing into.
+    pub fn set_input_activity(&mut self, activity: Arc<InputActivity>) {
+        self.input_activity = Some(activity);
+    }
+
     fn build(clock: Clock, output_is_tty: bool, config: Config) -> Self {
         let buffered = enabled_buffered(&config.formatters);
         let streaming = enabled_streaming(&config.formatters);
+        let notify_backend = config
+            .notify
+            .enabled
+            .then(|| notify::resolve(config.notify.method, terminal_env));
+        let notify_after = Duration::from_secs(config.notify.after_seconds);
+        let linker = links::Linker::new(&config.links, terminal_env);
+        let redact_on = config.redact.enabled;
         Formatter {
             enabled: config.enabled && glimps_enabled() && output_is_tty,
             suspended: false,
@@ -373,6 +449,18 @@ impl Formatter {
             trusted_pipeline_statuses: None,
             trusted_exit_code: None,
             command_started_at: None,
+            notify_backend,
+            notify_after,
+            notify_armed: false,
+            input_activity: None,
+            linker,
+            redact_on,
+            redactor: redact::Redactor::new(),
+            redact_raw: false,
+            toggle_note: None,
+            links_armed: false,
+            session_cwd: None,
+            link_cwd: None,
             command_had_visible_output: false,
             command_output_line_count: 0,
             ps_columns: Vec::new(),
@@ -383,6 +471,9 @@ impl Formatter {
             pin_armed: false,
             markdown_fence: None,
             line_open: false,
+            line_escaped: false,
+            program_link_open: false,
+            leading_pass: Vec::new(),
             was_alt_screen: false,
             buffered,
             streaming,
@@ -406,7 +497,31 @@ impl Formatter {
         // Mid-session toggle, carried in-band by `glimps off` / `glimps on`
         // (provenance-gated in the scanner — only a `glimps …` command cycle
         // can flip it).
-        if let Some(resume) = self.scanner.take_format_toggle() {
+        // With the private metadata channel, an `off` must also come from a
+        // command the shell really ran: in-band provenance alone can be
+        // forged by output that prints a whole fake command cycle.
+        // While paused no output zone is tracked, so the latest trusted
+        // command record stands in for the current command.
+        let format_toggle = self.scanner.take_format_toggle();
+        let redact_toggle = self.scanner.take_redact_toggle();
+        let trusted = if (format_toggle == Some(false) || redact_toggle == Some(false))
+            && self.metadata.is_some()
+        {
+            self.refresh_metadata();
+            self.pending_command
+                .clone()
+                .or_else(|| self.trusted_command.clone())
+        } else {
+            None
+        };
+        let trusted_off = |check: fn(&[u8]) -> bool| trusted.as_deref().is_some_and(check);
+        let format_toggle = format_toggle.filter(|&resume| {
+            resume || self.metadata.is_none() || trusted_off(osc133::command_is_glimps_toggle)
+        });
+        let redact_toggle = redact_toggle.filter(|&on| {
+            on || self.metadata.is_none() || trusted_off(osc133::command_is_glimps_redact_toggle)
+        });
+        if let Some(resume) = format_toggle {
             if !resume && !self.suspended {
                 // Pause: flush anything withheld (bytes are never dropped),
                 // cancel owed chrome, and stream everything verbatim from here.
@@ -423,6 +538,9 @@ impl Formatter {
                 self.command_started_at = None;
                 self.was_alt_screen = self.scanner.in_alt_screen();
                 out.extend_from_slice(chunk);
+                if self.redact_on {
+                    self.push_note(&mut out, REDACT_PAUSED_NOTE);
+                }
                 return Cow::Owned(out);
             }
             if resume && self.suspended {
@@ -441,7 +559,26 @@ impl Formatter {
                 self.collect = Collect::Passthrough;
             }
         }
+        if let Some(on) = redact_toggle {
+            // Takes effect from the next command (`glimps redact on`'s own
+            // output is this cycle). GLIMPS confirms it itself, so the
+            // confirmation appears only when masking really changed.
+            self.redact_on = on;
+            self.redactor.reset();
+            self.toggle_note = Some(match (on, self.suspended) {
+                (true, false) => REDACT_ON_NOTE,
+                (true, true) => REDACT_ON_PAUSED_NOTE,
+                (false, _) => REDACT_OFF_NOTE,
+            });
+        }
         if self.suspended {
+            if let Some(note) = self.toggle_note.take() {
+                let mut out = chunk.to_vec();
+                self.push_note(&mut out, note);
+                self.was_alt_screen = self.scanner.in_alt_screen();
+                self.refresh_metadata();
+                return Cow::Owned(out);
+            }
             // Keep ambient state fresh while verbatim: the alt-screen latch
             // (so resuming during/after a TUI can't fire a stale "exiting
             // alt-screen" branch) and the metadata channel (so a long pause
@@ -464,6 +601,11 @@ impl Formatter {
         // interactive programs, whose lifetimes span many reads.
         let alt = self.scanner.in_alt_screen();
         if alt || self.was_alt_screen {
+            // A full-screen program is something the user is looking at, not
+            // waiting on: its exit never earns a completion notice.
+            if alt {
+                self.notify_armed = false;
+            }
             let was_alt = self.was_alt_screen;
             let entering_alt = alt && !was_alt;
             let show_tui_badge = entering_alt && self.pending_separator && self.config.separator;
@@ -514,11 +656,29 @@ impl Formatter {
         for seg in &segments {
             match *seg {
                 Seg::Output(start, end) => {
-                    self.push_output(&chunk[start..end], &mut out);
+                    let mut seg = &chunk[start..end];
+                    // A carriage return before a command's first output byte
+                    // only moves a cursor that is already at column 0: fish
+                    // writes one with the window title after its preexec
+                    // hook, before every command. Passed through ahead of the
+                    // header, it is not output: a silent command stays silent
+                    // and the first line reaches the formatters without it.
+                    // (`\r\n` is a real empty line and stays output.)
+                    if self.pending_separator && matches!(self.collect, Collect::Idle) {
+                        let returns = seg.iter().take_while(|&&b| b == b'\r').count();
+                        if returns > 0 && seg.get(returns) != Some(&b'\n') {
+                            out.extend_from_slice(&seg[..returns]);
+                            seg = &seg[returns..];
+                        }
+                    }
+                    if seg.is_empty() {
+                        continue;
+                    }
+                    self.push_output(seg, &mut out);
                     // Observe after push_output so a binary disarm (in
                     // `decide`) already covers this same segment.
                     if self.pin_armed {
-                        self.pin.feed(&chunk[start..end]);
+                        self.pin.feed(seg);
                     }
                 }
                 Seg::Pass(start, end) => {
@@ -526,6 +686,22 @@ impl Formatter {
                     // finalize anything pending, then pass through untouched.
                     self.finalize(&mut out);
                     out.extend_from_slice(&chunk[start..end]);
+                    if self.command_started_at.is_some() {
+                        if self.pending_separator && matches!(self.collect, Collect::Idle) {
+                            // Before the first output byte: kept to judge
+                            // (and restore) once the header goes out.
+                            if self.leading_pass.len() < LEADING_PASS_CAP {
+                                self.leading_pass.extend_from_slice(&chunk[start..end]);
+                            } else {
+                                self.line_escaped = true;
+                            }
+                        } else {
+                            self.line_escaped = true;
+                            if let Some(open) = last_hyperlink_state(&chunk[start..end]) {
+                                self.program_link_open = open;
+                            }
+                        }
+                    }
                     // Mid-zone Pass bytes are where colored error lines hide
                     // (the scanner routes every ESC here); let the pin
                     // observe them too. Its strip machine eats the escapes.
@@ -555,10 +731,14 @@ impl Formatter {
                             .trust
                         })
                         .unwrap_or(CommandTrust::Normal);
-                    if matches!(
-                        trust,
-                        CommandTrust::InteractiveBypass | CommandTrust::Sensitive
-                    ) {
+                    self.redactor.reset();
+                    // With redaction on, a secret-printing command streams as
+                    // plain lines so its secrets can be masked; otherwise it
+                    // passes through raw, untouched.
+                    self.redact_raw = self.redact_on && trust == CommandTrust::Sensitive;
+                    if trust == CommandTrust::InteractiveBypass
+                        || (trust == CommandTrust::Sensitive && !self.redact_raw)
+                    {
                         self.collect = Collect::Passthrough;
                     }
                     // Arm error-line pinning for this command's output zone.
@@ -567,17 +747,29 @@ impl Formatter {
                     self.pin_armed = trust == CommandTrust::Normal
                         && self.config.failures.enabled
                         && self.config.failures.pin_errors;
+                    self.notify_armed = trust == CommandTrust::Normal;
+                    self.links_armed =
+                        matches!(trust, CommandTrust::Normal | CommandTrust::PagerText);
+                    self.link_cwd = self.session_cwd.clone();
                     self.emit_stdin_capture_hint(&mut out);
                 }
                 // The output ended: flush, and drop an unfulfilled header/command.
                 Seg::OutputEnd => {
                     self.finalize(&mut out);
+                    if let Some(note) = self.toggle_note.take() {
+                        self.push_note(&mut out, note);
+                    }
                     self.refresh_metadata();
                     self.emit_cd_breadcrumb(&mut out);
-                    self.emit_command_status(&mut out);
+                    let (exit_code, pipeline_statuses) = self.take_exit_status();
+                    self.emit_command_status(&mut out, exit_code, &pipeline_statuses);
+                    self.emit_completion_notice(&mut out, exit_code, &pipeline_statuses);
                     self.pending_separator = false;
                     self.pending_command = None;
                     self.command_started_at = None;
+                    self.notify_armed = false;
+                    self.links_armed = false;
+                    self.redact_raw = false;
                     self.command_had_visible_output = false;
                     self.reset_command_line_state();
                     self.pin.reset();
@@ -631,15 +823,11 @@ impl Formatter {
                     // (same bytes, streaming color only) and let the rest
                     // stream live.
                     self.hold_started_at = None;
-                    self.release_buffer_streaming(&buf, out);
-                    out.extend_from_slice(seg);
-                    Collect::Passthrough
+                    self.give_up_buffer(buf, seg, out)
                 } else if buf.len().saturating_add(seg.len()) > self.config.limits.buffer_cap {
                     // Too big to hold/format: flush what we have and stream the rest.
                     self.hold_started_at = None;
-                    self.release_buffer_streaming(&buf, out);
-                    out.extend_from_slice(seg);
-                    Collect::Passthrough
+                    self.give_up_buffer(buf, seg, out)
                 } else {
                     buf.extend_from_slice(seg);
                     Collect::Buffer(buf)
@@ -687,15 +875,19 @@ impl Formatter {
                 // unconfirmed candidate is emitted verbatim, so eagerness is safe.
                 acc.extend_from_slice(seg);
                 let delimited_document = self.pending_delimited_document().is_some();
-                let buffer_candidate = delimited_document
-                    || (!self.pending_command_prefers_text_lines()
-                        && !starts_with_complete_json_line(&acc)
-                        && self.buffered.iter().any(|f| f.could_start(&seg[pos..])));
+                let buffer_candidate = !self.redact_raw
+                    && (delimited_document
+                        || (!self.pending_command_prefers_text_lines()
+                            && !starts_with_complete_json_line(&acc)
+                            && self.buffered.iter().any(|f| f.could_start(&seg[pos..]))));
                 self.emit_header(out);
                 if buffer_candidate && acc.len() <= self.config.limits.buffer_cap {
                     Collect::Buffer(acc) // a formatting candidate; hold it
-                } else if !buffer_candidate && !self.streaming.is_empty() {
+                } else if !buffer_candidate && (!self.streaming.is_empty() || self.redact_on) {
                     // Plain text: stream line-by-line through the streaming colorizers.
+                    self.push_stream(Vec::new(), false, &acc, out)
+                } else if self.redact_on {
+                    // Masking must not stop: stream it line by line instead.
                     self.push_stream(Vec::new(), false, &acc, out)
                 } else {
                     // No formatter wants it (or the blob is too big): verbatim.
@@ -709,6 +901,11 @@ impl Formatter {
                 acc.extend_from_slice(seg);
                 if acc.len() > self.config.limits.sniff_cap {
                     self.emit_header(out);
+                    if self.redact_on {
+                        // Whitespace only so far; keep streaming so what
+                        // follows is still masked.
+                        return self.push_stream(Vec::new(), false, &acc, out);
+                    }
                     out.extend_from_slice(&acc);
                     Collect::Passthrough
                 } else {
@@ -724,9 +921,25 @@ impl Formatter {
         if self.pending_separator {
             self.pending_separator = false;
             self.command_had_visible_output = true;
+            let leading = leading_escapes(&self.leading_pass);
+            self.leading_pass.clear();
+            // A program that styled its first line before writing it owns
+            // that line's look: no links on it either.
+            if leading.styled {
+                self.line_escaped = true;
+            }
+            if leading.link_open {
+                self.program_link_open = true;
+            }
             if self.config.separator {
-                let header = self.render_header();
+                let rendered = self.render_header();
+                let header = self.redact_chrome(&rendered);
+                // The header ends with a reset and must not sit inside the
+                // program's open hyperlink: close the link around it, then
+                // put the program's color and link back.
+                out.extend_from_slice(&leading.before_header);
                 out.extend_from_slice(&header);
+                out.extend_from_slice(&leading.after_header);
             }
         }
     }
@@ -763,6 +976,7 @@ impl Formatter {
                     exit_code,
                 } => {
                     self.trusted_pipeline_statuses = Some(pipeline_statuses);
+                    self.session_cwd = Some(cwd.clone());
                     self.trusted_cwd = Some(cwd);
                     self.trusted_exit_code = Some(exit_code);
                 }
@@ -842,17 +1056,29 @@ impl Formatter {
         push_crlf(out, &line);
     }
 
-    fn emit_command_status(&mut self, out: &mut Vec<u8>) {
+    /// The ended command's exit code and pipeline statuses: from the trusted
+    /// metadata channel when there is one (OSC 133 then frames output but
+    /// cannot author results), else from the markers. Both sources are
+    /// drained either way so a stale value never carries over.
+    fn take_exit_status(&mut self) -> (Option<i32>, Option<Vec<i32>>) {
         let osc_exit_code = self.scanner.take_exit_code();
         let osc_pipeline_statuses = self.scanner.take_pipeline_statuses();
-        let (exit_code, pipeline_statuses) = if self.metadata.is_some() {
+        if self.metadata.is_some() {
             (
                 self.trusted_exit_code.take(),
                 self.trusted_pipeline_statuses.take(),
             )
         } else {
             (osc_exit_code, osc_pipeline_statuses)
-        };
+        }
+    }
+
+    fn emit_command_status(
+        &mut self,
+        out: &mut Vec<u8>,
+        exit_code: Option<i32>,
+        pipeline_statuses: &Option<Vec<i32>>,
+    ) {
         let elapsed = self.command_started_at.map(|started| started.elapsed());
         let Some(exit_code) = exit_code else {
             return;
@@ -860,24 +1086,9 @@ impl Formatter {
         let Some(cmd) = self.pending_command.clone() else {
             return;
         };
-        // A leading shell `!` deliberately reverses the underlying command's
-        // result. zsh/bash preserve that underlying result in their pipeline
-        // status array, so `[0]` plus final exit 1 means the command itself
-        // succeeded and only the boolean negation evaluated false. Treating
-        // that as an ordinary red failure is technically literal but deeply
-        // misleading (for example, a successful `! ssh-copy-id ...`).
-        let negated_success = exit_code == 1
-            && cmdline::starts_with_negation(&cmd)
-            && pipeline_statuses
-                .as_ref()
-                .is_some_and(|statuses| statuses.last() == Some(&0));
-        let status = if negated_success {
-            exitcode::negated_success()
-        } else {
-            exitcode::describe(exit_code)
-        };
+        let status = exit_status(&cmd, exit_code, pipeline_statuses);
         let success = status.class == ExitClass::Success;
-        let pipeline_warning = pipeline_warning(&pipeline_statuses, exit_code);
+        let pipeline_warning = pipeline_warning(pipeline_statuses, exit_code);
         if success
             && pipeline_warning.is_none()
             && !self.command_had_visible_output
@@ -965,7 +1176,11 @@ impl Formatter {
                 // Sanitize (control bytes, invalid UTF-8) BEFORE truncation,
                 // so the cut lands on a char boundary of the final text.
                 let text = cmdline::sanitize_display(&pinned.text);
-                quote.extend_from_slice(&truncate_display(&text, PIN_DISPLAY_CAP));
+                // Mask before the cut, so a token cut at the cap cannot
+                // escape detection and show its prefix.
+                let text = self.redact_chrome(&text).into_owned();
+                let shown = truncate_display(&text, PIN_DISPLAY_CAP);
+                quote.extend_from_slice(&self.link_chrome(&shown));
                 quote.extend_from_slice(reset.as_bytes());
                 quote.extend_from_slice(self.theme.debug.as_bytes());
                 quote.extend_from_slice(
@@ -986,11 +1201,63 @@ impl Formatter {
             summary.extend_from_slice(b"command failed: ");
             // Strip control bytes from the captured command before it enters
             // this GLIMPS-authored footer line (BUG #2).
-            summary.extend_from_slice(&cmdline::sanitize_display(&cmd));
+            summary.extend_from_slice(&self.redact_chrome(&cmdline::sanitize_display(&cmd)));
             summary.extend_from_slice(reset.as_bytes());
             summary.push(b'\n');
             push_crlf(out, &summary);
         }
+    }
+
+    /// Tell the desktop that a long command the user walked away from has
+    /// finished (`[notify]`, see [`notify`]). Invisible in scrollback: the
+    /// sequence goes to the terminal after the footer and draws nothing.
+    fn emit_completion_notice(
+        &mut self,
+        out: &mut Vec<u8>,
+        exit_code: Option<i32>,
+        pipeline_statuses: &Option<Vec<i32>>,
+    ) {
+        let Some(backend) = self.notify_backend else {
+            return;
+        };
+        if !self.notify_armed {
+            return;
+        }
+        let (Some(started), Some(exit_code), Some(cmd)) = (
+            self.command_started_at,
+            exit_code,
+            self.pending_command.as_deref(),
+        ) else {
+            return;
+        };
+        let now = Instant::now();
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed < self.notify_after {
+            return;
+        }
+        let last_input = self.input_activity.as_deref().and_then(InputActivity::last);
+        if notify::user_was_present(last_input, started, now) {
+            return;
+        }
+        // The footer shows a negated success as a dim notice; here it is a
+        // command that ran to completion, so it reads as finished.
+        let class = if is_negated_success(cmd, exit_code, pipeline_statuses) {
+            ExitClass::Success
+        } else {
+            exitcode::describe(exit_code).class
+        };
+        let outcome = match class {
+            // Ctrl-C, SIGTERM, SIGPIPE: someone acted on purpose, and the
+            // one who pressed Ctrl-C is already looking.
+            ExitClass::Notice => return,
+            ExitClass::Failure => notify::Outcome::Failed(exit_code),
+            ExitClass::Success if pipeline_warning(pipeline_statuses, exit_code).is_some() => {
+                notify::Outcome::StageFailed
+            }
+            ExitClass::Success => notify::Outcome::Success,
+        };
+        let body = notify::message(cmd, outcome, &format_duration(elapsed));
+        out.extend_from_slice(&notify::sequence(backend, &body));
     }
 
     fn emit_pipeline_warning(
@@ -1027,7 +1294,11 @@ impl Formatter {
                 quote.extend_from_slice(reset.as_bytes());
                 quote.extend_from_slice(self.theme.muted.as_bytes());
                 let text = cmdline::sanitize_display(&pinned.text);
-                quote.extend_from_slice(&truncate_display(&text, PIN_DISPLAY_CAP));
+                // Mask before the cut, so a token cut at the cap cannot
+                // escape detection and show its prefix.
+                let text = self.redact_chrome(&text).into_owned();
+                let shown = truncate_display(&text, PIN_DISPLAY_CAP);
+                quote.extend_from_slice(&self.link_chrome(&shown));
                 quote.extend_from_slice(reset.as_bytes());
                 quote.extend_from_slice(self.theme.debug.as_bytes());
                 quote.extend_from_slice(
@@ -1093,7 +1364,9 @@ impl Formatter {
                     // no longer color it as a unit, so preserve the remainder
                     // byte-for-byte. Formatting resumes on the next line.
                     debug_assert!(line.is_empty());
+                    let at = out.len();
                     out.extend_from_slice(&seg[start..=i]);
+                    self.redact_since(out, at);
                     self.command_output_line_count += 1;
                     // Inside a database shell this is every prompt+echo line
                     // (`mysql> desc t;`). The line formatters never saw it, so
@@ -1106,12 +1379,14 @@ impl Formatter {
                     // whose next all-text row may be keyed as a header.
                     self.sql_result.reset();
                     self.line_open = false;
+                    self.line_escaped = self.program_link_open;
                     emitted_prefix = false;
                 } else {
                     line.extend_from_slice(&seg[start..=i]);
                     self.emit_stream_line(out, &line);
                     line.clear();
                     self.line_open = false;
+                    self.line_escaped = self.program_link_open;
                 }
                 start = i + 1;
             }
@@ -1119,7 +1394,9 @@ impl Formatter {
         if emitted_prefix {
             // Once a partial line is visible, never withhold its continuation:
             // this is the user's live interaction line until its newline.
+            let at = out.len();
             out.extend_from_slice(&seg[start..]);
+            self.redact_since(out, at);
             return Collect::Stream(Vec::new(), true);
         }
         line.extend_from_slice(&seg[start..]);
@@ -1132,7 +1409,9 @@ impl Formatter {
             // (`mysql`/`psql`/`sqlite3`) is ONE long-lived command, so a single
             // wide row (a big TEXT cell, `SHOW CREATE TABLE`, `GROUP_CONCAT`)
             // turned every later table plain until the shell was exited.
+            let at = out.len();
             out.extend_from_slice(&line);
+            self.redact_since(out, at);
             Collect::Stream(Vec::new(), true)
         } else {
             Collect::Stream(line, false)
@@ -1146,13 +1425,29 @@ impl Formatter {
     /// only SGR may be added, and `emit_line` already refuses to wrap a line
     /// containing binary bytes (invariant #3). ESC never reaches a buffered
     /// segment — the scanner routes every escape byte to `Pass`.
+    /// A buffered run that will not be formatted whole and must start
+    /// streaming now (held too long, or too big). Normally its lines are
+    /// released and the rest streams verbatim; with redaction on, the whole
+    /// run and everything after it keeps going through the masked line path.
+    fn give_up_buffer(&mut self, mut buf: Vec<u8>, seg: &[u8], out: &mut Vec<u8>) -> Collect {
+        if self.redact_on {
+            buf.extend_from_slice(seg);
+            return self.push_stream(Vec::new(), false, &buf, out);
+        }
+        self.release_buffer_streaming(&buf, out);
+        out.extend_from_slice(seg);
+        Collect::Passthrough
+    }
+
     fn release_buffer_streaming(&mut self, buf: &[u8], out: &mut Vec<u8>) {
-        if self.streaming.is_empty() {
+        if self.streaming.is_empty() && !self.redact_on {
             out.extend_from_slice(buf);
             return;
         }
         if let Collect::Stream(tail, _) = self.push_stream(Vec::new(), false, buf, out) {
+            let at = out.len();
             out.extend_from_slice(&tail);
+            self.redact_since(out, at);
         }
     }
 
@@ -1170,6 +1465,7 @@ impl Formatter {
         self.collect = match std::mem::replace(&mut self.collect, Collect::Idle) {
             Collect::Stream(line, false) if !line.is_empty() => {
                 out.extend_from_slice(&line);
+                self.redact_since(&mut out, 0);
                 Collect::Stream(Vec::new(), true)
             }
             Collect::Stream(line, emitted_prefix) => Collect::Stream(line, emitted_prefix),
@@ -1189,6 +1485,20 @@ impl Formatter {
                     // for whole-run formatting. Ambiguous content — tag-shaped
                     // prompts, a bare `{` — still takes the pass-through branch.
                     Collect::Buffer(buf)
+                } else if self.redact_on {
+                    // Liveness wins as below, but masking must not stop: the
+                    // held lines stream through the masked line path and the
+                    // unfinished line is shown (masked) as a live prefix.
+                    self.hold_started_at = None;
+                    match self.push_stream(Vec::new(), false, &buf, &mut out) {
+                        Collect::Stream(line, false) if !line.is_empty() => {
+                            let at = out.len();
+                            out.extend_from_slice(&line);
+                            self.redact_since(&mut out, at);
+                            Collect::Stream(Vec::new(), true)
+                        }
+                        other => other,
+                    }
                 } else {
                     self.hold_started_at = None;
                     self.release_buffer_streaming(&buf, &mut out);
@@ -1198,7 +1508,11 @@ impl Formatter {
             Collect::Sniff(acc) if !acc.is_empty() => {
                 self.emit_header(&mut out);
                 out.extend_from_slice(&acc);
-                Collect::Passthrough
+                if self.redact_on {
+                    Collect::Stream(Vec::new(), true)
+                } else {
+                    Collect::Passthrough
+                }
             }
             other => other,
         };
@@ -1220,9 +1534,115 @@ impl Formatter {
         self.sql_result.reset();
         self.markdown_fence = None;
         self.line_open = false;
+        self.line_escaped = false;
+        self.program_link_open = false;
+        self.leading_pass.clear();
     }
 
     fn emit_stream_line(&mut self, out: &mut Vec<u8>, line: &[u8]) {
+        // A fragment after an escape, or a line that carried an escape of its
+        // own anywhere, belongs to output that styles itself: it is never
+        // linked (invariant #3). Read before the line is emitted.
+        let whole_line = !self.line_open && !self.line_escaped;
+        let start = out.len();
+        if self.redact_raw {
+            // A command that exists to print secrets: its bare secret has no
+            // shape to detect, so every complete line is masked whole.
+            out.extend_from_slice(line);
+            self.command_output_line_count += 1;
+            self.mask_all_since(out, start);
+        } else {
+            self.emit_stream_line_unlinked(out, line);
+            // Masking runs before linking, so a link never carries a secret:
+            // a masked line no longer matches its source and is not linked.
+            self.redact_since(out, start);
+        }
+        if whole_line && self.links_armed {
+            self.link_emitted_line(out, start, line);
+        }
+    }
+
+    /// Re-emit the line just written at `out[start..]` with links around its
+    /// URLs and `file:line` locations, when it has any. The shown bytes are
+    /// verified against `line`, so a view that rewrote text is left as is.
+    fn link_emitted_line(&self, out: &mut Vec<u8>, start: usize, line: &[u8]) {
+        let Some(linker) = &self.linker else {
+            return;
+        };
+        if line.iter().copied().any(is_binary_byte) {
+            return;
+        }
+        let Some(rendered) = out.get(start..) else {
+            return;
+        };
+        if let Some(linked) = linker.link_line(line, rendered, self.link_cwd.as_deref()) {
+            out.truncate(start);
+            out.extend_from_slice(&linked);
+        }
+    }
+
+    /// Mask secrets in what was written to `out` from `start` on, when
+    /// redaction is on (see [`redact`]).
+    fn redact_since(&mut self, out: &mut Vec<u8>, start: usize) {
+        if !self.redact_on {
+            return;
+        }
+        let Some(written) = out.get(start..) else {
+            return;
+        };
+        if let Some(masked) = self.redactor.redact(written) {
+            out.truncate(start);
+            out.extend_from_slice(&masked);
+        }
+    }
+
+    /// A one-line GLIMPS note (dim), on a line of its own.
+    fn push_note(&self, out: &mut Vec<u8>, note: &str) {
+        let mut line = Vec::with_capacity(note.len() + 16);
+        if !out.ends_with(b"\n") && !out.is_empty() {
+            line.push(b'\n');
+        }
+        line.extend_from_slice(self.theme.debug.as_bytes());
+        line.extend_from_slice(note.as_bytes());
+        line.extend_from_slice(self.theme.reset.as_bytes());
+        line.push(b'\n');
+        push_crlf(out, &line);
+    }
+
+    /// Mask every shown character written from `start` on (see
+    /// [`redact::Redactor::mask_all`]).
+    fn mask_all_since(&mut self, out: &mut Vec<u8>, start: usize) {
+        let Some(written) = out.get(start..) else {
+            return;
+        };
+        if let Some(masked) = self.redactor.mask_all(written) {
+            out.truncate(start);
+            out.extend_from_slice(&masked);
+        }
+    }
+
+    /// Mask secrets in GLIMPS-authored text that repeats what the user typed
+    /// or what the command printed (the header, the failure recap, the pinned
+    /// line). A fresh redactor: chrome is not part of the output's key-block
+    /// state.
+    fn redact_chrome<'a>(&self, text: &'a [u8]) -> Cow<'a, [u8]> {
+        if !self.redact_on {
+            return Cow::Borrowed(text);
+        }
+        redact::Redactor::new()
+            .redact(text)
+            .map_or(Cow::Borrowed(text), Cow::Owned)
+    }
+
+    /// Links in GLIMPS-authored chrome text (the pinned error line).
+    fn link_chrome<'a>(&self, text: &'a [u8]) -> Cow<'a, [u8]> {
+        match &self.linker {
+            Some(linker) if self.links_armed => linker.link_chrome(text, self.link_cwd.as_deref()),
+            _ => Cow::Borrowed(text),
+        }
+    }
+
+    fn emit_stream_line_unlinked(&mut self, out: &mut Vec<u8>, line: &[u8]) {
         if let Some(formatted) = self.format_command_line(line) {
             out.extend_from_slice(&formatted);
             self.command_output_line_count += 1;
@@ -1250,7 +1670,17 @@ impl Formatter {
         if let Some(formatted) = linefmt::colorize_cli_diagnostic_line(line, &self.theme) {
             return Some(formatted);
         }
-        match command_view(&self.pending_command)? {
+        if let Some(views) = command_list_views(&self.pending_command) {
+            return views
+                .into_iter()
+                .find_map(|view| self.format_view_line(line, view));
+        }
+        let view = command_view(&self.pending_command)?;
+        self.format_view_line(line, view)
+    }
+
+    fn format_view_line(&mut self, line: &[u8], view: CommandView) -> Option<Vec<u8>> {
+        match view {
             CommandView::Pwd if self.command_output_line_count == 0 => {
                 format_pwd_line(line, &self.theme)
             }
@@ -1302,6 +1732,8 @@ impl Formatter {
             CommandView::Git(view) => linefmt::colorize_git_line(line, &self.theme, view),
             CommandView::Grep(view) => linefmt::colorize_grep_line(line, &self.theme, view),
             CommandView::Brew(view) => linefmt::colorize_brew_line(line, &self.theme, view),
+            CommandView::Ss => linefmt::colorize_ss_line(line, &self.theme),
+            CommandView::Ufw => linefmt::colorize_ufw_line(line, &self.theme),
         }
     }
 
@@ -1393,6 +1825,9 @@ impl Formatter {
     }
 
     fn pending_command_prefers_text_lines(&self) -> bool {
+        if command_list_views(&self.pending_command).is_some() {
+            return true;
+        }
         matches!(
             command_view(&self.pending_command),
             Some(
@@ -1419,6 +1854,8 @@ impl Formatter {
                     | CommandView::Pmset
                     | CommandView::NetworkSetup
                     | CommandView::Brew(_)
+                    | CommandView::Ss
+                    | CommandView::Ufw
             )
         )
     }
@@ -1472,11 +1909,13 @@ impl Formatter {
                     // so (JSON/HTML regenerate `\n`; diff preserves the user's own).
                     Some((label, formatted, needs_crlf)) => {
                         out.extend_from_slice(&render_badge(label, self.config.color));
+                        let at = out.len();
                         if needs_crlf {
                             push_crlf(out, &formatted);
                         } else {
                             out.extend_from_slice(&formatted);
                         }
+                        self.redact_since(out, at);
                     }
                     // Not a type we format whole — but the run may still hold
                     // lines the streaming colorizers know (a candidate that
@@ -1498,7 +1937,18 @@ impl Formatter {
                 if !line.is_empty() {
                     self.line_open = true;
                 }
+                let at = out.len();
                 out.extend_from_slice(&line);
+                if self.redact_raw {
+                    // A secret-printing command's unfinished line cut off by
+                    // an escape or the end of its output (a bare secret
+                    // printed with `printf %s`). A prompt waiting for input
+                    // is released by the quiet-interval flush instead, which
+                    // only masks shapes, so it stays readable.
+                    self.mask_all_since(out, at);
+                } else {
+                    self.redact_since(out, at);
+                }
             }
             Collect::Passthrough | Collect::Idle => {}
         }
@@ -1723,6 +2173,8 @@ enum CommandView {
     Grep(linefmt::GrepView),
     NetworkSetup,
     Brew(linefmt::BrewView),
+    Ss,
+    Ufw,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1808,6 +2260,10 @@ const COMMAND_VIEW_REGISTRY: &[CommandViewRegistration] = &[
         view: CommandView::Ping,
     },
     CommandViewRegistration {
+        names: &["ss"],
+        view: CommandView::Ss,
+    },
+    CommandViewRegistration {
         names: &["ifconfig"],
         view: CommandView::IfConfig,
     },
@@ -1866,6 +2322,7 @@ fn command_view(command: &Option<Vec<u8>>) -> Option<CommandView> {
         "scutil" => scutil_command_view(cmd),
         "route" => route_command_view(cmd),
         "netstat" => netstat_command_view(cmd),
+        "ufw" => ufw_command_view(cmd),
         "lsof" => lsof_command_view(cmd),
         "launchctl" => launchctl_command_view(cmd),
         "pmset" => pmset_command_view(cmd),
@@ -2077,6 +2534,45 @@ fn route_command_view(command: &[u8]) -> Option<CommandView> {
     (args.windows(2).any(|pair| pair == ["get", "default"])
         || args.windows(2).any(|pair| pair == ["get", "0.0.0.0"]))
     .then_some(CommandView::Route)
+}
+
+/// `ufw status [verbose|numbered]` prints the rule table; every other
+/// subcommand prints prose and keeps the generic path.
+fn ufw_command_view(command: &[u8]) -> Option<CommandView> {
+    let words = shell_words(command)?;
+    let ufw_index = words
+        .iter()
+        .position(|word| word.rsplit(|byte| *byte == b'/').next() == Some(b"ufw"))?;
+    (words.get(ufw_index + 1).map(Vec::as_slice) == Some(b"status")).then_some(CommandView::Ufw)
+}
+
+/// Views for a command list such as `ss -tlnp; ufw status; grep -rn x /etc`
+/// (also behind `ssh host '…'`), one per command that has a view, in order.
+///
+/// The output of a list has no boundaries GLIMPS can see, so each line is
+/// offered to every view in turn. That is only sound for views that validate
+/// a line's shape and decline anything else; a list containing any other
+/// view returns `None`, and the caller keeps the single-view behavior.
+fn command_list_views(command: &Option<Vec<u8>>) -> Option<Vec<CommandView>> {
+    let cleaned = command::without_stderr_redirection(command.as_deref()?);
+    let cmd = cleaned.as_ref();
+    if let Some(remote) = command::ssh_remote_command(cmd) {
+        return command_list_views(&Some(remote));
+    }
+    let mut views = Vec::new();
+    for segment in command::command_list_segments(cmd)? {
+        let Some(view) = command_view(&Some(segment.to_vec())) else {
+            continue;
+        };
+        if !matches!(
+            view,
+            CommandView::Ss | CommandView::Ufw | CommandView::Grep(_)
+        ) {
+            return None;
+        }
+        views.push(view);
+    }
+    (!views.is_empty()).then_some(views)
 }
 
 fn netstat_command_view(command: &[u8]) -> Option<CommandView> {
@@ -2915,6 +3411,184 @@ impl PipelineWarning {
             format!("stages {stages}")
         }
     }
+}
+
+const REDACT_ON_NOTE: &str =
+    "glimps: masking secrets in this session's output (best effort) \u{2014} `glimps redact off` stops it.";
+const REDACT_ON_PAUSED_NOTE: &str =
+    "glimps: secret masking is on; formatting is paused, so it starts with `glimps on`.";
+const REDACT_OFF_NOTE: &str = "glimps: no longer masking secrets in this session.";
+const REDACT_PAUSED_NOTE: &str =
+    "glimps: secret masking is paused with formatting; `glimps on` resumes both.";
+
+/// Most of a program's escapes before its first output byte that are kept
+/// (a title, a color, a hyperlink are a few dozen bytes). Past this the first
+/// line is simply treated as styled.
+const LEADING_PASS_CAP: usize = 1024;
+
+/// What a program's escapes before its first output byte mean for the header
+/// that is inserted after them.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LeadingEscapes {
+    /// The program left a color or a hyperlink in effect for its first line.
+    styled: bool,
+    /// The program's hyperlink is still open at its first output byte.
+    link_open: bool,
+    /// Written right before the header: closes the program's open hyperlink.
+    before_header: Vec<u8>,
+    /// Written right after the header: the program's SGR sequences again
+    /// (the header ends with a reset) and its hyperlink, reopened.
+    after_header: Vec<u8>,
+}
+
+/// Read the escapes a program wrote before its first output byte. A window
+/// title, `ESC ( B` and a color that ends in a plain reset (all of which fish
+/// writes before every command) leave the line plain; any other escape (a
+/// color left on, a hyperlink, a cursor move or erase) means the program
+/// styles its first line. Only SGR and OSC 8 are restored after the header.
+fn leading_escapes(bytes: &[u8]) -> LeadingEscapes {
+    let mut sgr: Vec<&[u8]> = Vec::new();
+    let mut link: Option<&[u8]> = None;
+    let mut other = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            i += 1;
+            continue;
+        }
+        match bytes.get(i + 1) {
+            Some(b'[') => {
+                let Some(len) = bytes[i + 2..]
+                    .iter()
+                    .position(|b| (0x40..=0x7e).contains(b))
+                else {
+                    break;
+                };
+                let end = i + 2 + len + 1;
+                if bytes[end - 1] == b'm' {
+                    sgr.push(&bytes[i..end]);
+                } else {
+                    other = true;
+                }
+                i = end;
+            }
+            Some(b']') => {
+                let body_start = i + 2;
+                let mut end = body_start;
+                let mut terminator = 0;
+                while end < bytes.len() {
+                    if bytes[end] == 0x07 {
+                        terminator = 1;
+                        break;
+                    }
+                    if bytes[end] == 0x1b && bytes.get(end + 1) == Some(&b'\\') {
+                        terminator = 2;
+                        break;
+                    }
+                    end += 1;
+                }
+                if terminator == 0 {
+                    break;
+                }
+                let body = &bytes[body_start..end];
+                if let Some(rest) = body.strip_prefix(b"8;") {
+                    // `8;params;uri`: an empty URI closes the link.
+                    let uri = rest.splitn(2, |&b| b == b';').nth(1).unwrap_or_default();
+                    link = (!uri.is_empty()).then_some(&bytes[i..end + terminator]);
+                } else if !(body.starts_with(b"0;")
+                    || body.starts_with(b"1;")
+                    || body.starts_with(b"2;")
+                    || body.starts_with(b"7;"))
+                {
+                    other = true;
+                }
+                i = end + terminator;
+            }
+            Some(b'(') if bytes.get(i + 2) == Some(&b'B') => i += 3,
+            _ => {
+                other = true;
+                i += 2;
+            }
+        }
+    }
+    let reset = |seq: &[u8]| matches!(&seq[2..seq.len() - 1], b"" | b"0" | b"00");
+    let colored = sgr.last().is_some_and(|last| !reset(last));
+    let mut leading = LeadingEscapes {
+        styled: colored || link.is_some() || other,
+        link_open: link.is_some(),
+        ..LeadingEscapes::default()
+    };
+    if let Some(open) = link {
+        leading.before_header.extend_from_slice(b"\x1b]8;;\x1b\\");
+        if colored {
+            sgr.iter()
+                .for_each(|seq| leading.after_header.extend_from_slice(seq));
+        }
+        leading.after_header.extend_from_slice(open);
+    } else if colored {
+        sgr.iter()
+            .for_each(|seq| leading.after_header.extend_from_slice(seq));
+    }
+    leading
+}
+
+/// Whether the last OSC 8 sequence in `bytes` opens a hyperlink
+/// (`Some(true)`) or closes one (`Some(false)`); `None` when there is none.
+fn last_hyperlink_state(bytes: &[u8]) -> Option<bool> {
+    let mut state = None;
+    let mut from = 0;
+    while let Some(found) = bytes[from..].windows(4).position(|w| w == b"\x1b]8;") {
+        let params = from + found + 4;
+        let end = bytes[params..]
+            .iter()
+            .position(|&b| b == 0x07 || b == 0x1b)
+            .map_or(bytes.len(), |len| params + len);
+        let body = &bytes[params..end];
+        let uri = body.splitn(2, |&b| b == b';').nth(1).unwrap_or_default();
+        state = Some(!uri.is_empty());
+        from = end.max(params);
+    }
+    state
+}
+
+/// An environment variable as `auto` terminal detection (`[notify]`,
+/// `[links]`) sees it. Unit tests see none, so their expected bytes never
+/// depend on the terminal that happens to run them.
+fn terminal_env(key: &str) -> Option<String> {
+    if cfg!(test) {
+        None
+    } else {
+        std::env::var(key).ok()
+    }
+}
+
+/// Decode a command's exit for the footer and the completion notice.
+///
+/// A leading shell `!` deliberately reverses the underlying command's result.
+/// zsh/bash preserve that underlying result in their pipeline status array, so
+/// `[0]` plus final exit 1 means the command itself succeeded and only the
+/// boolean negation evaluated false. Treating that as an ordinary red failure
+/// is technically literal but deeply misleading (for example, a successful
+/// `! ssh-copy-id ...`).
+fn exit_status(
+    cmd: &[u8],
+    exit_code: i32,
+    pipeline_statuses: &Option<Vec<i32>>,
+) -> exitcode::ExitStatus {
+    if is_negated_success(cmd, exit_code, pipeline_statuses) {
+        exitcode::negated_success()
+    } else {
+        exitcode::describe(exit_code)
+    }
+}
+
+/// `! cmd` whose underlying command succeeded (see [`exit_status`]).
+fn is_negated_success(cmd: &[u8], exit_code: i32, pipeline_statuses: &Option<Vec<i32>>) -> bool {
+    exit_code == 1
+        && cmdline::starts_with_negation(cmd)
+        && pipeline_statuses
+            .as_ref()
+            .is_some_and(|statuses| statuses.last() == Some(&0))
 }
 
 fn pipeline_warning(statuses: &Option<Vec<i32>>, final_exit: i32) -> Option<PipelineWarning> {

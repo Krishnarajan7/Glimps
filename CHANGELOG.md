@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sessions (`ssh host`, `-t`) stay untouched, and a remote command that reads
   secrets (`ssh host cat .env`) stays raw pass-through. A leading `!` no
   longer hides the real command from the classifier.
+- **`ss` and `ufw status` views** — socket tables get state-colored rows
+  (LISTEN green, ESTAB cyan, waits gold), split `host:port` addresses, dim
+  wildcard peers and highlighted process names; `ufw status` gets its
+  `Status:` line, header and ALLOW/DENY/REJECT/LIMIT actions colored.
+- **Command lists** — `a; b && c` (also inside `ssh host '…'`) now colors
+  each section with its own command's view when every view involved checks
+  line shape (`ss`, `ufw status`, `grep -n`). Lists that include any other
+  view keep the previous single-view behavior.
 
 - **Report lines** — after every other formatter has declined, a plain
   `Label: value` line (`timedatectl`, `hostnamectl`, `sw_vers`) or
@@ -60,8 +68,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`examples/pty_probe.rs`) and `scripts/dogfood-windows.ps1`. See
   `docs/windows.md` for the decision gate before this is offered for download.
 
+- **Completion notices (opt-in)** — with `[notify] enabled = true`, a command
+  that ran at least `after_seconds` (default 30) sends a desktop notification
+  when it ends: `✓ cargo build finished in 4m12s`, `✗ npm test failed
+  (exit 1) after 3m02s`. `method = "auto"` uses `OSC 9` in iTerm2, WezTerm and
+  Ghostty, `OSC 99` in kitty and `OSC 777` in foot, and rings the bell
+  elsewhere (including tmux and screen); `glimps doctor` shows the choice.
+  No notice for Ctrl-C, full-screen or interactive programs, sensitive
+  commands, or a command you typed into in its last 10 seconds. The text
+  names the program, plus its subcommand for well-known tools (`cargo build`),
+  never other arguments or output. GLIMPS does not turn on focus reporting.
+
+- **Clickable links** — URLs and `file:line[:column]` locations (also Python's
+  `File "…", line N`) in plain output become OSC 8 hyperlinks, and so does
+  the pinned error line in the failure footer, which makes a rustc
+  `--> src/pty.rs:214:18` clickable while rustc's own colored output is left
+  untouched. Relative paths resolve against the directory the command ran
+  in. `[links] editor = "vscode"` (or `"cursor"`, `"zed"`, a URL template)
+  opens the file at the line; the default is a `file://` link. On by default
+  only in terminals known to support OSC 8 (iTerm2, WezTerm, Ghostty, kitty,
+  Alacritty, foot, VS Code, Windows Terminal, GNOME Terminal) and never in
+  tmux or screen; `mode = "on"`/`"off"` overrides it, and `glimps doctor`
+  shows the result. Visible text never changes.
+
+- **Screen-share mode (best effort)** — `glimps redact on` (or
+  `[redact] enabled = true`) masks secrets in command output with `*`,
+  column for column: vendor-prefixed tokens (GitHub, GitLab, Slack, Stripe,
+  OpenAI, Anthropic, AWS, Google, npm, PyPI, Hugging Face, …), JWTs, URL
+  passwords, `Authorization` values, secret-named fields (`API_KEY=…`,
+  `password: …`, `"clientSecret": "…"`, also when a program colors the name
+  and value apart) and private-key bodies, including in the command header,
+  the failure recap and the pinned error line. Commands that exist to print
+  a secret (`gh auth token`, `pass show`) have every line masked. Never
+  masked: typed input, full-screen and interactive programs, binary output,
+  and a shapeless secret printed by an ordinary command. GLIMPS confirms the
+  toggle itself; turning it off needs a real `glimps redact off` (checked
+  against the private metadata channel), and `glimps off` pauses it.
+- **A shell that cannot start no longer closes the terminal** — when the
+  shell GLIMPS was asked to wrap fails to start, GLIMPS hands over to a
+  plain shell (`GLIMPS=0`) instead of exiting.
+- **fish shell integration (beta)** — `glimps init fish` for fish 3.3 and
+  later, including fish 4, with the same markers, metadata, sanitizing and
+  `glimps off`/`on` as zsh. It lives in `~/.config/fish/conf.d/00-glimps.fish`
+  (fish reads `conf.d` before `config.fish`, so nothing runs twice);
+  `glimps setup` writes that file and `glimps doctor` checks it, warning when
+  the line is in `config.fish` instead.
+
 ### Fixed
 
+- **Links on self-styled lines, and a program's first color** — a line that
+  opened with the program's own escape (`ESC [2K`, a progress redraw, its own
+  hyperlink) could still get GLIMPS's links, and a link nested inside the
+  program's hyperlink cut it short. Such lines are now never linked. The
+  command header, inserted after a program's opening color, no longer resets
+  it: the color (and an open hyperlink) is restored after the header.
+- **Escapes interrupted by control bytes** — `ESC` followed by a control
+  byte such as `\n` and then its final byte is one sequence, as terminals
+  read it; it used to end at the control byte.
+- **Shells started from a different login shell stay that shell** — the
+  integration re-execed `glimps`, which wrapped `$SHELL`: fish (or zsh)
+  started from a bash or zsh login came back as the login shell. Each hook
+  now passes its own path (`glimps --shell …`).
+- **A header inside a charset escape** — `ESC ( B` (select ASCII, part of
+  `tput sgr0` on xterm-like terminals, and written by fish before every
+  command) was read as a two-byte escape, so its `B` counted as output and
+  the command header could be inserted inside the sequence. Escapes with
+  intermediate bytes are now one sequence, in the scanner, the error-line pin
+  and the link finder.
+- **Other shell integrations' markers no longer frame output** — once
+  GLIMPS's own hooks have spoken, a `133;C` that does not follow GLIMPS's
+  command marker, or a `133;D` that does not follow its cwd marker, is
+  ignored. fish 4's built-in markers, and iTerm2's or WezTerm's alongside
+  GLIMPS, used to open the output zone before the command was known (no
+  header, no bypass by name) or close it before its result arrived (no
+  footer). A bare `133;D` printed by a command is now inert too.
 - **Expression column headers are keyed** — a bare `select coalesce(a,'x')`
   names the column with the literal expression, so the header cell holds
   commas, quotes and parens. That row sits directly under the top rule, which
@@ -90,6 +170,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mysql --version` (and other `<tool> --version` banners) are no longer
   painted as a result table; the version number and vendor note are colored
   instead.
+
+### Security
+
+- **Control characters in a command line or directory name can no longer
+  reach your terminal** — the zsh, bash and PowerShell hooks sent the command
+  line (OSC 7337) and working directory (OSC 7338) raw. A BEL or ESC in
+  either (a pasted line, a Ctrl-V insert, a directory from an archive or a
+  cloned repo) ended the marker early, so the rest reached the terminal as a
+  live escape sequence, such as an OSC 52 clipboard write. In zsh a NUL could
+  also forge a metadata record. Every control character except tab, newline
+  and carriage return is now sent as `?` (C1 controls in their UTF-8 form; a
+  raw 0x80-0x9F byte that is not valid UTF-8 is left as is, and is inert in a
+  UTF-8 terminal). Only the copy sent to GLIMPS
+  changes; the command you run is untouched. The rc line evaluates
+  `glimps init` at startup, so new shells pick up the fix after upgrading.
 
 ## [0.1.0] - 2026-08-30
 

@@ -9,6 +9,48 @@
 use anyhow::Result;
 use std::io::{IsTerminal, Write};
 
+/// `glimps redact on` / `glimps redact off`: mask secrets in this session's
+/// output (or stop), on the same in-band channel and with the same checks as
+/// [`toggle`]. Returns the process exit code.
+pub fn redact(on: bool) -> Result<i32> {
+    if std::env::var_os("GLIMPS_ACTIVE").is_none() {
+        eprintln!("glimps: not inside a GLIMPS session; nothing to redact.");
+        eprintln!(
+            "glimps: to mask secrets in every session, set `enabled = true` under [redact] in ~/.glimpsrc."
+        );
+        return Ok(1);
+    }
+    if std::env::var_os("GLIMPS").as_deref() == Some(std::ffi::OsStr::new("0")) {
+        eprintln!(
+            "glimps: formatting is disabled by GLIMPS=0 in this environment; masking needs it."
+        );
+        return Ok(1);
+    }
+    if !crate::config::Config::load().enabled {
+        eprintln!(
+            "glimps: formatting is disabled (`enabled = false` in ~/.glimpsrc); masking needs it."
+        );
+        return Ok(1);
+    }
+    if !std::io::stdout().is_terminal() {
+        eprintln!("glimps: stdout is not a terminal; the toggle cannot reach the session.");
+        return Ok(2);
+    }
+    let mut stdout = std::io::stdout();
+    let body = if on { "redact-on" } else { "redact-off" };
+    write!(stdout, "\x1b]7340;{body}\x07")?;
+    // GLIMPS prints the confirmation itself once it has applied the toggle;
+    // no confirmation below this line means this session cannot mask.
+    let ask = if on {
+        "glimps: asked this session to mask secrets."
+    } else {
+        "glimps: asked this session to stop masking secrets."
+    };
+    writeln!(stdout, "{ask}")?;
+    stdout.flush()?;
+    Ok(0)
+}
+
 /// Emit the pause/resume toggle. Returns the process exit code.
 pub fn toggle(resume: bool) -> Result<i32> {
     if std::env::var_os("GLIMPS_ACTIVE").is_none() {
