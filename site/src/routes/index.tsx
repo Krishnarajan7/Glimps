@@ -673,7 +673,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
             <div className="grid grid-cols-2 gap-3 font-mono text-sm">
               {[
                 { name: "vim", note: "full-screen · TTY control" },
-                { name: "ssh", note: "raw passthrough" },
+                { name: "ssh host", note: "interactive session · raw" },
                 { name: "htop", note: "TUI · alternate screen" },
                 { name: "less", note: "pager · owns the screen" },
                 { name: "binary", note: "left untouched" },
@@ -784,9 +784,9 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
                 to leave.
               </p>
               <p className="mt-4 text-sm text-muted-foreground">
-                On Windows (experimental)? Build from a checkout with{" "}
+                On Windows (experimental)? Run{" "}
                 <code className="px-1 py-0.5 rounded bg-muted text-foreground text-xs">
-                  cargo install --path .
+                  cargo install glimps
                 </code>{" "}
                 in PowerShell, then add the{" "}
                 <code className="px-1 py-0.5 rounded bg-muted text-foreground text-xs">
@@ -810,7 +810,7 @@ diff --git a/src/api.ts b/src/api.ts index 91a..c2b 100644 --- a/src/api.ts +++ 
                 cmd="brew install Krishnarajan7/tap/glimps"
               />
               <InstallBlock
-                label="2 · enable in your shell (near top of ~/.zshrc)"
+                label="2 · enable in your shell (near top of ~/.zshrc · bash and fish: see install docs)"
                 cmd='command -v glimps >/dev/null 2>&1 && eval "$(glimps init zsh)"'
               />
               <InstallBlock

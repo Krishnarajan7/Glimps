@@ -20,13 +20,13 @@ export const Route = createFileRoute("/installation")({
       {
         name: "description",
         content:
-          "Install GLIMPS with Homebrew, the shell installer, crates.io, or from source on macOS, Linux, and Windows. Enable it in bash, zsh, or PowerShell, verify the install, upgrade, and uninstall — with no surprises.",
+          "Install GLIMPS with Homebrew, the shell installer, crates.io, or from source on macOS, Linux, and Windows. Enable it in zsh, bash, fish, or PowerShell, verify the install, upgrade, and uninstall — with no surprises.",
       },
       { property: "og:title", content: "Install GLIMPS" },
       {
         property: "og:description",
         content:
-          "Install GLIMPS with Homebrew, a one-line installer, or Cargo, enable it in bash, zsh, or PowerShell, and try it without touching your shell.",
+          "Install GLIMPS with Homebrew, a one-line installer, or Cargo, enable it in zsh, bash, fish, or PowerShell, and try it without touching your shell.",
       },
       { property: "og:url", content: canonical("/installation") },
     ],
@@ -46,6 +46,7 @@ const toc: TocItem[] = [
   { id: "enable", label: "Enable in your shell" },
   { id: "zsh", label: "zsh", depth: 2 },
   { id: "bash", label: "bash", depth: 2 },
+  { id: "fish", label: "fish", depth: 2 },
   { id: "powershell", label: "PowerShell", depth: 2 },
   { id: "verify", label: "Verify it works" },
   { id: "demo", label: "Try without installing" },
@@ -82,7 +83,8 @@ function InstallPage() {
             ).
           </li>
           <li>
-            An interactive shell: zsh, or bash 3.2+ (the macOS system bash works). On
+            An interactive shell: zsh, bash 3.2+ (the macOS system bash works), or fish
+            3.3+ (including fish 4). On
             Windows: PowerShell 7 (<Code>pwsh</Code>) or Windows PowerShell 5.1.
           </li>
           <li>
@@ -171,8 +173,12 @@ function InstallPage() {
             through ConPTY. Install Rust with the MSVC toolchain (
             <Code>stable-x86_64-pc-windows-msvc</Code>, the rustup default), which needs the
             Visual Studio Build Tools &quot;Desktop development with C++&quot; workload.
-            There is no prebuilt Windows binary yet, and the crates.io v0.1.0 release
-            predates Windows support, so build from a checkout in PowerShell:
+            There is no prebuilt Windows binary yet, so Cargo builds it for you. The
+            crates.io release includes Windows support from v0.2.0 on:
+          </P>
+          <Shell lines={[{ cmd: "cargo install glimps" }]} />
+          <P>
+            Or, for the latest <Code>main</Code>, build from a checkout in PowerShell:
           </P>
           <Shell
             lines={[
@@ -210,8 +216,7 @@ function InstallPage() {
 
         <Callout title="not shipped yet">
           These are planned but not available yet: <Code>apt</Code>/<Code>dnf</Code>/
-          <Code>pacman</Code> packages, prebuilt Windows binaries, and fish shell
-          integration.
+          <Code>pacman</Code> packages and prebuilt Windows binaries.
         </Callout>
       </section>
 
@@ -262,6 +267,26 @@ function InstallPage() {
         </div>
 
         <div className="space-y-3">
+          <H3 id="fish">fish (beta)</H3>
+          <P>
+            fish 3.3 and later, including fish 4. Put this line on its own in{" "}
+            <Code>~/.config/fish/conf.d/00-glimps.fish</Code> rather than in{" "}
+            <Code>config.fish</Code>: fish reads <Code>conf.d</Code> first, so the outer
+            fish hands over to <Glimps quiet /> before anything else runs, and nothing runs
+            twice. <Code>glimps setup</Code> writes this file for you, and{" "}
+            <Code>glimps doctor</Code> warns if the line is in <Code>config.fish</Code>{" "}
+            instead.
+          </P>
+          <Shell
+            lines={[
+              {
+                cmd: "command -q glimps; and glimps init fish | source",
+              },
+            ]}
+          />
+        </div>
+
+        <div className="space-y-3">
           <H3 id="powershell">PowerShell (Windows)</H3>
           <P>
             Open your profile with <Code>notepad $PROFILE</Code> and add this near the top:
@@ -284,10 +309,10 @@ function InstallPage() {
         </div>
 
         <Callout title="the guarded form">
-          The <Code>command -v glimps</Code> (or <Code>Get-Command glimps</Code>) check keeps your shell startup working even
+          The <Code>command -v glimps</Code> (fish: <Code>command -q glimps</Code>; PowerShell:{" "}
+          <Code>Get-Command glimps</Code>) check keeps your shell startup working even
           if the binary is missing (fresh machine, restored dotfiles, container). If
-          <Glimps quiet /> isn't installed, the line is a no-op. fish integration is planned but
-          not available yet.
+          <Glimps quiet /> isn't installed, the line is a no-op.
         </Callout>
       </section>
 
@@ -341,7 +366,7 @@ function InstallPage() {
             crates.io: <Code>cargo install glimps</Code> (it replaces an older version)
           </li>
           <li>
-            From source (and Windows): <Code>git pull</Code>, then{" "}
+            From source: <Code>git pull</Code>, then{" "}
             <Code>cargo install --path .</Code>
           </li>
         </UL>
@@ -354,7 +379,7 @@ function InstallPage() {
           <li>
             Remove the init line from your startup file:{" "}
             <Code>sed -i '' '/glimps init/d' ~/.zshrc</Code> (or <Code>~/.bashrc</Code>).
-            On Windows, delete the <Code>glimps init pwsh</Code> line from{" "}
+            For fish, delete <Code>~/.config/fish/conf.d/00-glimps.fish</Code>. On Windows, delete the <Code>glimps init pwsh</Code> line from{" "}
             <Code>$PROFILE</Code>.
           </li>
           <li>

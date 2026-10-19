@@ -20,7 +20,7 @@ export const Route = createFileRoute("/features")({
       {
         name: "description",
         content:
-          "Every format GLIMPS recognizes, plus command exit status, duration, pinned errors, pipeline warnings, and the pass-through guarantees you can rely on.",
+          "Every format GLIMPS recognizes, plus command exit status, duration, pinned errors, pipeline warnings, clickable links, completion notices, screen-share mode, and the pass-through guarantees you can rely on.",
       },
       { property: "og:title", content: "GLIMPS Features" },
       {
@@ -44,8 +44,12 @@ const toc: TocItem[] = [
   { id: "diffs", label: "Diffs", depth: 2 },
   { id: "stack", label: "Stack traces", depth: 2 },
   { id: "tables", label: "Small tables", depth: 2 },
+  { id: "reports", label: "Report lines", depth: 2 },
   { id: "command-aware", label: "Command-aware", depth: 2 },
   { id: "failure-intelligence", label: "Failure intelligence" },
+  { id: "links", label: "Clickable links" },
+  { id: "notify", label: "Completion notices" },
+  { id: "redact", label: "Screen-share mode" },
   { id: "bar", label: "The ▌ command bar" },
   { id: "passthrough", label: "Pass-through rules" },
   { id: "kill-switch", label: "Kill switch" },
@@ -97,6 +101,14 @@ function FeaturesPage() {
           <li>
             <b>Diffs & stack traces.</b> Line-level color for added/removed lines and
             for the exception header of a stack trace.
+          </li>
+          <li>
+            <b>Clickable links.</b> URLs and <Code>file:line</Code> locations become links
+            in terminals that support them, and can open straight in your editor.
+          </li>
+          <li>
+            <b>Screen-share mode.</b> <Code>glimps redact on</Code> masks tokens,
+            passwords and keys in command output before you share your screen.
           </li>
         </UL>
       </section>
@@ -169,18 +181,44 @@ function FeaturesPage() {
           <H3 id="tables">Small tables</H3>
           <P>
             Result tables from database clients (<Code>psql</Code>, <Code>sqlite3</Code>,{" "}
-            <Code>mysql</Code>, <Code>duckdb</Code>) get a subtle header underline and
+            <Code>mysql</Code>, <Code>duckdb</Code>) get a bold header row and
             column-aligned values. Long tables are passed through untouched to avoid reflow
-            surprises.
+            surprises. Inside an interactive <Code>mysql</Code>, <Code>psql</Code> or{" "}
+            <Code>sqlite3</Code> session, every result table is understood, multi-line SQL
+            such as <Code>SHOW CREATE TABLE</Code> is syntax-colored, and the client&apos;s
+            status lines are dimmed. Your prompt and what you type are left exactly as they
+            are.
           </P>
+        </div>
+
+        <div className="space-y-3">
+          <H3 id="reports">Report lines</H3>
+          <P>
+            When nothing else matches, plain <Code>Label: value</Code> lines (
+            <Code>timedatectl</Code>, <Code>hostnamectl</Code>, <Code>sw_vers</Code>) and{" "}
+            <Code>KEY=value</Code> lines (<Code>env</Code>) get their field name colored and
+            the separator dimmed. The value itself is never touched. Turn it off with{" "}
+            <Code>reports = false</Code> under <Code>[formatters]</Code>.
+          </P>
+          <Shell
+            lines={[
+              { cmd: "sw_vers" },
+              { out: "ProductName:    macOS" },
+              { out: "ProductVersion: 26.5" },
+            ]}
+          />
         </div>
 
         <div className="space-y-3">
           <H3 id="command-aware">Command-aware output</H3>
           <P>
             Beyond whole-document detection, <Glimps quiet /> has semantic views for Git,
-            Cargo, filesystem and process tools, search results, HTTP and networking,
-            database tables, macOS metadata, project files, and source code. The precise
+            Cargo, Homebrew, filesystem and process tools, search results, HTTP and
+            networking (including <Code>ss</Code> and <Code>ufw status</Code>), database
+            tables, macOS metadata, project files, and source code. Remote commands get the
+            same views: <Code>ssh host df -h</Code> is shown like a local{" "}
+            <Code>df -h</Code>. In a command list such as <Code>ss -tlnp; ufw status</Code>,
+            each part can get its own view. The precise
             commands and deliberately restricted forms are listed in the{" "}
             <Link to="/commands" className="underline underline-offset-4">
               command coverage catalogue
@@ -249,6 +287,67 @@ function FeaturesPage() {
       </section>
 
       <section className="space-y-4">
+        <H2 id="links">Clickable links</H2>
+        <P>
+          URLs and <Code>file:line[:column]</Code> locations in plain output, including
+          Python&apos;s <Code>File &quot;…&quot;, line N</Code> and the pinned error line in
+          the failure footer, become OSC 8 hyperlinks. Relative paths resolve against the
+          directory the command ran in. The visible text never changes.
+        </P>
+        <P>
+          By default a file link opens with <Code>file://</Code>. Set{" "}
+          <Code>editor = &quot;vscode&quot;</Code> (or <Code>&quot;cursor&quot;</Code>,{" "}
+          <Code>&quot;zed&quot;</Code>, or your own URL template) under <Code>[links]</Code> to
+          jump straight to the line. Links are on automatically only in terminals known to
+          support them (iTerm2, WezTerm, Ghostty, kitty, Alacritty, foot, VS Code, Windows
+          Terminal, GNOME Terminal) and never in tmux or screen. <Code>mode = &quot;on&quot;</Code>{" "}
+          or <Code>&quot;off&quot;</Code> overrides that, and <Code>glimps doctor</Code> shows
+          which applies.
+        </P>
+      </section>
+
+      <section className="space-y-4">
+        <H2 id="notify">Completion notices</H2>
+        <P>
+          Opt in with <Code>enabled = true</Code> under <Code>[notify]</Code>, and a command
+          that ran at least <Code>after_seconds</Code> (default 30) sends a desktop
+          notification when it ends:
+        </P>
+        <Shell
+          lines={[
+            { out: "✓ cargo build finished in 4m12s" },
+            { out: "✗ npm test failed (exit 1) after 3m02s", tone: "error" },
+          ]}
+        />
+        <P>
+          It uses your terminal&apos;s own notification escape (iTerm2, WezTerm, Ghostty,
+          kitty, foot) and rings the bell elsewhere, including tmux and screen. There is no
+          notice for Ctrl-C, full-screen or interactive programs, sensitive commands, or a
+          command you were typing into. The text names the program (and its subcommand
+          for well-known tools), never its other arguments or output.
+        </P>
+      </section>
+
+      <section className="space-y-4">
+        <H2 id="redact">Screen-share mode</H2>
+        <P>
+          Run <Code>glimps redact on</Code> (or set <Code>enabled = true</Code> under{" "}
+          <Code>[redact]</Code>) before you share your screen. Secrets in command output
+          are replaced with <Code>*</Code>, character for character: vendor tokens
+          (GitHub, Stripe, OpenAI, Anthropic, AWS, Google and more), JWTs, passwords in
+          URLs, <Code>Authorization</Code> values, secret-named fields such as{" "}
+          <Code>API_KEY=…</Code>, and private keys. Commands that exist to print a secret,
+          such as <Code>gh auth token</Code>, have every line masked.
+        </P>
+        <Callout title="best effort">
+          Screen-share mode catches secrets by their shape. A secret with no recognizable
+          shape printed by an ordinary command can still show, and what you type,
+          full-screen programs and binary output are never masked. Turning it off takes a
+          real <Code>glimps redact off</Code> typed at the prompt.
+        </Callout>
+      </section>
+
+      <section className="space-y-4">
         <H2 id="bar">The ▌ command bar</H2>
         <P>
           The most visible thing <Glimps quiet /> does. A short vertical bar is drawn just before
@@ -275,7 +374,10 @@ function FeaturesPage() {
           <li>The destination is not a TTY (output is piped or redirected).</li>
           <li>A no-echo password prompt is on screen.</li>
           <li>
-            The command is an SSH session (<Code>ssh</Code>).
+            The command is an interactive SSH session (<Code>ssh host</Code>,{" "}
+            <Code>ssh -t</Code>). A one-off remote command such as{" "}
+            <Code>ssh host df -h</Code> is formatted like the local command, unless it reads
+            secrets (<Code>ssh host cat .env</Code>).
           </li>
         </UL>
         <Callout title="why">
@@ -288,7 +390,7 @@ function FeaturesPage() {
         <H2 id="kill-switch">Kill switch</H2>
         <P>
           <Glimps quiet /> wraps your whole shell, so the switch is per-shell or per-environment,
-          not per-command. Three ways to turn it off, in order of scope:
+          not per-command. Four ways to turn it off, in order of scope:
         </P>
         <UL>
           <li>
@@ -297,6 +399,10 @@ function FeaturesPage() {
           </li>
           <li>
             Whole environment: <Code>export GLIMPS=0</Code> keeps future shells raw.
+          </li>
+          <li>
+            Mid-session: <Code>glimps off</Code> pauses formatting in the current shell and{" "}
+            <Code>glimps on</Code> resumes it.
           </li>
           <li>
             Persistent: set <Code>enabled = false</Code> in <Code>~/.glimpsrc</Code>, or

@@ -61,8 +61,8 @@ function AboutPage() {
       <section className="space-y-4">
         <H2 id="overview">Overview</H2>
         <P>
-          <Glimps quiet /> is not a new terminal or a shell. It re-execs your shell (bash,
-          zsh, or PowerShell on Windows) inside a PTY it supervises, with lightweight shell integration providing
+          <Glimps quiet /> is not a new terminal or a shell. It re-execs your shell (zsh,
+          bash, fish, or PowerShell on Windows) inside a PTY it supervises, with lightweight shell integration providing
           trusted command boundaries and exit status. A single guarded init line turns it
           on. From there it formats recognized output and keeps each command's result beside
           the output that produced it.
@@ -119,7 +119,7 @@ function AboutPage() {
         <H2 id="what-it-isnt">What it is not</H2>
         <UL>
           <li>Not a terminal emulator. You keep iTerm, Alacritty, Ghostty, whatever you already use.</li>
-          <li>Not a shell. You keep bash, zsh, or PowerShell.</li>
+          <li>Not a shell. You keep zsh, bash, fish, or PowerShell.</li>
           <li>Not a REPL, not an AI assistant, not a scrollback search tool.</li>
           <li>Not a general "pretty printer" — <Glimps quiet /> refuses to reformat anything it isn't confident about.</li>
         </UL>
@@ -168,8 +168,8 @@ function AboutPage() {
         </P>
         <P>
           It ships as a single native Rust binary — no interpreter or runtime to install
-          (no Node, Python, or JVM). <Glimps quiet /> is currently in beta: macOS with zsh
-          or bash today, with Linux as a supported build target and experimental Windows
+          (no Node, Python, or JVM). <Glimps quiet /> is currently in beta: macOS with zsh,
+          bash, or fish today, with Linux as a supported build target and experimental Windows
           support (PowerShell over ConPTY), following a versioned
           roadmap from v0.1 toward v2.0.
         </P>

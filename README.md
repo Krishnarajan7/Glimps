@@ -550,8 +550,8 @@ doctor` warns if the line sits below a plugin manager or prompt framework.
   formats.
 - **Windows is experimental.** PowerShell 7 and Windows PowerShell 5.1 are
   supported through ConPTY; the formatters are identical to macOS/Linux, but the
-  ConPTY layer has far less real-world mileage. Install is build-from-source only
-  for now (no prebuilt binary, not in the crates.io v0.1.0 release). Turn it off
+  ConPTY layer has far less real-world mileage. There is no prebuilt binary yet:
+  install with `cargo install glimps` (v0.2.0 and later) or build from source. Turn it off
   instantly with `$env:GLIMPS='0'`, and see [`docs/windows.md`](docs/windows.md)
   for the checklist and known limits.
 - **bash integration is beta.** It uses a `DEBUG` trap (bash has no native

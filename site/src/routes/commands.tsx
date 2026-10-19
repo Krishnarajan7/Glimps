@@ -243,6 +243,16 @@ function CommandsPage() {
                 "DNS sections, record types, names, addresses, TTLs, and query summaries.",
             },
             {
+              commands: ["ss", "ufw status"],
+              detail:
+                "Socket rows colored by state (LISTEN, ESTAB, waits), split host:port addresses, and firewall ALLOW/DENY/REJECT/LIMIT actions.",
+            },
+            {
+              commands: ["ssh host cmd"],
+              detail:
+                "A one-off remote command gets the same view as the local one. Interactive sessions and remote commands that read secrets pass through untouched.",
+            },
+            {
               commands: ["whois"],
               detail:
                 "Registration fields, contacts, addresses, country codes, dates, URLs, and abuse contacts by meaning.",
@@ -280,6 +290,21 @@ function CommandsPage() {
               detail:
                 "Selected macOS network, DNS, service, and power-management views.",
             },
+            {
+              commands: [
+                "brew services list",
+                "brew outdated",
+                "brew list --versions",
+                "brew deps --tree",
+              ],
+              detail:
+                "Service status, formula names, versions, and comparators told apart. Homebrew's own colors and install/upgrade output are left as they are.",
+            },
+            {
+              commands: ["timedatectl", "hostnamectl", "sw_vers", "env"],
+              detail:
+                "Plain Label: value and KEY=value reports get their field names colored. The values are never touched.",
+            },
           ]}
         />
       </section>
@@ -306,7 +331,7 @@ function CommandsPage() {
             {
               commands: ["psql", "sqlite3", "mysql", "mariadb", "duckdb"],
               detail:
-                "Small database result tables with headers and aligned values; oversized tables pass through safely.",
+                "Result tables with headers and aligned values, also inside an interactive session, where multi-line SQL is syntax-colored and your prompt and typing are left alone. Oversized tables pass through safely.",
             },
             {
               commands: [

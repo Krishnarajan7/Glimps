@@ -436,7 +436,7 @@ export function DocsLayout({
               style={{ borderColor: "var(--color-border)" }}
             >
               <GitHubStars className="flex" />
-              <span className="text-xs text-muted-foreground">docs v0.1</span>
+              <span className="text-xs text-muted-foreground">docs v0.2</span>
             </div>
           </div>
         </div>
@@ -525,7 +525,7 @@ export function DocsLayout({
             <GlimpsMark size={15} className="inline-block align-[-0.24em] mr-1.5" /> glimps — a
             terminal you already have, just legible.
           </span>
-          <span>MIT · docs v0.1</span>
+          <span>MIT · docs v0.2</span>
         </div>
       </footer>
     </div>
