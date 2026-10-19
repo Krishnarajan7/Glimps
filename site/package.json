@@ -18,7 +18,7 @@
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@fontsource/ibm-plex-sans": "^5.2.8",
-    "@tailwindcss/vite": "^4.2.1",
+    "@tailwindcss/vite": "^4.3.3",
     "@tanstack/react-router": "^1.170.16",
     "@tanstack/router-plugin": "^1.168.18",
     "clsx": "^2.1.1",
