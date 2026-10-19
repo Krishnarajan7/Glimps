@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-18
+
 ### Added
 
 - **Table column headers recolored** — the header row of a result or CSV/TSV
@@ -252,5 +254,6 @@ your prompt, your typed input, or anything it isn't sure about.
   Linux (aarch64/x86_64), a shell installer, a Homebrew tap
   (`Krishnarajan7/homebrew-tap`), and `cargo install glimps` from crates.io.
 
-[Unreleased]: https://github.com/Krishnarajan7/Glimps/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Krishnarajan7/Glimps/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Krishnarajan7/Glimps/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Krishnarajan7/Glimps/releases/tag/v0.1.0

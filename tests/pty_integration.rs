@@ -23,10 +23,12 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 const GLIMPS: &str = env!("CARGO_BIN_EXE_glimps");
 
+type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
 /// A running `glimps` session we can write to and observe.
 struct Session {
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    writer: Box<dyn Write + Send>,
+    writer: SharedWriter,
     output: Arc<Mutex<Vec<u8>>>,
     // The master must outlive the reader/writer; keep it owned here.
     _master: Box<dyn portable_pty::MasterPty + Send>,
@@ -34,8 +36,9 @@ struct Session {
 
 impl Session {
     fn write(&mut self, bytes: &[u8]) {
-        self.writer.write_all(bytes).expect("write to pty");
-        self.writer.flush().expect("flush pty");
+        let mut writer = self.writer.lock().expect("writer lock");
+        writer.write_all(bytes).expect("write to pty");
+        writer.flush().expect("flush pty");
     }
 
     fn snapshot(&self) -> Vec<u8> {
@@ -123,6 +126,72 @@ fn strip_csi(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Wrap a spawned child and its PTY master in a [`Session`]: a reader thread
+/// captures everything the child draws and answers the terminal queries a
+/// real terminal would (see [`answer_terminal_queries`]).
+fn attach(
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
+) -> Session {
+    let mut reader = master.try_clone_reader().expect("clone reader");
+    let writer: SharedWriter = Arc::new(Mutex::new(master.take_writer().expect("take writer")));
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&output);
+    let replies = Arc::clone(&writer);
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut scanned = 0;
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut out = sink.lock().expect("sink lock");
+                    out.extend_from_slice(&buf[..n]);
+                    scanned = answer_terminal_queries(&out, scanned, &replies);
+                }
+            }
+        }
+    });
+    Session {
+        child,
+        writer,
+        output,
+        _master: master,
+    }
+}
+
+/// Play the terminal for queries a shell blocks on: fish 4.1+ asks for the
+/// primary device attributes (and the cursor position) before each prompt and
+/// waits for the answer. A real terminal replies through GLIMPS's input path,
+/// so the harness does too. Scans `output[from..]` and returns where the next
+/// scan starts — far enough back to catch a query split across reads, never
+/// so far that one is answered twice.
+fn answer_terminal_queries(output: &[u8], from: usize, writer: &SharedWriter) -> usize {
+    const QUERIES: [(&[u8], &[u8]); 3] = [
+        (b"\x1b[0c", b"\x1b[?62;22c"),
+        (b"\x1b[c", b"\x1b[?62;22c"),
+        (b"\x1b[6n", b"\x1b[1;1R"),
+    ];
+    let mut next = output.len().saturating_sub(3).max(from);
+    let mut i = from;
+    while i < output.len() {
+        if let Some((query, reply)) = QUERIES
+            .iter()
+            .find(|(query, _)| output[i..].starts_with(query))
+        {
+            if let Ok(mut w) = writer.lock() {
+                let _ = w.write_all(reply);
+                let _ = w.flush();
+            }
+            i += query.len();
+            next = next.max(i);
+        } else {
+            i += 1;
+        }
+    }
+    next
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     needle.len() <= haystack.len() && haystack.windows(needle.len()).any(|w| w == needle)
 }
@@ -199,26 +268,7 @@ fn spawn_with_env(
     let child = pair.slave.spawn_command(cmd).expect("spawn glimps");
     drop(pair.slave); // the child holds its own handle now
 
-    let mut reader = pair.master.try_clone_reader().expect("clone reader");
-    let writer = pair.master.take_writer().expect("take writer");
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&output);
-    thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => sink.lock().expect("sink lock").extend_from_slice(&buf[..n]),
-            }
-        }
-    });
-
-    Session {
-        child,
-        writer,
-        output,
-        _master: pair.master,
-    }
+    attach(child, pair.master)
 }
 
 /// The absolute path to `zsh` (resolved via `command -v`, so it works whether zsh
@@ -1550,25 +1600,7 @@ fn spawn_program(program: &str, args: &[&str], env: &[(&str, &std::ffi::OsStr)])
     }
     let child = pair.slave.spawn_command(cmd).expect("spawn program");
     drop(pair.slave);
-    let mut reader = pair.master.try_clone_reader().expect("clone reader");
-    let writer = pair.master.take_writer().expect("take writer");
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&output);
-    thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => sink.lock().expect("sink lock").extend_from_slice(&buf[..n]),
-            }
-        }
-    });
-    Session {
-        child,
-        writer,
-        output,
-        _master: pair.master,
-    }
+    attach(child, pair.master)
 }
 
 /// The outer shell's rc hands the shell itself to `glimps --shell <this
@@ -1750,25 +1782,7 @@ fn an_unstartable_shell_falls_back_to_a_plain_one() {
     cmd.env("SHELL", "/bin/sh");
     let child = pair.slave.spawn_command(cmd).expect("spawn glimps");
     drop(pair.slave);
-    let mut reader = pair.master.try_clone_reader().expect("clone reader");
-    let writer = pair.master.take_writer().expect("take writer");
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&output);
-    thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => sink.lock().expect("sink lock").extend_from_slice(&buf[..n]),
-            }
-        }
-    });
-    let mut s = Session {
-        child,
-        writer,
-        output,
-        _master: pair.master,
-    };
+    let mut s = attach(child, pair.master);
     assert!(
         s.wait_for(b"starting /bin/sh without GLIMPS", FORMAT_BUDGET),
         "no fallback. Captured: {:?}",

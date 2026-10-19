@@ -1,6 +1,6 @@
 [package]
 name = "glimps"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # Floor is the highest MSRV in the locked dependency graph; verified with
 # `cargo +1.88 check --locked --all-targets`.

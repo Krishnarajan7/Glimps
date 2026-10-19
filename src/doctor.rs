@@ -779,9 +779,11 @@ mod tests {
             fish_config_dir_in(home, None),
             Path::new("/home/u/.config/fish")
         );
+        // Absolute on every platform (`/xdg` has no drive letter on Windows).
+        let xdg = env::temp_dir().join("xdg");
         assert_eq!(
-            fish_config_dir_in(home, Some("/xdg".into())),
-            Path::new("/xdg/fish")
+            fish_config_dir_in(home, Some(xdg.clone().into_os_string())),
+            xdg.join("fish")
         );
         assert_eq!(
             fish_config_dir_in(home, Some("relative".into())),
