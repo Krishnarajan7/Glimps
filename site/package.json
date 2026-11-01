@@ -23,7 +23,7 @@
     "@tanstack/router-plugin": "^1.168.18",
     "clsx": "^2.1.1",
     "framer-motion": "^13.4.4",
-    "lucide-react": "^0.575.0",
+    "lucide-react": "^1.64.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "tailwind-merge": "^3.5.0",
